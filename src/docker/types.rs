@@ -116,13 +116,13 @@ pub struct VolumeEntry {
     pub driver: String,
     #[serde(default, rename = "CreatedAt")]
     pub created: String,
-    #[serde(default)]
+    #[serde(default, rename = "UsageData")]
     pub usage_data: Option<VolumeUsage>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct VolumeUsage {
-    #[serde(default)]
+    #[serde(default, rename = "Size")]
     pub size: Option<i64>,
     #[serde(default, rename = "RefCount")]
     pub ref_count: i64,
@@ -434,7 +434,8 @@ pub struct DiskSummary {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct UsageTotals {
-    #[serde(default, rename = "Size")]
+    // Current daemons report `TotalSize`; keep `Size` for older ones.
+    #[serde(default, rename = "TotalSize", alias = "Size")]
     pub total_size: i64,
     #[serde(default, rename = "Reclaimable")]
     pub reclaimable: i64,

@@ -70,7 +70,7 @@ To get a launcher you can pin to the KDE dash:
 cp io.sdd.SimpleDockerDesktop.desktop ~/.local/share/applications/
 # edit Exec= to point at your absolute target/release/sdd path
 
-# 2. icon (the whale mark from assets/icon.svg, rendered to PNG)
+# 2. icon (the container-stack mark from assets/icon.svg, rendered to PNG)
 for s in 512 256 128 64 48 32; do
   mkdir -p ~/.local/share/icons/hicolor/${s}x${s}/apps
   magick assets/icon.png -resize ${s}x${s} \

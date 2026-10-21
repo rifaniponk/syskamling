@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use egui::{
-    Color32, FontData, FontFamily, FontId, Frame, Pos2, Rect, RichText, ScrollArea, Sense, Stroke,
-    TextStyle, Ui, Vec2, WidgetText,
+    Color32, FontData, FontFamily, FontId, Frame, Margin, Pos2, Rect, RichText, ScrollArea, Sense,
+    Stroke, TextStyle, Ui, Vec2,
 };
 
 use tokio::sync::mpsc;
@@ -153,11 +153,12 @@ struct Gui {
     status: String,
     error: Option<String>,
     filter: String,
+    /// substring filter on the log page
+    log_filter: String,
     selected_image: Option<String>,
     selected_volume: Option<String>,
     last_refresh: String,
     daemon_ok: bool,
-    docker_version: String,
     // --- dashboard data ---
     info: Option<SystemInfo>,
     df: Option<DiskSummary>,
@@ -190,11 +191,11 @@ impl Gui {
             status: String::new(),
             error: None,
             filter: String::new(),
+            log_filter: String::new(),
             selected_image: None,
             selected_volume: None,
             last_refresh: String::new(),
             daemon_ok: false,
-            docker_version: String::new(),
             info: None,
             df: None,
             events: Vec::new(),
@@ -284,10 +285,15 @@ struct SddApp {
     last_event: Instant,
     /// container ids with a live stats stream task
     streaming_stats: Vec<String>,
-    /// when each stats stream task was spawned (grace for first sample)
+    /// last sign of life per stats stream: spawn time, then each sample
     stats_spawned: HashMap<String, Instant>,
     /// container ids with a live log-follow task feeding the consolidated page
     all_logs_follow: Vec<String>,
+    // --- chrome ---
+    /// last successful container/image/volume refresh
+    last_sync: Option<Instant>,
+    /// status text currently shown as a toast, and when it appeared
+    toast: (String, Instant),
 }
 
 impl SddApp {
@@ -320,84 +326,169 @@ impl SddApp {
             streaming_stats: Vec::new(),
             stats_spawned: HashMap::new(),
             all_logs_follow: Vec::new(),
+            last_sync: None,
+            toast: (String::new(), Instant::now()),
         };
         app
     }
 }
 
-/// Dark palette tuned to the Docker-blue accent, roomier spacing.
+// ---------------------------------------------------------------------------
+// Theme
+// ---------------------------------------------------------------------------
+
+// Near-black canvas with layered surfaces and one blue accent. Green, amber
+// and red are kept for state (running, warnings, errors) so they keep their
+// meaning across the app.
+const BG: Color32 = Color32::from_rgb(11, 13, 18);
+const RAIL: Color32 = Color32::from_rgb(15, 18, 24);
+const SURFACE: Color32 = Color32::from_rgb(20, 24, 32);
+const SURFACE_HI: Color32 = Color32::from_rgb(28, 33, 43);
+const ELEVATED: Color32 = Color32::from_rgb(38, 45, 59);
+const WELL: Color32 = Color32::from_rgb(9, 11, 15);
+const BORDER: Color32 = Color32::from_rgb(35, 41, 53);
+const TEXT: Color32 = Color32::from_rgb(230, 233, 239);
+const MUTED: Color32 = Color32::from_rgb(140, 148, 166);
+const FAINT: Color32 = Color32::from_rgb(96, 104, 123);
+const ACCENT: Color32 = Color32::from_rgb(88, 148, 255);
+const GREEN: Color32 = Color32::from_rgb(52, 211, 153);
+const AMBER: Color32 = Color32::from_rgb(245, 183, 64);
+const RED: Color32 = Color32::from_rgb(244, 112, 112);
+const VIOLET: Color32 = Color32::from_rgb(167, 139, 250);
+const CYAN: Color32 = Color32::from_rgb(56, 205, 230);
+
+/// Heading face (a real bold font, not egui's color-only "strong").
+fn bold(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name("bold".into()))
+}
+
 fn apply_theme(ctx: &egui::Context) {
+    install_fonts(ctx);
     let mut style = (*ctx.style()).clone();
 
-    style.visuals.dark_mode = true;
-    style.visuals.extreme_bg_color = Color32::from_rgb(12, 16, 22);
-    style.visuals.panel_fill = Color32::from_rgb(18, 22, 30);
-    style.visuals.window_fill = Color32::from_rgb(24, 29, 39);
-    style.visuals.faint_bg_color = Color32::from_rgb(26, 31, 41);
-    style.visuals.override_text_color = Some(Color32::from_rgb(214, 220, 228));
-    style.visuals.window_corner_radius = egui::CornerRadius::same(10);
-    style.visuals.widgets.hovered.weak_bg_fill = Color32::from_rgb(38, 46, 60);
-    style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(46, 56, 74);
-    style.visuals.widgets.inactive.weak_bg_fill = Color32::from_rgb(30, 36, 48);
-    style.visuals.widgets.inactive.bg_fill = Color32::from_rgb(42, 52, 70);
-    style.visuals.widgets.active.weak_bg_fill = Color32::from_rgb(34, 60, 92);
-    style.visuals.widgets.active.bg_fill = Color32::from_rgb(48, 90, 140);
-    style.visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(18, 22, 30);
-    style.visuals.widgets.noninteractive.fg_stroke.color = Color32::from_rgb(214, 220, 228);
-    style.visuals.selection.bg_fill = Color32::from_rgba_premultiplied(40, 90, 150, 140);
-    style.visuals.selection.stroke.color = accent();
-    style.visuals.window_shadow = egui::epaint::Shadow {
-        offset: [0, 6],
-        blur: 18,
-        spread: 2,
-        color: Color32::from_rgba_premultiplied(0, 0, 0, 140),
+    let v = &mut style.visuals;
+    v.dark_mode = true;
+    v.panel_fill = BG;
+    v.window_fill = SURFACE;
+    v.window_stroke = Stroke::new(1.0_f32, BORDER);
+    v.extreme_bg_color = SURFACE;
+    v.faint_bg_color = SURFACE;
+    v.code_bg_color = SURFACE_HI;
+    v.override_text_color = None;
+    v.weak_text_color = Some(MUTED);
+    v.hyperlink_color = ACCENT;
+    v.window_corner_radius = egui::CornerRadius::same(14);
+    v.menu_corner_radius = egui::CornerRadius::same(10);
+    v.selection.bg_fill = ACCENT.gamma_multiply(0.35);
+    v.selection.stroke = Stroke::new(1.0_f32, ACCENT);
+    v.text_cursor.stroke = Stroke::new(2.0_f32, ACCENT);
+    v.window_shadow = egui::epaint::Shadow {
+        offset: [0, 12],
+        blur: 32,
+        spread: 0,
+        color: Color32::from_black_alpha(160),
     };
-    style.visuals.popup_shadow = style.visuals.window_shadow;
+    v.popup_shadow = egui::epaint::Shadow {
+        offset: [0, 6],
+        blur: 16,
+        spread: 0,
+        color: Color32::from_black_alpha(120),
+    };
 
-    // egui's built-in open/close animations (button press, slider handle,
-    // window fade) — cheap micro-interactions that come free with repaints.
-    style.animation_time = 0.18;
+    let w = &mut v.widgets;
+    w.noninteractive.bg_fill = SURFACE;
+    w.noninteractive.weak_bg_fill = SURFACE;
+    w.noninteractive.bg_stroke = Stroke::new(1.0_f32, BORDER);
+    w.noninteractive.fg_stroke = Stroke::new(1.0_f32, TEXT);
+    w.inactive.bg_fill = SURFACE_HI;
+    w.inactive.weak_bg_fill = SURFACE_HI;
+    w.inactive.bg_stroke = Stroke::new(1.0_f32, BORDER);
+    w.inactive.fg_stroke = Stroke::new(1.0_f32, TEXT);
+    w.hovered.bg_fill = ELEVATED;
+    w.hovered.weak_bg_fill = ELEVATED;
+    w.hovered.bg_stroke = Stroke::new(1.0_f32, Color32::from_rgb(56, 64, 80));
+    w.hovered.fg_stroke = Stroke::new(1.0_f32, TEXT);
+    w.active.bg_fill = Color32::from_rgb(46, 54, 70);
+    w.active.weak_bg_fill = Color32::from_rgb(46, 54, 70);
+    w.active.bg_stroke = Stroke::new(1.0_f32, ACCENT);
+    w.active.fg_stroke = Stroke::new(1.0_f32, TEXT);
+    w.open = w.active.clone();
+    for s in [
+        &mut w.noninteractive,
+        &mut w.inactive,
+        &mut w.hovered,
+        &mut w.active,
+        &mut w.open,
+    ] {
+        s.corner_radius = egui::CornerRadius::same(8);
+        s.expansion = 0.0;
+    }
 
-    style.spacing.item_spacing = Vec2::new(8.0, 6.0);
-    style.spacing.button_padding = Vec2::new(12.0, 7.0);
+    // egui's built-in open/close animations (button press, window fade) —
+    // cheap micro-interactions that come free with repaints.
+    style.animation_time = 0.16;
 
-    style.text_styles.insert(
-        TextStyle::Heading,
-        FontId::new(21.0, FontFamily::Proportional),
-    );
-    style.text_styles.insert(
-        TextStyle::Body,
-        FontId::new(14.5, FontFamily::Proportional),
-    );
-    style.text_styles.insert(
-        TextStyle::Button,
-        FontId::new(14.0, FontFamily::Proportional),
-    );
-    style.text_styles.insert(TextStyle::Monospace, FontId::new(13.0, FontFamily::Monospace));
-    style.text_styles.insert(TextStyle::Small, FontId::new(12.0, FontFamily::Proportional));
+    style.spacing.item_spacing = Vec2::new(8.0, 8.0);
+    style.spacing.button_padding = Vec2::new(14.0, 7.0);
+    style.spacing.interact_size.y = 30.0;
+    style.spacing.scroll = egui::style::ScrollStyle::floating();
+
+    style.text_styles.insert(TextStyle::Heading, bold(22.0));
+    style.text_styles.insert(TextStyle::Body, FontId::proportional(14.0));
+    style.text_styles.insert(TextStyle::Button, FontId::proportional(13.5));
+    style.text_styles.insert(TextStyle::Monospace, FontId::monospace(12.5));
+    style.text_styles.insert(TextStyle::Small, FontId::proportional(12.0));
 
     ctx.set_style(style);
+}
 
-    // Prefer a system monospace (DejaVu Sans Mono covers the box-drawing and
-    // geometric glyphs we use for status dots and button icons).
+/// System fonts, first match wins: Noto Sans for UI text (with a real bold
+/// face for headings), Hack or DejaVu Sans Mono for logs and ids, and DejaVu
+/// Sans for symbols (▶ ■ ↻ ⚠) the UI faces lack. egui's bundled fonts stay
+/// as the last fallback, so a missing file only changes the look.
+fn install_fonts(ctx: &egui::Context) {
+    const DIRS: [&str; 5] = [
+        "/usr/share/fonts/truetype/noto",
+        "/usr/share/fonts/noto",
+        "/usr/share/fonts/google-noto",
+        "/usr/share/fonts/truetype/dejavu",
+        "/usr/share/fonts/TTF",
+    ];
     let mut fonts = egui::FontDefinitions::default();
-    for path in [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    ] {
-        if let Ok(bytes) = std::fs::read(path) {
-            let name = format!(
-                "sys-{}",
-                std::path::Path::new(path).file_stem().unwrap().to_string_lossy()
-            );
-            fonts.font_data.insert(name.clone(), FontData::from_owned(bytes).into());
-            fonts
-                .families
-                .entry(FontFamily::Monospace)
-                .or_default()
-                .insert(0, name);
-        }
-    }
+    let mut load = |key: &str, files: &[&str]| -> Option<String> {
+        let bytes = files
+            .iter()
+            .flat_map(|f| DIRS.iter().map(move |d| format!("{d}/{f}")))
+            .chain(files.iter().map(|f| format!("/usr/share/fonts/truetype/hack/{f}")))
+            .find_map(|p| std::fs::read(p).ok())?;
+        fonts
+            .font_data
+            .insert(key.to_string(), FontData::from_owned(bytes).into());
+        Some(key.to_string())
+    };
+    let ui = load("sdd-ui", &["NotoSans-Regular.ttf", "DejaVuSans.ttf"]);
+    let ui_bold = load("sdd-bold", &["NotoSans-Bold.ttf", "DejaVuSans-Bold.ttf"]);
+    let mono = load(
+        "sdd-mono",
+        &["Hack-Regular.ttf", "DejaVuSansMono.ttf", "NotoSansMono-Regular.ttf"],
+    );
+    let symbols = load("sdd-symbols", &["DejaVuSans.ttf"]);
+
+    let stock_prop = fonts.families[&FontFamily::Proportional].clone();
+    let stock_mono = fonts.families[&FontFamily::Monospace].clone();
+    let family = |first: Option<String>, stock: &[String]| -> Vec<String> {
+        [first, symbols.clone()]
+            .into_iter()
+            .flatten()
+            .chain(stock.iter().cloned())
+            .collect()
+    };
+    let prop = family(ui, &stock_prop);
+    let bold_fam = family(ui_bold, &stock_prop);
+    let mono_fam = family(mono, &stock_mono);
+    fonts.families.insert(FontFamily::Proportional, prop);
+    fonts.families.insert(FontFamily::Name("bold".into()), bold_fam);
+    fonts.families.insert(FontFamily::Monospace, mono_fam);
     ctx.set_fonts(fonts);
 }
 
@@ -430,10 +521,17 @@ impl eframe::App for SddApp {
             ctx.request_repaint_after(Duration::from_millis(33));
         }
 
-        self.top_bar(ctx);
-        self.side_bar(ctx);
+        // A changed status line becomes a fresh toast.
+        if self.gui.status != self.toast.0 {
+            self.toast = (self.gui.status.clone(), Instant::now());
+        }
+
+        self.nav_rail(ctx);
+        if matches!(self.gui.tab, Tab::Containers | Tab::Images | Tab::Volumes) {
+            self.list_panel(ctx);
+        }
         self.center(ctx);
-        self.status_bar(ctx);
+        self.toast(ctx);
         if let Some(id) = self.gui.confirm_remove.clone() {
             self.remove_dialog(ctx, &id);
         }
@@ -501,8 +599,8 @@ impl SddApp {
             .collect();
         let g = &mut self.gui;
         // Streams whose container stopped are dead; streams for running
-        // containers get a grace period so a task that hasn't delivered its
-        // first sample yet isn't reaped (respawning would churn sockets).
+        // containers stay alive while a sample (or the spawn itself) landed
+        // in the last 10 s, so a slow first sample doesn't churn sockets.
         let mut dead: Vec<String> = Vec::new();
         self.streaming_stats.retain(|id| {
             if running.contains(id) {
@@ -571,7 +669,8 @@ impl SddApp {
             Msg::Refreshed(Ok(data)) => {
                 g.error = None;
                 g.daemon_ok = true;
-                if g.status.contains("refreshing") {
+                self.last_sync = Some(Instant::now());
+                if g.status.starts_with("Refreshing") {
                     g.status.clear();
                 }
                 if let Ok(c) = data.containers {
@@ -683,6 +782,7 @@ impl SddApp {
                 g.error = Some(format!("disk usage: {e}"));
             }
             Msg::Stats(id, s) => {
+                self.stats_spawned.insert(id.clone(), Instant::now());
                 // Drop samples from streams superseded by a newer generation.
                 let prev = g.stats.insert(id.clone(), (*s).clone());
                 if let Some(p) = prev {
@@ -718,45 +818,91 @@ impl SddApp {
         }
     }
 
-    fn top_bar(&mut self, ctx: &egui::Context) {
-        let g = &mut self.gui;
+    /// Left navigation rail: brand, engine status, sections, host footer.
+    fn nav_rail(&mut self, ctx: &egui::Context) {
         let mut new_tab: Option<Tab> = None;
         let mut refresh_now = false;
-        egui::TopBottomPanel::top("top").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading(RichText::new("SDD").color(accent()));
-                ui.label(
-                    RichText::new(if g.daemon_ok {
-                        format!("Docker {}", g.docker_version)
-                    } else {
-                        "daemon unreachable".to_string()
-                    })
-                    .weak(),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("⟳").on_hover_text("refresh now").clicked() {
-                        refresh_now = true;
-                    }
-                    ui.separator();
-                    // right-to-left: declare in reverse so they render L→R
-                    if let Some(t) = tab_button(ui, g.tab, "Logs", Tab::Logs) {
-                        new_tab = Some(t);
-                    }
-                    if let Some(t) = tab_button(ui, g.tab, "Volumes", Tab::Volumes) {
-                        new_tab = Some(t);
-                    }
-                    if let Some(t) = tab_button(ui, g.tab, "Images", Tab::Images) {
-                        new_tab = Some(t);
-                    }
-                    if let Some(t) = tab_button(ui, g.tab, "Containers", Tab::Containers) {
-                        new_tab = Some(t);
-                    }
-                    if let Some(t) = tab_button(ui, g.tab, "Dashboard", Tab::Dashboard) {
-                        new_tab = Some(t);
-                    }
+        let g = &self.gui;
+        let n_run = g.containers.iter().filter(|c| c.state == "running").count();
+        let items = [
+            (Tab::Dashboard, "Dashboard", String::new()),
+            (Tab::Containers, "Containers", format!("{n_run}/{}", g.containers.len())),
+            (Tab::Images, "Images", g.images.len().to_string()),
+            (Tab::Volumes, "Volumes", g.volumes.len().to_string()),
+            (Tab::Logs, "Logs", String::new()),
+        ];
+        let version = g.info.as_ref().map(|i| i.server_version.clone()).unwrap_or_default();
+        let synced = self.last_sync.map(|t| t.elapsed().as_secs());
+        egui::SidePanel::left("nav")
+            .exact_width(216.0)
+            .resizable(false)
+            .frame(Frame::NONE.fill(RAIL).inner_margin(Margin::symmetric(12, 18)))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add_space(4.0);
+                    let (r, _) = ui.allocate_exact_size(Vec2::splat(32.0), Sense::hover());
+                    logo_mark(ui.painter(), r);
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        ui.label(RichText::new("Simple Docker").font(bold(15.0)).color(TEXT));
+                        ui.label(RichText::new("Desktop for Linux").size(11.5).color(FAINT));
+                    });
                 });
+                ui.add_space(16.0);
+                engine_card(ui, g.daemon_ok, &version);
+                ui.add_space(20.0);
+                section_label(ui, "WORKSPACE");
+                ui.add_space(2.0);
+                ui.spacing_mut().item_spacing.y = 2.0;
+                for (tab, label, badge) in &items {
+                    if nav_item(ui, *tab, label, badge, g.tab == *tab) {
+                        new_tab = Some(*tab);
+                    }
+                }
+                // Footer pinned to the bottom: host card, sync time, refresh.
+                let footer_h = if g.info.is_some() { 156.0 } else { 72.0 };
+                ui.add_space((ui.available_height() - footer_h).max(12.0));
+                ui.spacing_mut().item_spacing.y = 8.0;
+                if let Some(i) = &g.info {
+                    Frame::NONE
+                        .fill(SURFACE)
+                        .stroke(Stroke::new(1.0_f32, BORDER))
+                        .corner_radius(10)
+                        .inner_margin(Margin::symmetric(12, 10))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            ui.label(RichText::new("HOST").size(10.5).color(FAINT));
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&i.operating_system).size(12.5).color(TEXT),
+                                )
+                                .truncate(),
+                            );
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} CPUs · {} RAM",
+                                    i.ncpu,
+                                    human_size(i.mem_total)
+                                ))
+                                .size(12.0)
+                                .color(MUTED),
+                            );
+                        });
+                }
+                let sync = match synced {
+                    Some(s) => format!("Synced {}", ago(s as i64)),
+                    None => "Connecting…".to_string(),
+                };
+                ui.horizontal(|ui| {
+                    ui.add_space(4.0);
+                    ui.label(RichText::new(sync).size(11.5).color(FAINT));
+                });
+                let w = ui.available_width();
+                if ghost_button(ui, "↻   Refresh now", w).clicked() {
+                    refresh_now = true;
+                }
             });
-        });
         if let Some(t) = new_tab {
             if t != self.gui.tab {
                 self.on_tab_change(t);
@@ -765,7 +911,7 @@ impl SddApp {
         if refresh_now {
             spawn_refresh(&self.rt, &self.docker, &self.tx);
             self.spawn_dashboard_pulls();
-            self.gui.status = "refreshing...".to_string();
+            self.gui.status = "Refreshing…".to_string();
         }
     }
 
@@ -820,96 +966,70 @@ impl SddApp {
         }
     }
 
-    fn side_bar(&mut self, ctx: &egui::Context) {
+    /// Second column on list tabs: title, search, state filter, rows.
+    fn list_panel(&mut self, ctx: &egui::Context) {
         let tab = self.gui.tab;
-        egui::SidePanel::left("side").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                let w = ui.available_width() - 8.0;
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.gui.filter)
-                        .hint_text("filter")
-                        .desired_width(w),
-                );
-            });
-            if tab == Tab::Containers {
-                let n_all = self.gui.containers.len();
-                let n_run = self
-                    .gui
-                    .containers
-                    .iter()
-                    .filter(|c| c.state == "running")
-                    .count();
-                let cur = self.gui.state_filter;
-                let mut set = None;
+        egui::SidePanel::left("list")
+            .resizable(true)
+            .default_width(360.0)
+            .width_range(300.0..=560.0)
+            .frame(Frame::NONE.fill(BG).inner_margin(Margin {
+                left: 16,
+                right: 14,
+                top: 22,
+                bottom: 8,
+            }))
+            .show(ctx, |ui| {
+                let (title, count, hint) = match tab {
+                    Tab::Containers => (
+                        "Containers",
+                        self.gui.containers.len(),
+                        "Search name, image or state",
+                    ),
+                    Tab::Images => ("Images", self.gui.images.len(), "Search tags"),
+                    _ => ("Volumes", self.gui.volumes.len(), "Search volumes"),
+                };
                 ui.horizontal(|ui| {
-                    if chip(ui, cur == StateFilter::Running, format!("● running {n_run}")) {
-                        set = Some(StateFilter::Running);
-                    }
-                    if chip(
-                        ui,
-                        cur == StateFilter::Stopped,
-                        format!("○ stopped {}", n_all - n_run),
-                    ) {
-                        set = Some(StateFilter::Stopped);
-                    }
-                    if chip(ui, cur == StateFilter::All, format!("all {n_all}")) {
-                        set = Some(StateFilter::All);
-                    }
+                    ui.label(RichText::new(title).font(bold(20.0)).color(TEXT));
+                    ui.label(RichText::new(count.to_string()).size(14.0).color(FAINT));
                 });
-                if let Some(f) = set {
-                    self.gui.state_filter = f;
-                    self.gui.selected = None;
+                ui.add_space(8.0);
+                search_box(ui, &mut self.gui.filter, hint);
+                if tab == Tab::Containers {
+                    ui.add_space(4.0);
+                    let n_all = self.gui.containers.len();
+                    let n_run = self
+                        .gui
+                        .containers
+                        .iter()
+                        .filter(|c| c.state == "running")
+                        .count();
+                    let opts = [
+                        (StateFilter::All, format!("All  {n_all}")),
+                        (StateFilter::Running, format!("Running  {n_run}")),
+                        (StateFilter::Stopped, format!("Stopped  {}", n_all - n_run)),
+                    ];
+                    if let Some(f) = segmented(ui, &opts, self.gui.state_filter) {
+                        self.gui.state_filter = f;
+                        self.gui.selected = None;
+                    }
                 }
-            }
-            ui.separator();
-            match tab {
-                Tab::Dashboard => self.event_feed(ui),
-                Tab::Containers => self.container_list(ui),
-                Tab::Images => self.image_list(ui),
-                Tab::Volumes => self.volume_list(ui),
-                Tab::Logs => self.logs_summary(ui),
-            }
-        });
-    }
-
-    /// Compact lifecycle feed shown in the dashboard sidebar.
-    fn event_feed(&mut self, ui: &mut Ui) {
-        let g = &self.gui;
-        ui.label(RichText::new("recent events").strong().small());
-        if !g.events_active {
-            ui.label(RichText::new("listening…").weak().small());
-        }
-        ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .stick_to_bottom(true)
-            .show(ui, |ui| {
-                for e in g.events.iter().rev().take(80) {
-                    let action = e.action.split(':').next().unwrap_or(&e.action);
-                    let colored = match action {
-                        "start" | "create" | "attach" => Color32::from_rgb(110, 210, 150),
-                        "die" | "kill" | "stop" => Color32::from_rgb(230, 130, 110),
-                        _ => Color32::from_rgb(150, 155, 165),
-                    };
-                    let t = ((e.time % 86400) / 3600, (e.time % 3600) / 60, e.time % 60);
-                    ui.label(
-                        RichText::new(format!(
-                            "{:02}:{:02}:{:02}  {} · {}",
-                            t.0,
-                            t.1,
-                            t.2,
-                            e.container_name(),
-                            action
-                        ))
-                        .small()
-                        .color(colored),
-                    );
+                ui.add_space(8.0);
+                match tab {
+                    Tab::Containers => self.container_list(ui),
+                    Tab::Images => self.image_list(ui),
+                    _ => self.volume_list(ui),
                 }
             });
     }
 
     fn container_list(&mut self, ui: &mut Ui) {
-        // Snapshot what the row widgets need so the closure never borrows self.
+        // Snapshot what the rows need so the closure never borrows self.
         let rows = self.gui.filtered();
+        if rows.is_empty() {
+            empty_state(ui, "No containers match", "Try another search or filter.");
+            return;
+        }
         let sel = self.gui.selected;
         let busy_id = self
             .gui
@@ -926,89 +1046,97 @@ impl SddApp {
         ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
+                let time = ui.input(|i| i.time);
                 for (i, c) in rows {
+                    let (rect, resp) = ui.allocate_exact_size(
+                        Vec2::new(ui.available_width(), 58.0),
+                        Sense::click(),
+                    );
+                    if resp.clicked() {
+                        new_sel = Some(i);
+                    }
+                    if !ui.is_rect_visible(rect) {
+                        continue;
+                    }
                     let running = c.state == "running";
-                    let is_sel = sel == Some(i);
                     let busy = !busy_id.is_empty() && busy_id == c.id;
                     let pulse = dot_anim.get(&c.id).copied().unwrap_or(0.0);
-                    let frame = Frame::NONE.fill(row_fill(is_sel, pulse));
-                    // Make the whole row a click target: lay the widgets out
-                    // first, then overlay an invisible click rect across the
-                    // full row so clicking anywhere (dot, name, state label, or
-                    // empty space) selects it.
-                    let row_id = ui.id().with(("row", &c.id));
-                    frame.show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(dot(running, pulse));
-                            if busy {
-                                ui.add(egui::Spinner::new().size(14.0).color(accent()));
-                            }
-                            let mk = || {
-                                let t = RichText::new(c.short_name()).strong();
-                                if busy {
-                                    RichText::new(t.text()).weak()
-                                } else {
-                                    t
-                                }
-                            };
-                            ui.add(tx(mk()));
-                            // live mini sparkline + cpu/mem for running rows
-                            if running {
-                                if let Some(h) = hist.get(&c.id) {
-                                    if h.cpu.len() >= 2 {
-                                        sparkline(ui, &h.cpu, accent(), Vec2::new(46.0, 14.0));
-                                    }
-                                }
-                                if let Some(s) = stats.get(&c.id) {
-                                    let cpu = StatsSample::cpu_percent(
-                                        prev_stats.get(&c.id),
-                                        s,
-                                    )
-                                    .unwrap_or(0.0);
-                                    ui.label(
-                                        RichText::new(format!("{cpu:.0}%"))
-                                            .small()
-                                            .monospace(),
-                                    );
-                                    if let Some(mp) = s.mem_percent() {
-                                        ui.label(
-                                            RichText::new(format!("{:.0}%", mp))
-                                                .small()
-                                                .monospace()
-                                                .weak(),
-                                        );
-                                    }
-                                }
-                            }
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                let state = RichText::new(&c.state).small().color(if running {
-                                    Color32::from_rgb(110, 210, 150)
-                                } else {
-                                    Color32::from_rgb(150, 155, 165)
-                                });
-                                ui.label(state);
-                            });
-                        });
-                        let row_rect = ui.min_rect();
-                        let click = ui.interact(row_rect, row_id, Sense::click());
-                        if click.hovered() {
-                            click.clone().on_hover_text(format!(
-                                "{}\n{}\n{}\n{}",
-                                c.short_name(),
-                                c.image,
-                                c.status,
-                                c.port_summary()
-                            ));
+                    let p = ui.painter();
+                    row_bg(p, rect, sel == Some(i), resp.hovered());
+
+                    let dot_c = Pos2::new(rect.left() + 18.0, rect.center().y);
+                    if busy {
+                        spinner_at(p, time, dot_c, 6.0, ACCENT);
+                        ui.ctx().request_repaint();
+                    } else {
+                        status_dot(p, dot_c, running, pulse);
+                    }
+
+                    let right_w = if running { 118.0 } else { 74.0 };
+                    let left = rect.left() + 34.0;
+                    let text_w = (rect.width() - 34.0 - right_w - 8.0).max(40.0);
+                    let name = elide(p, c.short_name(), FontId::proportional(14.0), TEXT, text_w);
+                    p.galley(Pos2::new(left, rect.top() + 10.0), name, TEXT);
+                    let sub = elide(
+                        p,
+                        format!("{} · {}", c.image, c.status),
+                        FontId::proportional(12.0),
+                        MUTED,
+                        text_w,
+                    );
+                    p.galley(Pos2::new(left, rect.top() + 32.0), sub, MUTED);
+
+                    if running {
+                        if let Some(h) = hist.get(&c.id) {
+                            let r = Rect::from_min_size(
+                                Pos2::new(rect.right() - 118.0, rect.top() + 17.0),
+                                Vec2::new(52.0, 24.0),
+                            );
+                            let skip = h.cpu.len().saturating_sub(30);
+                            sparkline(p, r, h.cpu.iter().skip(skip).copied(), ACCENT, 5.0);
                         }
-                        if click.clicked() {
-                            new_sel = Some(i);
+                        if let Some(s) = stats.get(&c.id) {
+                            let cpu = StatsSample::cpu_percent(prev_stats.get(&c.id), s)
+                                .unwrap_or(0.0)
+                                .max(0.0);
+                            p.text(
+                                Pos2::new(rect.right() - 12.0, rect.top() + 13.0),
+                                egui::Align2::RIGHT_TOP,
+                                format!("{cpu:.1}%"),
+                                FontId::monospace(12.5),
+                                TEXT,
+                            );
+                            p.text(
+                                Pos2::new(rect.right() - 12.0, rect.top() + 32.0),
+                                egui::Align2::RIGHT_TOP,
+                                human_size(s.mem_usage()),
+                                FontId::monospace(11.5),
+                                FAINT,
+                            );
                         }
-                    });
+                    } else {
+                        let label = capitalize(&c.state);
+                        pill_at(p, Pos2::new(rect.right() - 12.0, rect.center().y), &label, FAINT, SURFACE_HI);
+                    }
+                    let ports = c.port_summary();
+                    resp.on_hover_text(format!(
+                        "{}\n{}{}",
+                        c.image,
+                        c.status,
+                        if ports.is_empty() { String::new() } else { format!("\n{ports}") }
+                    ));
                 }
             });
 
         if let Some(i) = new_sel {
             self.gui.selected = Some(i);
+            // The detail page shows this container's logs inline.
+            if let Some(id) = self.gui.containers.get(i).map(|c| c.id.clone()) {
+                if self.gui.logs_container.as_deref() != Some(id.as_str()) {
+                    self.open_logs(&id);
+                }
+            }
         }
     }
 
@@ -1016,45 +1144,61 @@ impl SddApp {
         let g = &self.gui;
         let f = g.filter.to_lowercase();
         let sel = g.selected_image.clone();
+        let rows: Vec<&ImageSummary> = g
+            .images
+            .iter()
+            .filter(|im| f.is_empty() || im.tag().to_lowercase().contains(&f))
+            .collect();
+        if rows.is_empty() {
+            empty_state(ui, "No images match", "Try another search.");
+            return;
+        }
         let mut new_sel: Option<Option<String>> = None;
         ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                for im in &g.images {
-                    let tag = im.tag();
-                    if !f.is_empty() && !tag.to_lowercase().contains(&f) {
+                ui.spacing_mut().item_spacing.y = 4.0;
+                for im in rows {
+                    let (rect, resp) = ui.allocate_exact_size(
+                        Vec2::new(ui.available_width(), 58.0),
+                        Sense::click(),
+                    );
+                    let is_sel = sel.as_deref() == Some(im.id.as_str());
+                    if resp.clicked() {
+                        new_sel = Some(if is_sel { None } else { Some(im.id.clone()) });
+                    }
+                    if !ui.is_rect_visible(rect) {
                         continue;
                     }
-                    let is_sel = sel.as_deref() == Some(im.id.as_str());
-                    let frame = Frame::NONE.fill(if is_sel {
-                        Color32::from_rgb(34, 60, 92)
+                    let p = ui.painter();
+                    row_bg(p, rect, is_sel, resp.hovered());
+                    let in_use = im.containers > 0;
+                    icon_tile(p, rect, Tab::Images, if in_use { ACCENT } else { FAINT });
+                    let left = rect.left() + 54.0;
+                    let text_w = (rect.width() - 54.0 - 86.0).max(40.0);
+                    let tag = im.tag();
+                    let (repo, version) = tag.rsplit_once(':').unwrap_or((tag.as_str(), ""));
+                    let name = elide(p, repo.to_string(), FontId::proportional(14.0), TEXT, text_w);
+                    p.galley(Pos2::new(left, rect.top() + 10.0), name, TEXT);
+                    let usage = if in_use {
+                        format!("{} in use", im.containers)
                     } else {
-                        Color32::TRANSPARENT
-                    });
-                    let row_id = ui.id().with(("img", &im.id));
-                    frame.show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(&tag).strong());
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(format!("{}  {}", im.short_id(), human_size(im.size)))
-                                    .weak(),
-                            );
-                            if im.containers > 0 {
-                                ui.label(
-                                    RichText::new(format!("{} containers", im.containers))
-                                        .small()
-                                        .weak(),
-                                );
-                            }
-                        });
-                        ui.separator();
-                        let click = ui.interact(ui.min_rect(), row_id, Sense::click());
-                        if click.clicked() {
-                            new_sel = Some(if is_sel { None } else { Some(im.id.clone()) });
-                        }
-                    });
+                        "unused".to_string()
+                    };
+                    let sub = if version.is_empty() {
+                        format!("{} · {usage}", im.short_id())
+                    } else {
+                        format!("{version} · {} · {usage}", im.short_id())
+                    };
+                    let sub = elide(p, sub, FontId::proportional(12.0), MUTED, text_w);
+                    p.galley(Pos2::new(left, rect.top() + 32.0), sub, MUTED);
+                    p.text(
+                        Pos2::new(rect.right() - 12.0, rect.center().y),
+                        egui::Align2::RIGHT_CENTER,
+                        human_size(im.size),
+                        FontId::monospace(12.0),
+                        MUTED,
+                    );
                 }
             });
         if let Some(s) = new_sel {
@@ -1066,48 +1210,66 @@ impl SddApp {
         let g = &self.gui;
         let f = g.filter.to_lowercase();
         let sel = g.selected_volume.clone();
+        let rows: Vec<&docker::VolumeEntry> = g
+            .volumes
+            .iter()
+            .filter(|v| f.is_empty() || v.name.to_lowercase().contains(&f))
+            .collect();
+        if rows.is_empty() {
+            empty_state(ui, "No volumes match", "Try another search.");
+            return;
+        }
         let mut new_sel: Option<Option<String>> = None;
         ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                for v in &g.volumes {
-                    if !f.is_empty() && !v.name.to_lowercase().contains(&f) {
+                ui.spacing_mut().item_spacing.y = 4.0;
+                for v in rows {
+                    let (rect, resp) = ui.allocate_exact_size(
+                        Vec2::new(ui.available_width(), 58.0),
+                        Sense::click(),
+                    );
+                    let is_sel = sel.as_deref() == Some(v.name.as_str());
+                    if resp.clicked() {
+                        new_sel = Some(if is_sel { None } else { Some(v.name.clone()) });
+                    }
+                    if !ui.is_rect_visible(rect) {
                         continue;
                     }
-                    let is_sel = sel.as_deref() == Some(v.name.as_str());
-                    let frame = Frame::NONE.fill(if is_sel {
-                        Color32::from_rgb(34, 60, 92)
-                    } else {
-                        Color32::TRANSPARENT
-                    });
-                    let row_id = ui.id().with(("vol", &v.name));
-                    frame.show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(&v.name).strong());
-                        });
-                        ui.horizontal(|ui| {
-                            let size = v
-                                .usage_data
-                                .as_ref()
-                                .and_then(|u| u.size)
-                                .map(human_size)
-                                .unwrap_or_else(|| "?".into());
-                            ui.label(
-                                RichText::new(format!(
-                                    "driver={} · {} · {} refs",
-                                    v.driver,
-                                    size,
-                                    v.usage_data.as_ref().map(|u| u.ref_count).unwrap_or(0)
-                                ))
-                                .weak(),
-                            );
-                        });
-                        ui.separator();
-                        let click = ui.interact(ui.min_rect(), row_id, Sense::click());
-                        if click.clicked() {
-                            new_sel = Some(if is_sel { None } else { Some(v.name.clone()) });
-                        }
-                    });
+                    let p = ui.painter();
+                    row_bg(p, rect, is_sel, resp.hovered());
+                    let refs = v.usage_data.as_ref().map(|u| u.ref_count);
+                    icon_tile(p, rect, Tab::Volumes, if refs != Some(0) { VIOLET } else { FAINT });
+                    let left = rect.left() + 54.0;
+                    let text_w = (rect.width() - 54.0 - 86.0).max(40.0);
+                    let name = elide(p, v.name.clone(), FontId::proportional(14.0), TEXT, text_w);
+                    p.galley(Pos2::new(left, rect.top() + 10.0), name, TEXT);
+                    let sub = elide(
+                        p,
+                        match refs {
+                            Some(1) => format!("{} · 1 ref", v.driver),
+                            Some(n) => format!("{} · {n} refs", v.driver),
+                            None => format!("{} · created {}", v.driver, v.created.get(..10).unwrap_or("?")),
+                        },
+                        FontId::proportional(12.0),
+                        MUTED,
+                        text_w,
+                    );
+                    p.galley(Pos2::new(left, rect.top() + 32.0), sub, MUTED);
+                    let size = v
+                        .usage_data
+                        .as_ref()
+                        .and_then(|u| u.size)
+                        .filter(|s| *s >= 0)
+                        .map(human_size)
+                        .unwrap_or_default();
+                    p.text(
+                        Pos2::new(rect.right() - 12.0, rect.center().y),
+                        egui::Align2::RIGHT_CENTER,
+                        size,
+                        FontId::monospace(12.0),
+                        MUTED,
+                    );
                 }
             });
         if let Some(s) = new_sel {
@@ -1115,203 +1277,90 @@ impl SddApp {
         }
     }
 
-    fn logs_summary(&mut self, ui: &mut Ui) {
-        let g = &mut self.gui;
-        if g.logs_container.is_none() {
-            ui.label(
-                RichText::new(
-                    "Select a container to see its logs here, or open this tab to load all containers.",
-                )
-                .weak(),
-            );
-            return;
-        }
-        let all = g.logs_container.as_deref() == Some("__all__");
-        ui.label(RichText::new(&g.logs_container_name).strong());
-        ui.label(
-            RichText::new(format!(
-                "{} lines · {}",
-                g.logs.len(),
-                if g.logs_active { "streaming" } else { "stopped" }
-            ))
-            .weak(),
-        );
-        ui.add_space(6.0);
-        if ui
-            .button(if g.logs_follow { "Pause follow" } else { "Resume follow" })
-            .clicked()
-        {
-            g.logs_follow = !g.logs_follow;
-        }
-        let reload_all = all && ui.button("Reload all logs").clicked();
-        let reopen = !all && g.logs_container.is_some() && ui.button("Reopen stream").clicked();
-        let to_all = !all && ui.button("Show all containers").clicked();
-        if reload_all || to_all {
-            self.load_all_logs();
-        } else if reopen {
-            let id = g.logs_container.clone().unwrap();
-            self.open_logs(&id);
-        }
-    }
-
-    fn image_detail(&mut self, ui: &mut Ui) {
-        let Some(id) = self.gui.selected_image.clone() else {
-            ui.label(RichText::new("Select an image in the list to see details.").weak());
-            return;
-        };
-        let Some(im) = self.gui.images.iter().find(|i| i.id == id).cloned() else {
-            ui.label(RichText::new("That image no longer exists.").weak());
-            return;
-        };
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(im.tag()).heading());
-                    ui.label(
-                        RichText::new(format!("· {}", im.short_id()))
-                            .weak()
-                            .monospace(),
-                    );
-                });
-                ui.add_space(4.0);
-                let avail = ui.available_width();
-                let col_w = (avail - 16.0) / 2.0;
-                ui.horizontal(|ui| {
-                    ui.vertical(|ui| {
-                        ui.set_width(col_w);
-                        detail_row(ui, "size", &human_size(im.size));
-                        detail_row(ui, "shared size", &human_size(im.shared_size));
-                        detail_row(ui, "unique size", &human_size(im.size - im.shared_size));
-                        detail_row(ui, "used by", &format!("{} containers", im.containers));
-                        if im.created > 0 {
-                            detail_row(ui, "created", &fmt_epoch(im.created));
-                        }
-                    });
-                    ui.vertical(|ui| {
-                        ui.set_width(col_w);
-                        ui.label(RichText::new("tags").strong().small());
-                        if im.repo_tags.is_empty() {
-                            ui.label(RichText::new("<none>").weak().monospace());
-                        } else {
-                            for t in &im.repo_tags {
-                                ui.label(RichText::new(t).monospace().small());
-                            }
-                        }
-                        ui.add_space(6.0);
-                        ui.label(RichText::new("used by containers").strong().small());
-                        let users: Vec<String> = self
-                            .gui
-                            .containers
-                            .iter()
-                            .filter(|c| c.image == im.tag() || c.image.contains(im.short_id()))
-                            .map(|c| c.short_name())
-                            .collect();
-                        if users.is_empty() {
-                            ui.label(RichText::new("none").weak().small());
-                        } else {
-                            for u in users.iter().take(20) {
-                                ui.label(RichText::new(u).monospace().small());
-                            }
-                        }
-                    });
-                });
-                ui.add_space(8.0);
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("disk share").strong().small());
-                    let total = self
-                        .gui
-                        .df
-                        .as_ref()
-                        .map(|d| d.layers_size)
-                        .filter(|v| *v > 0)
-                        .unwrap_or_else(|| self.gui.images.iter().map(|i| i.size).sum::<i64>().max(1));
-                    let frac = (im.size as f64 / total.max(1) as f64).clamp(0.0, 1.0);
-                    gauge(ui, "", frac * 100.0, accent(), 100.0);
-                    ui.label(
-                        RichText::new(format!(
-                            "of {} total layers",
-                            human_size(total)
-                        ))
-                        .small()
-                        .weak(),
-                    );
-                });
+    fn center(&mut self, ctx: &egui::Context) {
+        let tab = self.gui.tab;
+        egui::CentralPanel::default()
+            .frame(Frame::NONE.fill(BG).inner_margin(Margin {
+                left: 28,
+                right: 28,
+                top: 22,
+                bottom: 18,
+            }))
+            .show(ctx, |ui| {
+                self.error_banner(ui);
+                match tab {
+                    Tab::Dashboard => self.dashboard_view(ui),
+                    Tab::Logs => self.logs_view(ui),
+                    Tab::Containers => self.container_detail(ui),
+                    Tab::Images => self.image_detail(ui),
+                    Tab::Volumes => self.volume_detail(ui),
+                }
             });
     }
 
-    fn volume_detail(&mut self, ui: &mut Ui) {
-        let Some(name) = self.gui.selected_volume.clone() else {
-            ui.label(RichText::new("Select a volume in the list to see details.").weak());
+    fn error_banner(&mut self, ui: &mut Ui) {
+        let Some(e) = self.gui.error.clone() else {
             return;
         };
-        let Some(v) = self.gui.volumes.iter().find(|v| v.name == name).cloned() else {
-            ui.label(RichText::new("That volume no longer exists.").weak());
-            return;
-        };
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(&v.name).heading());
-        });
-        ui.add_space(4.0);
-        detail_row(ui, "driver", &v.driver);
-        detail_row(
-            ui,
-            "size",
-            &v.usage_data
-                .as_ref()
-                .and_then(|u| u.size)
-                .map(human_size)
-                .unwrap_or_else(|| "not reported by driver".into()),
-        );
-        detail_row(
-            ui,
-            "references",
-            &v.usage_data
-                .as_ref()
-                .map(|u| u.ref_count.to_string())
-                .unwrap_or_else(|| "?".into()),
-        );
-        if !v.created.is_empty() {
-            detail_row(ui, "created", &v.created);
-        }
-        ui.add_space(8.0);
-        ui.separator();
-        ui.label(RichText::new("in use by").strong().small());
-        // Which containers mount this volume: scan the container list's
-        // mount info if present, else fall back to name-prefix matching.
-        let users: Vec<String> = self
-            .gui
-            .containers
-            .iter()
-            .filter(|c| c.names.iter().any(|n| n.contains(&v.name)))
-            .map(|c| c.short_name())
-            .collect();
-        if users.is_empty() {
-            ui.label(
-                RichText::new(
-                    "no direct container matches (list endpoint omits mounts; \
-                     inspect via docker CLI for exact mounts)",
-                )
-                .weak()
-                .small(),
-            );
-        } else {
-            for u in users {
-                ui.label(RichText::new(u).monospace().small());
-            }
+        let mut dismiss = false;
+        Frame::NONE
+            .fill(RED.gamma_multiply(0.10))
+            .stroke(Stroke::new(1.0_f32, RED.gamma_multiply(0.45)))
+            .corner_radius(10)
+            .inner_margin(Margin::symmetric(14, 10))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("⚠").size(15.0).color(RED));
+                    let w = ui.available_width() - 80.0;
+                    ui.allocate_ui(Vec2::new(w, 0.0), |ui| {
+                        ui.add(egui::Label::new(RichText::new(&e).size(13.0).color(TEXT)).wrap());
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(egui::Button::new(RichText::new("Dismiss").size(12.5).color(MUTED)).frame(false))
+                            .clicked()
+                        {
+                            dismiss = true;
+                        }
+                    });
+                });
+            });
+        ui.add_space(14.0);
+        if dismiss {
+            self.gui.error = None;
         }
     }
 
-    fn center(&mut self, ctx: &egui::Context) {
-        let tab = self.gui.tab;
-        egui::CentralPanel::default().show(ctx, |ui| match tab {
-            Tab::Dashboard => self.dashboard_view(ui),
-            Tab::Logs => self.logs_view(ui),
-            Tab::Containers => self.container_detail(ui),
-            Tab::Images => self.image_detail(ui),
-            Tab::Volumes => self.volume_detail(ui),
-        });
+    /// Short-lived status toast in the bottom-right corner.
+    fn toast(&mut self, ctx: &egui::Context) {
+        let (text, at) = &self.toast;
+        let age = at.elapsed().as_secs_f32();
+        if text.is_empty() || age > 4.0 {
+            return;
+        }
+        let alpha = ((4.0 - age) / 0.4).clamp(0.0, 1.0) * (age / 0.15).clamp(0.0, 1.0);
+        let lift = 8.0 * (1.0 - (age / 0.2).clamp(0.0, 1.0));
+        egui::Area::new(egui::Id::new("toast"))
+            .anchor(egui::Align2::RIGHT_BOTTOM, Vec2::new(-24.0, -20.0 + lift))
+            .interactable(false)
+            .show(ctx, |ui| {
+                ui.set_opacity(alpha);
+                Frame::NONE
+                    .fill(ELEVATED)
+                    .stroke(Stroke::new(1.0_f32, Color32::from_rgb(56, 64, 80)))
+                    .corner_radius(10)
+                    .shadow(ctx.style().visuals.popup_shadow)
+                    .inner_margin(Margin::symmetric(14, 10))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                            ui.painter().circle_filled(r.center(), 4.0, GREEN);
+                            ui.label(RichText::new(capitalize(text)).size(13.0).color(TEXT));
+                        });
+                    });
+            });
+        ctx.request_repaint_after(Duration::from_millis(33));
     }
 
     // ------------------------------------------------------------------
@@ -1319,121 +1368,217 @@ impl SddApp {
     // ------------------------------------------------------------------
 
     fn dashboard_view(&mut self, ui: &mut Ui) {
-        egui::ScrollArea::vertical()
+        let g = &self.gui;
+        let sub = match &g.info {
+            Some(i) => format!(
+                "Docker {} · {} · {} CPUs · {} memory",
+                i.server_version,
+                i.operating_system,
+                i.ncpu,
+                human_size(i.mem_total)
+            ),
+            None => "Connecting to the Docker engine…".to_string(),
+        };
+        let ok = g.daemon_ok;
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| page_header(ui, "Dashboard", &sub));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                live_pill(ui, ok);
+            });
+        });
+        ui.add_space(16.0);
+        ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                self.stat_cards(ui);
-                ui.add_space(10.0);
-                self.system_charts(ui);
-                ui.add_space(10.0);
-                self.top_containers(ui);
-                ui.add_space(10.0);
+                self.kpi_cards(ui);
+                ui.add_space(14.0);
+                self.usage_charts(ui);
+                ui.add_space(14.0);
+                if ui.available_width() > 860.0 {
+                    ui.scope(|ui| {
+                        ui.spacing_mut().item_spacing.x = 14.0;
+                        ui.columns(2, |cols| {
+                            self.top_containers(&mut cols[0]);
+                            self.event_feed(&mut cols[1]);
+                        });
+                    });
+                } else {
+                    self.top_containers(ui);
+                    ui.add_space(14.0);
+                    self.event_feed(ui);
+                }
+                ui.add_space(14.0);
                 self.disk_section(ui);
+                ui.add_space(8.0);
             });
     }
 
-    fn stat_cards(&mut self, ui: &mut Ui) {
+    /// Host-wide series summed over every container with live stats:
+    /// (cpu % of host, memory bytes, net bytes/s in+out).
+    fn host_series(&self) -> (Vec<f64>, Vec<f64>, Vec<f64>, usize) {
         let g = &self.gui;
-        let n_run = g.containers.iter().filter(|c| c.state == "running").count();
-        let n_stop = g.containers.len() - n_run;
-        let n_img = g.images.len();
-        let n_vol = g.volumes.len();
-        // cpu% is per-core normalized (0..100 per container), so divide the
-        // sum by core count to get a host-wide percentage.
         let ncpu = g.info.as_ref().map(|i| i.ncpu.max(1)).unwrap_or(1) as f64;
-        let cpu_sum: f64 = g
+        let mut cpu = vec![0.0; HIST];
+        let mut mem = vec![0.0; HIST];
+        let mut net = vec![0.0; HIST];
+        let mut samples = 0;
+        for (id, h) in &g.hist {
+            if !g.stats.contains_key(id) {
+                continue;
+            }
+            samples = samples.max(h.cpu.len());
+            let off = HIST - h.cpu.len();
+            for (i, v) in h.cpu.iter().enumerate() {
+                cpu[off + i] += v / ncpu;
+            }
+            let off = HIST - h.mem.len();
+            for (i, v) in h.mem.iter().enumerate() {
+                mem[off + i] += *v as f64;
+            }
+            let off = HIST - h.rx.len();
+            for (i, (rx, tx)) in h.rx.iter().zip(h.tx.iter()).enumerate() {
+                net[off + i] += (*rx + *tx) as f64;
+            }
+        }
+        // Only the window that actually has samples, so charts don't start
+        // with a flat run of zeros.
+        let skip = HIST - samples;
+        (
+            cpu[skip..].to_vec(),
+            mem[skip..].to_vec(),
+            net[skip..].to_vec(),
+            samples,
+        )
+    }
+
+    fn kpi_cards(&mut self, ui: &mut Ui) {
+        let g = &self.gui;
+        let n_all = g.containers.len();
+        let n_run = g.containers.iter().filter(|c| c.state == "running").count();
+        let ncpu = g.info.as_ref().map(|i| i.ncpu.max(1)).unwrap_or(1) as f64;
+        // cpu_percent is docker-style (100% per core), so divide the sum by
+        // the core count for a host-wide figure.
+        let cpu_total: f64 = g
             .containers
             .iter()
             .filter(|c| c.state == "running")
-            .filter_map(|c| {
-                StatsSample::cpu_percent(g.prev_stats.get(&c.id), g.stats.get(&c.id)?)
-            })
-            .sum();
-        let cpu_total = cpu_sum / ncpu;
+            .filter_map(|c| StatsSample::cpu_percent(g.prev_stats.get(&c.id), g.stats.get(&c.id)?))
+            .sum::<f64>()
+            / ncpu;
         let mem_total: i64 = g
             .containers
             .iter()
             .filter(|c| c.state == "running")
             .filter_map(|c| g.stats.get(&c.id).map(|s| s.mem_usage()))
             .sum();
-        let host_mem = g
-            .info
+        let host_mem = g.info.as_ref().map(|i| i.mem_total).unwrap_or(0);
+        let (disk_total, disk_reclaim) = g
+            .df
             .as_ref()
-            .map(|i| human_size(i.mem_total))
-            .unwrap_or_else(|| "host".into());
+            .map(|d| {
+                [&d.image_usage, &d.container_usage, &d.volume_usage, &d.build_cache_usage]
+                    .into_iter()
+                    .flatten()
+                    .fold((0, 0), |(t, r), u| (t + u.total_size, r + u.reclaimable))
+            })
+            .unwrap_or((0, 0));
+        let (cpu_series, mem_series, _, _) = self.host_series();
 
-        let avail = ui.available_width();
-        let card_w = ((avail - 4.0 * 8.0) / 5.0).max(140.0);
-        ui.horizontal(|ui| {
-            ui.set_min_height(74.0);
-            stat_card(ui, "running", &n_run.to_string(), "containers", card_w, Color32::from_rgb(90, 200, 130));
-            stat_card(ui, "stopped", &n_stop.to_string(), "containers", card_w, Color32::from_rgb(150, 155, 165));
-            stat_card(ui, "cpu", &format!("{:.1}%", cpu_total), &format!("of {ncpu:.0} cores"), card_w, accent());
-            stat_card(ui, "memory", &human_size(mem_total), &host_mem, card_w, Color32::from_rgb(190, 140, 240));
-            stat_card(ui, "images", &n_img.to_string(), &format!("{} volumes", n_vol), card_w, Color32::from_rgb(230, 170, 90));
+        let kpis = [
+            Kpi {
+                label: "Containers",
+                value: n_run.to_string(),
+                sub: format!("running of {n_all}"),
+                color: GREEN,
+                viz: Viz::Ratio(n_run as f32 / n_all.max(1) as f32),
+            },
+            Kpi {
+                label: "CPU",
+                value: format!("{:.1}%", cpu_total.max(0.0)),
+                sub: format!("of {ncpu:.0} cores"),
+                color: ACCENT,
+                viz: Viz::Spark(cpu_series),
+            },
+            Kpi {
+                label: "Memory",
+                value: human_size(mem_total),
+                sub: if host_mem > 0 {
+                    format!("of {} host", human_size(host_mem))
+                } else {
+                    "in use".to_string()
+                },
+                color: VIOLET,
+                viz: Viz::Spark(mem_series),
+            },
+            Kpi {
+                label: "Disk",
+                value: if g.df.is_some() { human_size(disk_total) } else { "—".into() },
+                sub: format!("{} reclaimable", human_size(disk_reclaim)),
+                color: AMBER,
+                viz: Viz::Ratio(disk_reclaim as f32 / disk_total.max(1) as f32),
+            },
+        ];
+        let per_row = if ui.available_width() > 860.0 { 4 } else { 2 };
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.x = 14.0;
+            for (n, row) in kpis.chunks(per_row).enumerate() {
+                if n > 0 {
+                    ui.add_space(6.0);
+                }
+                ui.columns(per_row, |cols| {
+                    for (col, k) in cols.iter_mut().zip(row) {
+                        kpi_card(col, k);
+                    }
+                });
+            }
         });
     }
 
-    fn system_charts(&mut self, ui: &mut Ui) {
-        let g = &self.gui;
-        let mut cpu_series: Vec<f64> = vec![0.0; HIST];
-        let mut mem_series: Vec<f64> = vec![0.0; HIST];
-        let mut net_series: Vec<f64> = vec![0.0; HIST];
-        let mut any = false;
-        for (id, h) in &g.hist {
-            if !g.stats.contains_key(id) {
-                continue;
-            }
-            any = true;
-            let off = HIST - h.cpu.len();
-            for (i, v) in h.cpu.iter().enumerate() {
-                cpu_series[off + i] += v;
-            }
-            let off = HIST - h.mem.len();
-            for (i, v) in h.mem.iter().enumerate() {
-                mem_series[off + i] += *v as f64;
-            }
-            let off = HIST - h.rx.len();
-            for (i, v) in h.rx.iter().enumerate() {
-                net_series[off + i] += *v as f64;
-            }
-        }
-        ui.label(RichText::new("cluster activity").strong());
-        if !any {
-            ui.label(
-                RichText::new("collecting samples… (charts appear once stats stream in)")
-                    .weak(),
+    fn usage_charts(&mut self, ui: &mut Ui) {
+        let (cpu, mem, net, samples) = self.host_series();
+        let n = self.gui.stats.len();
+        card(ui, |ui| {
+            card_title(
+                ui,
+                "Resource usage",
+                &if samples > 0 {
+                    format!("last {samples}s · {n} containers")
+                } else {
+                    String::new()
+                },
             );
-            return;
-        }
-        let avail = ui.available_width();
-        let w = (avail - 8.0) / 2.0;
-        let h = 130.0;
-        let cpu_peak = cpu_series.iter().cloned().fold(0.0_f64, f64::max);
-        let mem_peak = mem_series.iter().cloned().fold(0.0_f64, f64::max);
-        let net_peak = net_series.iter().cloned().fold(0.0_f64, f64::max);
-        let samples = g.hist.values().map(|h| h.cpu.len()).max().unwrap_or(0);
-        ui.label(
-            RichText::new(format!("last {samples}s across {} containers", g.hist.len()))
-                .small()
-                .weak(),
-        );
-        ui.label(
-            RichText::new("cpu chart sums per-core-normalized usage (32 cores = 3200%)")
-                .small()
-                .weak(),
-        );
-        ui.horizontal(|ui| {
-            area_chart(ui, "cpu %", &cpu_series, accent(), Vec2::new(w, h));
-            ui.label(RichText::new(format!("peak {cpu_peak:.0}%")).small().weak());
-        });
-        ui.horizontal(|ui| {
-            area_chart(ui, "memory", &mem_series, Color32::from_rgb(190, 140, 240), Vec2::new(w, h));
-            ui.label(RichText::new(format!("peak {}", human_size(mem_peak as i64))).small().weak());
-        });
-        ui.horizontal(|ui| {
-            area_chart(ui, "net rx/s", &net_series, Color32::from_rgb(90, 200, 130), Vec2::new(w, h));
-            ui.label(RichText::new(format!("peak {}/s", human_size(net_peak as i64))).small().weak());
+            if samples < 2 {
+                ui.add_space(4.0);
+                ui.label(RichText::new("Collecting samples…").color(FAINT));
+                ui.add_space(70.0);
+                return;
+            }
+            let last = |s: &[f64]| s.last().copied().unwrap_or(0.0);
+            let charts: [(&str, String, &[f64], Color32, fn(f64) -> String); 3] = [
+                ("CPU", format!("{:.1}%", last(&cpu)), &cpu, ACCENT, |v| format!("{v:.1}%")),
+                ("Memory", human_size(last(&mem) as i64), &mem, VIOLET, |v| human_size(v as i64)),
+                ("Network", format!("{}/s", human_size(last(&net) as i64)), &net, CYAN, |v| {
+                    format!("{}/s", human_size(v as i64))
+                }),
+            ];
+            let per_row = if ui.available_width() > 720.0 { 3 } else { 1 };
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.x = 20.0;
+                for row in charts.chunks(per_row) {
+                    ui.columns(per_row, |cols| {
+                        for (col, (label, now, series, color, fmt)) in cols.iter_mut().zip(row) {
+                            col.horizontal(|ui| {
+                                ui.label(RichText::new(*label).size(12.5).color(MUTED));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.label(RichText::new(now).font(bold(14.0)).color(TEXT));
+                                });
+                            });
+                            let w = col.available_width();
+                            area_chart(col, series, *color, Vec2::new(w, 110.0), *fmt);
+                        }
+                    });
+                }
+            });
         });
     }
 
@@ -1446,157 +1591,268 @@ impl SddApp {
             .filter_map(|c| {
                 let s = g.stats.get(&c.id)?;
                 let cpu = StatsSample::cpu_percent(g.prev_stats.get(&c.id), s).unwrap_or(0.0);
-                Some((c.short_name(), cpu, s.mem_usage()))
+                Some((c.short_name(), cpu.max(0.0), s.mem_usage()))
             })
             .collect();
         rows.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        ui.label(RichText::new("top containers by cpu").strong());
-        if rows.is_empty() {
-            ui.label(RichText::new("no running containers with stats yet").weak());
-            return;
-        }
-        let avail = ui.available_width() - 16.0;
-        for (name, cpu, mem) in rows.iter().take(8) {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(name).monospace().small());
-                let frac = (cpu / 100.0).clamp(0.0, 1.0) as f32;
-                let bar_w = (avail * 0.45).max(80.0);
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(bar_w, 10.0), Sense::hover());
-                let paint = ui.painter();
-                paint.rect_filled(rect, 3.0, Color32::from_rgb(30, 36, 48));
-                if frac > 0.0 {
-                    let r = Rect::from_min_size(rect.min, Vec2::new(rect.width() * frac, rect.height()));
-                    paint.rect_filled(r, 3.0, accent());
-                }
-                ui.label(RichText::new(format!("{cpu:.1}%")).monospace().small());
-                ui.label(RichText::new(human_size(*mem)).monospace().small().weak());
-            });
-        }
+        let peak = rows.first().map(|r| r.1).unwrap_or(0.0).max(1.0);
+        card(ui, |ui| {
+            ui.set_min_height(286.0);
+            card_title(ui, "Top containers", "CPU · 100% = 1 core");
+            if rows.is_empty() {
+                ui.label(RichText::new("No running containers with stats yet.").color(FAINT));
+                return;
+            }
+            for (name, cpu, mem) in rows.iter().take(7) {
+                let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::hover());
+                let p = ui.painter();
+                let name_w = rect.width() * 0.42;
+                let n = elide(p, name.clone(), FontId::proportional(13.0), TEXT, name_w - 8.0);
+                p.galley(Pos2::new(rect.left(), rect.center().y - n.size().y / 2.0), n, TEXT);
+                let bar = Rect::from_min_max(
+                    Pos2::new(rect.left() + name_w, rect.center().y - 3.0),
+                    Pos2::new(rect.right() - 128.0, rect.center().y + 3.0),
+                );
+                // Bars scale to the busiest container so small loads stay visible.
+                progress(p, bar, (*cpu / peak) as f32, ACCENT);
+                p.text(
+                    Pos2::new(rect.right() - 66.0, rect.center().y),
+                    egui::Align2::RIGHT_CENTER,
+                    format!("{cpu:.1}%"),
+                    FontId::monospace(12.0),
+                    TEXT,
+                );
+                p.text(
+                    Pos2::new(rect.right(), rect.center().y),
+                    egui::Align2::RIGHT_CENTER,
+                    human_size(*mem),
+                    FontId::monospace(12.0),
+                    FAINT,
+                );
+            }
+        });
+    }
+
+    /// Recent container lifecycle events, newest first.
+    fn event_feed(&mut self, ui: &mut Ui) {
+        let g = &self.gui;
+        let now = epoch();
+        card(ui, |ui| {
+            ui.set_min_height(286.0);
+            card_title(ui, "Activity", if g.events.is_empty() { "listening" } else { "live" });
+            if g.events.is_empty() {
+                ui.label(RichText::new("No container events yet. Start or stop something to see it here.").color(FAINT));
+                return;
+            }
+            ScrollArea::vertical()
+                .max_height(236.0)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    for e in g.events.iter().rev().take(60) {
+                        let action = e.action.split(':').next().unwrap_or(&e.action);
+                        let color = match action {
+                            "start" | "create" | "attach" | "unpause" => GREEN,
+                            "die" | "kill" | "stop" | "oom" => RED,
+                            "destroy" => AMBER,
+                            _ => MUTED,
+                        };
+                        let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::hover());
+                        let p = ui.painter();
+                        p.circle_filled(Pos2::new(rect.left() + 5.0, rect.center().y), 3.5, color);
+                        let when = ago(now - e.time);
+                        let when_w = 70.0;
+                        let name = elide(
+                            p,
+                            e.container_name(),
+                            FontId::proportional(13.0),
+                            TEXT,
+                            rect.width() - 20.0 - when_w - 70.0,
+                        );
+                        let nw = name.size().x;
+                        p.galley(Pos2::new(rect.left() + 18.0, rect.center().y - name.size().y / 2.0), name, TEXT);
+                        p.text(
+                            Pos2::new(rect.left() + 26.0 + nw, rect.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            action,
+                            FontId::proportional(12.5),
+                            color,
+                        );
+                        p.text(
+                            Pos2::new(rect.right() - 4.0, rect.center().y),
+                            egui::Align2::RIGHT_CENTER,
+                            when,
+                            FontId::proportional(12.0),
+                            FAINT,
+                        );
+                    }
+                });
+        });
     }
 
     fn disk_section(&mut self, ui: &mut Ui) {
         let g = &self.gui;
-        ui.label(RichText::new("disk usage").strong());
-        let Some(df) = &g.df else {
-            ui.label(RichText::new("collecting…").weak());
-            return;
-        };
-        let sections: [(&str, Option<&docker::UsageTotals>, Color32); 4] = [
-            ("images", df.image_usage.as_ref(), accent()),
-            ("build cache", df.build_cache_usage.as_ref(), Color32::from_rgb(230, 170, 90)),
-            ("volumes", df.volume_usage.as_ref(), Color32::from_rgb(190, 140, 240)),
-            ("containers", df.container_usage.as_ref(), Color32::from_rgb(90, 200, 130)),
-        ];
-        let total: i64 = sections.iter().filter_map(|(_, u, _)| u.map(|u| u.total_size)).sum();
-        let total = total.max(1);
-        let avail = ui.available_width() - 16.0;
-        for (label, u, color) in sections {
-            let Some(u) = u else { continue };
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("{label:<12}")).monospace().small());
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(avail * 0.55, 12.0), Sense::hover());
-                let paint = ui.painter();
-                paint.rect_filled(rect, 3.0, Color32::from_rgb(30, 36, 48));
-                let frac = (u.total_size as f64 / total as f64).clamp(0.0, 1.0) as f32;
-                let r = Rect::from_min_size(rect.min, Vec2::new(rect.width() * frac, rect.height()));
-                paint.rect_filled(r, 3.0, color);
-                ui.label(
-                    RichText::new(format!(
-                        "{} · {} reclaimable",
-                        human_size(u.total_size),
-                        human_size(u.reclaimable)
-                    ))
-                    .small()
-                    .weak(),
-                );
+        card(ui, |ui| {
+            let Some(df) = &g.df else {
+                card_title(ui, "Disk usage", "");
+                ui.label(RichText::new("Collecting…").color(FAINT));
+                return;
+            };
+            let sections: Vec<(&str, &docker::UsageTotals, Color32)> = [
+                ("Images", df.image_usage.as_ref(), ACCENT),
+                ("Build cache", df.build_cache_usage.as_ref(), AMBER),
+                ("Volumes", df.volume_usage.as_ref(), VIOLET),
+                ("Containers", df.container_usage.as_ref(), GREEN),
+            ]
+            .into_iter()
+            .filter_map(|(l, u, c)| Some((l, u?, c)))
+            .collect();
+            let total: i64 = sections.iter().map(|(_, u, _)| u.total_size).sum();
+            let reclaim: i64 = sections.iter().map(|(_, u, _)| u.reclaimable).sum();
+            card_title(
+                ui,
+                "Disk usage",
+                &format!("{} total · {} reclaimable", human_size(total), human_size(reclaim)),
+            );
+            // One stacked bar, segments proportional to each category.
+            let (bar, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 10.0), Sense::hover());
+            let p = ui.painter();
+            p.rect_filled(bar, 5.0, SURFACE_HI);
+            let mut x = bar.left();
+            for (_, u, color) in &sections {
+                let w = bar.width() * (u.total_size as f32 / total.max(1) as f32);
+                if w >= 1.0 {
+                    let seg = Rect::from_min_max(Pos2::new(x, bar.top()), Pos2::new((x + w - 2.0).max(x + 1.0), bar.bottom()));
+                    p.rect_filled(seg, 3.0, *color);
+                }
+                x += w;
+            }
+            ui.add_space(12.0);
+            let per_row = if ui.available_width() > 640.0 { 4 } else { 2 };
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.x = 16.0;
+                for row in sections.chunks(per_row) {
+                    ui.columns(per_row, |cols| {
+                        for (col, (label, u, color)) in cols.iter_mut().zip(row) {
+                            col.spacing_mut().item_spacing.y = 2.0;
+                            col.horizontal(|ui| {
+                                let (r, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                                ui.painter().rect_filled(r.shrink(1.0), 2.0, *color);
+                                ui.label(RichText::new(*label).size(12.5).color(MUTED));
+                            });
+                            col.label(RichText::new(human_size(u.total_size)).font(bold(16.0)).color(TEXT));
+                            col.label(
+                                RichText::new(format!("{} reclaimable", human_size(u.reclaimable)))
+                                    .size(11.5)
+                                    .color(FAINT),
+                            );
+                        }
+                    });
+                }
             });
-        }
+        });
     }
-
 
     // ------------------------------------------------------------------
     // Container detail: identity, live stats, inline logs
     // ------------------------------------------------------------------
 
     fn container_detail(&mut self, ui: &mut Ui) {
-        // Header + actions + stats snapshot, then the inline log page below.
-        let c = match self.gui.selected_container().cloned() {
-            Some(c) => c,
-            None => {
-                ui.label(RichText::new("Select a container to see details, live stats and logs.").weak());
-                return;
-            }
+        let Some(c) = self.gui.selected_container().cloned() else {
+            empty_state(
+                ui,
+                "No container selected",
+                "Pick a container on the left to see live stats, details and logs.",
+            );
+            return;
         };
-        let g = &self.gui;
         let running = c.state == "running";
-        let busy = g.pending_action.as_ref().is_some_and(|(i, _)| *i == c.id);
-        let pulse = self.dot_anim.get(&c.id).copied().unwrap_or(0.0);
+        let busy = self.gui.pending_action.as_ref().is_some_and(|(i, _)| *i == c.id);
 
+        let mut action = None;
+        let mut remove = false;
         ui.horizontal(|ui| {
-            ui.label(dot(running, pulse));
-            ui.label(RichText::new(c.short_name()).heading());
-            if let Some(p) = c.project() {
-                ui.label(RichText::new(format!("· {p}")).weak());
-            }
-            if busy {
-                ui.add(egui::Spinner::new().size(16.0).color(accent()));
-            }
-        });
-        ui.horizontal_wrapped(|ui| {
-            let start_stop = if running {
-                action_button(ui, "■ Stop", Color32::from_rgb(230, 140, 80), busy)
-            } else {
-                action_button(ui, "▶ Start", Color32::from_rgb(90, 200, 130), busy)
-            };
-            let mut action = None;
-            if start_stop.clicked() {
-                action = Some(if running { Pending::Stop } else { Pending::Start });
-            }
-            if action_button(ui, "↻ Restart", accent(), busy).clicked() {
-                action = Some(Pending::Restart);
-            }
-            if action_button(ui, "✕ Remove", Color32::from_rgb(220, 90, 90), busy).clicked() {
-                self.gui.confirm_remove = Some(c.id.clone());
-            }
-            if let Some(p) = action {
-                self.gui.pending_action = Some((c.id.clone(), p));
-                self.spin = Some((c.id.clone(), Instant::now()));
-                spawn_action(&self.rt, &self.docker, &self.tx, &c, p);
-            }
-        });
-        ui.add_space(4.0);
-
-        // Two columns: facts on the left, live stats on the right.
-        let avail = ui.available_width();
-        let col_w = (avail - 16.0) / 2.0;
-        ui.horizontal(|ui| {
+            let title_w = (ui.available_width() - 330.0).max(160.0);
             ui.vertical(|ui| {
-                ui.set_width(col_w);
-                detail_row(ui, "image", &c.image);
-                detail_row(ui, "state", &c.status);
-                detail_row(ui, "id", &c.id[..12.min(c.id.len())]);
-                if !c.port_summary().is_empty() {
-                    detail_row(ui, "ports", &c.port_summary());
+                ui.set_max_width(title_w);
+                ui.spacing_mut().item_spacing.y = 6.0;
+                ui.add(egui::Label::new(RichText::new(c.short_name()).font(bold(22.0)).color(TEXT)).truncate());
+                ui.horizontal(|ui| {
+                    state_badge(ui, &c.state);
+                    if let Some(p) = c.project() {
+                        chip(ui, p, MUTED);
+                    }
+                    ui.add(
+                        egui::Label::new(RichText::new(&c.image).font(FontId::monospace(12.5)).color(MUTED))
+                            .truncate(),
+                    );
+                });
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if button(ui, "✕  Remove", Btn::Danger, !busy).clicked() {
+                    remove = true;
                 }
-                if let Some(sr) = c.size_rw {
-                    detail_row(ui, "rw size", &human_size(sr));
+                if button(ui, "↻  Restart", Btn::Secondary, !busy).clicked() {
+                    action = Some(Pending::Restart);
                 }
-                if c.created > 0 {
-                    detail_row(ui, "created", &fmt_epoch(c.created));
+                let clicked = if running {
+                    button(ui, "■  Stop", Btn::Secondary, !busy).clicked()
+                } else {
+                    button(ui, "▶  Start", Btn::Primary, !busy).clicked()
+                };
+                if clicked {
+                    action = Some(if running { Pending::Stop } else { Pending::Start });
+                }
+                if busy {
+                    ui.add(egui::Spinner::new().size(18.0).color(ACCENT));
                 }
             });
-            ui.vertical(|ui| {
-                ui.set_width(col_w);
-                self.detail_stats(ui, &c);
+        });
+        if remove {
+            self.gui.confirm_remove = Some(c.id.clone());
+        }
+        if let Some(p) = action {
+            self.gui.pending_action = Some((c.id.clone(), p));
+            self.spin = Some((c.id.clone(), Instant::now()));
+            spawn_action(&self.rt, &self.docker, &self.tx, &c, p);
+        }
+        ui.add_space(16.0);
+
+        self.detail_stats(ui, &c);
+        ui.add_space(14.0);
+
+        card(ui, |ui| {
+            card_title(ui, "Details", "");
+            let ports = c.port_summary();
+            let facts: [(&str, String, bool); 6] = [
+                ("Status", c.status.clone(), false),
+                ("Container ID", c.id[..12.min(c.id.len())].to_string(), true),
+                (
+                    "Created",
+                    if c.created > 0 { fmt_epoch(c.created) } else { "—".into() },
+                    false,
+                ),
+                ("Image", c.image.clone(), true),
+                ("Ports", if ports.is_empty() { "—".into() } else { ports }, true),
+                ("Writable layer", c.size_rw.map(human_size).unwrap_or_else(|| "—".into()), false),
+            ];
+            let per_row = if ui.available_width() > 520.0 { 3 } else { 2 };
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.x = 20.0;
+                for row in facts.chunks(per_row) {
+                    ui.columns(per_row, |cols| {
+                        for (col, (k, v, mono)) in cols.iter_mut().zip(row) {
+                            kv(col, k, v, *mono);
+                        }
+                    });
+                }
             });
         });
-
-        ui.add_space(6.0);
-        ui.separator();
-        ui.label(RichText::new("logs").strong());
-        self.logs_page(ui);
+        ui.add_space(14.0);
+        self.logs_card(ui, "Logs", false);
     }
 
+    /// Live metric tiles for the selected container (CPU, memory, net, disk).
     fn detail_stats(&mut self, ui: &mut Ui, c: &ContainerSummary) {
         // Start a stats stream for the selected running container even when
         // the dashboard tab isn't active, so selection shows live numbers.
@@ -1616,138 +1872,393 @@ impl SddApp {
         }
         let g = &self.gui;
         let Some(s) = g.stats.get(&c.id) else {
-            if c.state == "running" {
-                ui.label(RichText::new("collecting stats…").weak());
-            } else {
-                ui.label(RichText::new("not running — no live stats").weak());
-            }
+            card(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if c.state == "running" {
+                        ui.add(egui::Spinner::new().size(14.0).color(ACCENT));
+                        ui.label(RichText::new("Collecting live stats…").color(MUTED));
+                    } else {
+                        ui.label(
+                            RichText::new("This container isn't running. Start it to see live CPU, memory and network.")
+                                .color(MUTED),
+                        );
+                    }
+                });
+            });
             return;
         };
-        let cpu = StatsSample::cpu_percent(g.prev_stats.get(&c.id), s).unwrap_or(0.0);
-        let mem_p = s.mem_percent().unwrap_or(0.0);
-        ui.horizontal(|ui| {
-            gauge(ui, "cpu", cpu, accent(), 100.0);
-            gauge(ui, "mem", mem_p, Color32::from_rgb(190, 140, 240), 100.0);
+        let cpu = StatsSample::cpu_percent(g.prev_stats.get(&c.id), s).unwrap_or(0.0).max(0.0);
+        let h = g.hist.get(&c.id);
+        let series = |f: &dyn Fn(&StatHist) -> Vec<f64>| h.map(f).unwrap_or_default();
+        let last = |q: Option<&VecDeque<i64>>| q.and_then(|q| q.back().copied()).unwrap_or(0);
+        let rx = last(h.map(|h| &h.rx));
+        let txb = last(h.map(|h| &h.tx));
+        let br = last(h.map(|h| &h.blk_r));
+        let bw = last(h.map(|h| &h.blk_w));
+        let kpis = [
+            Kpi {
+                label: "CPU",
+                value: format!("{cpu:.1}%"),
+                sub: "of one core = 100%".to_string(),
+                color: ACCENT,
+                viz: Viz::Spark(series(&|h| h.cpu.iter().copied().collect())),
+            },
+            Kpi {
+                label: "Memory",
+                value: human_size(s.mem_usage()),
+                sub: format!(
+                    "of {} · {:.0}%",
+                    human_size(s.mem_limit()),
+                    s.mem_percent().unwrap_or(0.0)
+                ),
+                color: VIOLET,
+                viz: Viz::Spark(series(&|h| h.mem.iter().map(|v| *v as f64).collect())),
+            },
+            Kpi {
+                label: "Network",
+                value: format!("↓ {}/s", human_size(rx)),
+                sub: format!("↑ {}/s · {} pids", human_size(txb), s.pids_stats.current),
+                color: CYAN,
+                viz: Viz::Spark(series(&|h| h.rx.iter().zip(&h.tx).map(|(a, b)| (a + b) as f64).collect())),
+            },
+            Kpi {
+                label: "Disk I/O",
+                value: format!("{}/s", human_size(br + bw)),
+                sub: format!("read {} · write {}", human_size(s.blk_read()), human_size(s.blk_write())),
+                color: AMBER,
+                viz: Viz::Spark(series(&|h| h.blk_r.iter().zip(&h.blk_w).map(|(a, b)| (a + b) as f64).collect())),
+            },
+        ];
+        let per_row = if ui.available_width() > 560.0 { 4 } else { 2 };
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            for (n, row) in kpis.chunks(per_row).enumerate() {
+                if n > 0 {
+                    ui.add_space(6.0);
+                }
+                ui.columns(per_row, |cols| {
+                    for (col, k) in cols.iter_mut().zip(row) {
+                        kpi_card(col, k);
+                    }
+                });
+            }
         });
-        detail_row(ui, "mem", &format!("{} / {}", human_size(s.mem_usage()), human_size(s.mem_limit())));
-        detail_row(ui, "pids", &s.pids_stats.current.to_string());
-        detail_row(ui, "net", &format!("↓ {}  ↑ {}", human_size(s.net_rx()), human_size(s.net_tx())));
-        detail_row(ui, "disk", &format!("r {}  w {}", human_size(s.blk_read()), human_size(s.blk_write())));
-        if let Some(h) = g.hist.get(&c.id) {
-            if h.cpu.len() >= 2 {
-                ui.label(RichText::new("cpu history").small().weak());
-                let cpu: Vec<f64> = h.cpu.iter().copied().collect();
-                area_chart(ui, "", &cpu, accent(), Vec2::new(ui.available_width(), 70.0));
-            }
-            if h.rx.len() >= 2 {
-                ui.label(RichText::new("net rx/s").small().weak());
-                let rx: Vec<f64> = h.rx.iter().map(|v| *v as f64).collect();
-                area_chart(ui, "", &rx, Color32::from_rgb(90, 200, 130), Vec2::new(ui.available_width(), 55.0));
-            }
-        }
     }
+
+    // ------------------------------------------------------------------
+    // Images / volumes detail
+    // ------------------------------------------------------------------
+
+    fn image_detail(&mut self, ui: &mut Ui) {
+        let Some(id) = self.gui.selected_image.clone() else {
+            empty_state(ui, "No image selected", "Pick an image on the left to see its size, tags and users.");
+            return;
+        };
+        let Some(im) = self.gui.images.iter().find(|i| i.id == id).cloned() else {
+            empty_state(ui, "Image not found", "That image no longer exists.");
+            return;
+        };
+        let users: Vec<String> = self
+            .gui
+            .containers
+            .iter()
+            .filter(|c| c.image == im.tag() || c.image.contains(im.short_id()))
+            .map(|c| c.short_name())
+            .collect();
+        let total = self
+            .gui
+            .df
+            .as_ref()
+            .map(|d| d.layers_size)
+            .filter(|v| *v > 0)
+            .unwrap_or_else(|| self.gui.images.iter().map(|i| i.size).sum::<i64>().max(1));
+
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(im.tag()).font(bold(22.0)).color(TEXT));
+            chip(ui, if im.containers > 0 { "in use" } else { "unused" }, if im.containers > 0 { GREEN } else { FAINT });
+        });
+        ui.label(RichText::new(format!("sha256:{}", im.short_id())).font(FontId::monospace(12.5)).color(MUTED));
+        ui.add_space(16.0);
+        ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            let kpis = [
+                Kpi {
+                    label: "Size",
+                    value: human_size(im.size),
+                    sub: format!("{:.1}% of all layers", im.size as f64 / total.max(1) as f64 * 100.0),
+                    color: ACCENT,
+                    viz: Viz::Ratio(im.size as f32 / total.max(1) as f32),
+                },
+                Kpi {
+                    label: "Unique",
+                    value: human_size((im.size - im.shared_size.max(0)).max(0)),
+                    sub: format!("{} shared with other images", human_size(im.shared_size.max(0))),
+                    color: VIOLET,
+                    viz: Viz::Ratio((im.size - im.shared_size.max(0)).max(0) as f32 / im.size.max(1) as f32),
+                },
+                Kpi {
+                    label: "Containers",
+                    value: im.containers.max(0).to_string(),
+                    sub: if im.created > 0 { format!("created {}", fmt_epoch(im.created)) } else { String::new() },
+                    color: GREEN,
+                    viz: Viz::None,
+                },
+            ];
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.x = 14.0;
+                ui.columns(3, |cols| {
+                    for (col, k) in cols.iter_mut().zip(&kpis) {
+                        kpi_card(col, k);
+                    }
+                });
+            });
+            ui.add_space(14.0);
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.x = 14.0;
+                ui.columns(2, |cols| {
+                    card(&mut cols[0], |ui| {
+                        card_title(ui, "Tags", &im.repo_tags.len().to_string());
+                        if im.repo_tags.is_empty() {
+                            ui.label(RichText::new("<none>").font(FontId::monospace(12.5)).color(FAINT));
+                        }
+                        for t in &im.repo_tags {
+                            ui.add(egui::Label::new(RichText::new(t).font(FontId::monospace(12.5)).color(TEXT)).truncate());
+                        }
+                    });
+                    card(&mut cols[1], |ui| {
+                        card_title(ui, "Used by", &users.len().to_string());
+                        if users.is_empty() {
+                            ui.label(RichText::new("No containers use this image.").color(FAINT));
+                        }
+                        for u in users.iter().take(20) {
+                            ui.horizontal(|ui| {
+                                let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                                ui.painter().circle_filled(r.center(), 3.0, GREEN);
+                                ui.add(egui::Label::new(RichText::new(u).size(13.0).color(TEXT)).truncate());
+                            });
+                        }
+                    });
+                });
+            });
+        });
+    }
+
+    fn volume_detail(&mut self, ui: &mut Ui) {
+        let Some(name) = self.gui.selected_volume.clone() else {
+            empty_state(ui, "No volume selected", "Pick a volume on the left to see its details.");
+            return;
+        };
+        let Some(v) = self.gui.volumes.iter().find(|v| v.name == name).cloned() else {
+            empty_state(ui, "Volume not found", "That volume no longer exists.");
+            return;
+        };
+        let refs = v.usage_data.as_ref().map(|u| u.ref_count);
+        ui.horizontal(|ui| {
+            ui.add(egui::Label::new(RichText::new(&v.name).font(bold(22.0)).color(TEXT)).truncate());
+        });
+        ui.horizontal(|ui| {
+            chip(ui, &v.driver, MUTED);
+            match refs {
+                Some(0) => chip(ui, "unused", FAINT),
+                Some(_) => chip(ui, "in use", GREEN),
+                None => {}
+            }
+        });
+        ui.add_space(16.0);
+        let size = v.usage_data.as_ref().and_then(|u| u.size).filter(|s| *s >= 0);
+        let kpis = [
+            Kpi {
+                label: "Size",
+                value: size.map(human_size).unwrap_or_else(|| "—".into()),
+                sub: if size.is_some() { "on disk".into() } else { "not reported by driver".into() },
+                color: VIOLET,
+                viz: Viz::None,
+            },
+            Kpi {
+                label: "References",
+                value: refs.map(|n| n.to_string()).unwrap_or_else(|| "—".into()),
+                sub: if refs.is_some() { "containers mounting it".into() } else { "not reported by the daemon".into() },
+                color: GREEN,
+                viz: Viz::None,
+            },
+            Kpi {
+                label: "Created",
+                value: v.created.get(..10).unwrap_or("—").to_string(),
+                sub: v.created.get(11..19).unwrap_or("").to_string(),
+                color: ACCENT,
+                viz: Viz::None,
+            },
+        ];
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.x = 14.0;
+            ui.columns(3, |cols| {
+                for (col, k) in cols.iter_mut().zip(&kpis) {
+                    kpi_card(col, k);
+                }
+            });
+        });
+        ui.add_space(14.0);
+        // The list endpoint omits mounts, so match on container names.
+        let users: Vec<String> = self
+            .gui
+            .containers
+            .iter()
+            .filter(|c| c.names.iter().any(|n| n.contains(&v.name)))
+            .map(|c| c.short_name())
+            .collect();
+        card(ui, |ui| {
+            card_title(ui, "In use by", "");
+            if users.is_empty() {
+                ui.label(
+                    RichText::new("No container names match this volume. The list API omits mounts; `docker volume inspect` shows exact users.")
+                        .color(FAINT),
+                );
+            }
+            for u in users {
+                ui.label(RichText::new(u).font(FontId::monospace(12.5)).color(TEXT));
+            }
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // Logs
+    // ------------------------------------------------------------------
 
     fn logs_view(&mut self, ui: &mut Ui) {
         let g = &self.gui;
-        if g.logs_container.is_none() {
-            ui.label(RichText::new("Loading… pick a container, or open this tab to see all containers.").weak());
-            return;
-        }
-        let name = g.logs_container_name.clone();
-        let n = g.logs.len();
-        let streaming = g.logs_active;
         let is_all = g.logs_container.as_deref() == Some("__all__");
+        let sub = if g.logs_container.is_none() {
+            "Loading…".to_string()
+        } else if is_all {
+            format!("All running containers · {} lines", g.logs.len())
+        } else {
+            format!("{} · {} lines", g.logs_container_name, g.logs.len())
+        };
         let mut back = false;
+        let mut to_all = false;
+        let mut reopen = false;
         ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("Logs: {name}")).strong());
-            ui.label(RichText::new(format!("{n} lines")).weak());
-            if streaming {
-                ui.add(egui::Spinner::new().size(13.0).color(accent()));
-                ui.label(RichText::new("streaming").weak());
-            }
-            if !is_all && ui.button("back to container").clicked() {
-                back = true;
-            }
+            ui.vertical(|ui| page_header(ui, "Logs", &sub));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if is_all {
+                    if button(ui, "↻  Reload", Btn::Secondary, true).clicked() {
+                        to_all = true;
+                    }
+                } else if g.logs_container.is_some() {
+                    if button(ui, "All containers", Btn::Secondary, true).clicked() {
+                        to_all = true;
+                    }
+                    if button(ui, "↻  Reopen", Btn::Secondary, true).clicked() {
+                        reopen = true;
+                    }
+                    if button(ui, "← Container", Btn::Secondary, true).clicked() {
+                        back = true;
+                    }
+                }
+            });
         });
+        ui.add_space(16.0);
         if back {
             self.gui.tab = Tab::Containers;
+        } else if to_all {
+            self.load_all_logs();
+        } else if reopen {
+            if let Some(id) = self.gui.logs_container.clone() {
+                self.open_logs(&id);
+            }
         }
-        ui.separator();
-        self.logs_page(ui);
+        if self.gui.logs_container.is_none() {
+            empty_state(ui, "No logs yet", "Pick a container, or reopen this tab to stream all containers.");
+            return;
+        }
+        self.logs_card(ui, "Output", true);
     }
 
-    /// Shared log renderer with fade-in and fresh-line flash.
-    fn logs_page(&mut self, ui: &mut Ui) {
+    /// Log card: toolbar (search, follow) over a virtualized log well.
+    fn logs_card(&mut self, ui: &mut Ui, title: &str, show_source: bool) {
+        let mut follow = self.gui.logs_follow;
+        let streaming = self.gui.logs_active;
+        card(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(title).font(bold(14.5)).color(TEXT));
+                if streaming {
+                    live_pill(ui, true);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let label = if follow { "Following" } else { "Follow" };
+                    if toggle_chip(ui, label, follow).clicked() {
+                        follow = !follow;
+                    }
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.gui.log_filter)
+                            .hint_text(RichText::new("Filter lines").color(FAINT))
+                            .desired_width(200.0)
+                            .margin(Margin::symmetric(10, 5)),
+                    );
+                });
+            });
+            ui.add_space(6.0);
+            self.logs_page(ui, show_source);
+        });
+        self.gui.logs_follow = follow;
+    }
+
+    /// Shared log renderer with fade-in and fresh-line flash; only the rows
+    /// in view are laid out, so long pages stay cheap.
+    fn logs_page(&mut self, ui: &mut Ui, show_source: bool) {
         let g = &self.gui;
         let age = self.logs_opened.elapsed().as_secs_f32();
         let page_alpha = (age / 0.45).clamp(0.0, 1.0);
         let fresh_start = self.prev_log_len.min(g.logs.len());
-        let fresh_age = self.logs_opened.elapsed().as_secs_f32().min(2.0);
-        let all = g.logs_container.as_deref() == Some("__all__");
-
-        let follow = g.logs_follow;
-        let lines = &g.logs;
-        ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .stick_to_bottom(follow)
+        let fresh_age = age.min(2.0);
+        let all = show_source && g.logs_container.as_deref() == Some("__all__");
+        let needle = g.log_filter.to_lowercase();
+        let idx: Vec<usize> = if needle.is_empty() {
+            (0..g.logs.len()).collect()
+        } else {
+            g.logs
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| l.text.to_lowercase().contains(&needle))
+                .map(|(i, _)| i)
+                .collect()
+        };
+        let height = ui.available_height().max(220.0);
+        let font = FontId::monospace(12.5);
+        let row_h = ui.fonts_mut(|f| f.row_height(&font)) + 3.0;
+        Frame::NONE
+            .fill(WELL)
+            .corner_radius(10)
+            .inner_margin(Margin::symmetric(12, 10))
             .show(ui, |ui| {
-                for (idx, l) in lines.iter().enumerate() {
-                    let base = match l.stream {
-                        StreamKind::Stderr => Color32::from_rgb(230, 120, 120),
-                        StreamKind::Stdout => Color32::from_rgb(206, 212, 220),
-                    };
-                    let mut a = page_alpha;
-                    if idx >= fresh_start {
-                        let t = (fresh_age / 0.35).clamp(0.0, 1.0);
-                        a = a.max(0.35 + 0.65 * t);
-                    }
-                    let mut row = RichText::new(&l.text)
-                        .monospace()
-                        .size(13.0)
-                        .color(base.linear_multiply(a));
-                    if all {
-                        if let Some(ref src) = l.source {
-                            row = RichText::new(format!("{}  {}", src, l.text))
-                                .monospace()
-                                .size(13.0)
-                                .color(base.linear_multiply(a));
-                        }
-                    }
-                    ui.label(row);
+                ui.set_min_height(height - 20.0);
+                ui.set_width(ui.available_width());
+                if idx.is_empty() {
+                    ui.label(
+                        RichText::new(if g.logs.is_empty() { "Waiting for output…" } else { "No lines match the filter." })
+                            .font(font.clone())
+                            .color(FAINT),
+                    );
+                    return;
                 }
+                ui.spacing_mut().item_spacing.y = 3.0;
+                ScrollArea::both()
+                    .auto_shrink([false, false])
+                    .max_height(height - 20.0)
+                    .stick_to_bottom(g.logs_follow)
+                    .show_rows(ui, row_h - 3.0, idx.len(), |ui, range| {
+                        for &i in &idx[range] {
+                            let l = &g.logs[i];
+                            let mut a = page_alpha;
+                            if i >= fresh_start {
+                                let t = (fresh_age / 0.35).clamp(0.0, 1.0);
+                                a = a.max(0.35 + 0.65 * t);
+                            }
+                            let job = log_line_job(l, if all { l.source.as_deref() } else { None }, &font, a);
+                            ui.add(egui::Label::new(job).extend());
+                        }
+                    });
             });
         self.prev_log_len = g.logs.len();
-    }
-
-    fn status_bar(&mut self, ctx: &egui::Context) {
-        let g = &self.gui;
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if let Some(e) = &g.error {
-                    ui.label(RichText::new(format!("error: {e}")).color(Color32::from_rgb(230, 110, 110)));
-                } else if !g.status.is_empty() {
-                    ui.label(RichText::new(&g.status).weak());
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let info_bits = g
-                        .info
-                        .as_ref()
-                        .map(|i| format!(" · {} cores · {}", i.ncpu, human_size(i.mem_total)))
-                        .unwrap_or_default();
-                    ui.label(
-                        RichText::new(format!(
-                            "containers: {} · images: {} · volumes: {} · updated {}{}",
-                            g.containers.len(),
-                            g.images.len(),
-                            g.volumes.len(),
-                            if g.last_refresh.is_empty() { "-" } else { &g.last_refresh },
-                            info_bits
-                        ))
-                        .weak(),
-                    );
-                });
-            });
-        });
     }
 
     fn remove_dialog(&mut self, ctx: &egui::Context, id: &str) {
@@ -1758,29 +2269,49 @@ impl SddApp {
             .find(|c| c.id == id)
             .map(|c| c.short_name())
             .unwrap_or_else(|| id.to_string());
-        egui::Window::new("Remove container")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+        let mut confirm = false;
+        let mut cancel = false;
+        let resp = egui::Modal::new(egui::Id::new("remove-modal"))
+            .backdrop_color(Color32::from_black_alpha(150))
+            .frame(
+                Frame::NONE
+                    .fill(SURFACE)
+                    .stroke(Stroke::new(1.0_f32, BORDER))
+                    .corner_radius(14)
+                    .shadow(ctx.style().visuals.window_shadow)
+                    .inner_margin(Margin::same(22)),
+            )
             .show(ctx, |ui| {
-                ui.label(format!("Remove {name}? This deletes the container."));
-                ui.horizontal(|ui| {
-                    if ui
-                        .button(RichText::new("Remove").color(Color32::from_rgb(220, 90, 90)))
-                        .clicked()
-                    {
-                        if let Some(c) = self.gui.containers.iter().find(|c| c.id == id).cloned() {
-                            self.gui.pending_action = Some((id.to_string(), Pending::Remove));
-                            spawn_action(&self.rt, &self.docker, &self.tx, &c, Pending::Remove);
-                        }
-                        self.gui.confirm_remove = None;
+                ui.set_width(380.0);
+                ui.label(RichText::new("Remove container?").font(bold(17.0)).color(TEXT));
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!("{name} will be deleted. Its writable layer is lost; volumes are kept."))
+                        .color(MUTED),
+                );
+                ui.add_space(14.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if button(ui, "Remove", Btn::Danger, true).clicked() {
+                        confirm = true;
                     }
-                    if ui.button("Cancel").clicked() {
-                        self.gui.confirm_remove = None;
-                        self.gui.status = "remove cancelled".to_string();
+                    if button(ui, "Cancel", Btn::Secondary, true).clicked() {
+                        cancel = true;
                     }
                 });
             });
+        if resp.should_close() {
+            cancel = true;
+        }
+        if confirm {
+            if let Some(c) = self.gui.containers.iter().find(|c| c.id == id).cloned() {
+                self.gui.pending_action = Some((id.to_string(), Pending::Remove));
+                spawn_action(&self.rt, &self.docker, &self.tx, &c, Pending::Remove);
+            }
+            self.gui.confirm_remove = None;
+        } else if cancel {
+            self.gui.confirm_remove = None;
+            self.gui.status = "remove cancelled".to_string();
+        }
     }
 
     fn open_logs(&mut self, id: &str) {
@@ -1810,207 +2341,631 @@ impl SddApp {
 // Small widgets
 // ---------------------------------------------------------------------------
 
-fn tab_button(ui: &mut Ui, current: Tab, label: &'static str, tab: Tab) -> Option<Tab> {
-    let active = tab == current;
-    let btn = if active {
-        egui::Button::new(RichText::new(label).strong().color(accent()))
-            .fill(Color32::from_rgb(35, 50, 75))
-    } else {
-        egui::Button::new(RichText::new(label).weak()).fill(Color32::TRANSPARENT)
-    };
-    if ui.add(btn).clicked() {
-        Some(tab)
-    } else {
-        None
-    }
+/// Dashboard / detail metric tile.
+struct Kpi {
+    label: &'static str,
+    value: String,
+    sub: String,
+    color: Color32,
+    viz: Viz,
 }
 
-/// Toggleable filter chip; true when clicked.
-fn chip(ui: &mut Ui, active: bool, label: String) -> bool {
-    let btn = if active {
-        egui::Button::new(RichText::new(label).small().strong().color(accent()))
-            .fill(Color32::from_rgb(34, 60, 92))
-    } else {
-        egui::Button::new(RichText::new(label).small().weak()).fill(Color32::from_rgb(24, 29, 39))
-    };
-    ui.add(btn).clicked()
+/// What a metric tile draws under its number.
+enum Viz {
+    None,
+    Ratio(f32),
+    Spark(Vec<f64>),
 }
 
-fn dot(running: bool, pulse: f32) -> RichText {
-    // pulse eases 0..1; running dots glow, stopped ones sit grey.
-    if running {
-        RichText::new("●")
-            .color(Color32::from_rgb(60 + 40 * pulse as u8, 190, 110 + 40 * pulse as u8))
-            .size(15.0 + 3.0 * pulse)
-    } else {
-        RichText::new("○").color(Color32::from_rgb(140, 146, 156)).size(14.0)
-    }
+fn kpi_card(ui: &mut Ui, k: &Kpi) {
+    Frame::NONE
+        .fill(SURFACE)
+        .stroke(Stroke::new(1.0_f32, BORDER))
+        .corner_radius(14)
+        .inner_margin(Margin::symmetric(16, 14))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                ui.painter().circle_filled(r.center(), 3.5, k.color);
+                ui.label(RichText::new(k.label).size(12.5).color(MUTED));
+            });
+            ui.add(egui::Label::new(RichText::new(&k.value).font(bold(24.0)).color(TEXT)).truncate());
+            ui.add(egui::Label::new(RichText::new(&k.sub).size(12.0).color(FAINT)).truncate());
+            ui.add_space(6.0);
+            let (r, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::hover());
+            let p = ui.painter();
+            match &k.viz {
+                Viz::None => {}
+                Viz::Ratio(f) => {
+                    let bar = Rect::from_center_size(r.center(), Vec2::new(r.width(), 6.0));
+                    progress(p, bar, *f, k.color);
+                }
+                Viz::Spark(s) if s.len() >= 2 => {
+                    let mut pts = area_points(r, s, series_max(s, 1.0));
+                    fill_under(p, &pts, r.bottom(), k.color, 60);
+                    pts.dedup();
+                    p.add(egui::Shape::line(pts, Stroke::new(1.5_f32, k.color)));
+                }
+                Viz::Spark(_) => {
+                    p.text(r.left_center(), egui::Align2::LEFT_CENTER, "collecting…", FontId::proportional(11.5), FAINT);
+                }
+            }
+        });
 }
 
-/// Selected rows ride a blue wash; unselected stay clear.
-fn row_fill(selected: bool, pulse: f32) -> Color32 {
-    if selected {
-        Color32::from_rgba_premultiplied(36, 58, 88, (140.0 * (0.4 + 0.6 * pulse.max(0.5))) as u8)
-    } else {
-        Color32::TRANSPARENT
-    }
+/// Surface card with standard padding; fills the available width.
+fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    Frame::NONE
+        .fill(SURFACE)
+        .stroke(Stroke::new(1.0_f32, BORDER))
+        .corner_radius(14)
+        .inner_margin(Margin::same(18))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+            add(ui)
+        })
+        .inner
 }
 
-/// Colored pill button; dims and ignores clicks while an action is in flight.
-fn action_button(ui: &mut Ui, label: &str, color: Color32, busy: bool) -> egui::Response {
-    let txt = RichText::new(label).color(if busy {
-        color.gamma_multiply(0.4)
-    } else {
-        color
+fn card_title(ui: &mut Ui, title: &str, right: &str) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(title).font(bold(14.5)).color(TEXT));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(RichText::new(right).size(12.0).color(FAINT));
+        });
     });
-    let btn = egui::Button::new(txt)
-        .fill(Color32::from_rgba_premultiplied(28, 34, 46, 220))
-        .stroke(Stroke::new(1.0_f32, color.gamma_multiply(0.55)))
-        .min_size(Vec2::new(84.0, 30.0));
-    let resp = ui.add_enabled(!busy, btn);
-    if resp.hovered() {
-        resp.clone().on_hover_text(label);
+    ui.add_space(4.0);
+}
+
+fn page_header(ui: &mut Ui, title: &str, subtitle: &str) {
+    ui.spacing_mut().item_spacing.y = 2.0;
+    ui.label(RichText::new(title).font(bold(24.0)).color(TEXT));
+    if !subtitle.is_empty() {
+        ui.label(RichText::new(subtitle).size(13.0).color(MUTED));
+    }
+}
+
+/// Centered placeholder for empty lists and unselected detail pages.
+fn empty_state(ui: &mut Ui, title: &str, body: &str) {
+    ui.add_space((ui.available_height() * 0.3).min(160.0));
+    ui.vertical_centered(|ui| {
+        let (r, _) = ui.allocate_exact_size(Vec2::splat(44.0), Sense::hover());
+        ui.painter().rect_filled(r, 12.0, SURFACE_HI);
+        nav_icon(ui.painter(), Tab::Containers, Rect::from_center_size(r.center(), Vec2::splat(20.0)), FAINT);
+        ui.add_space(6.0);
+        ui.label(RichText::new(title).font(bold(15.0)).color(TEXT));
+        ui.label(RichText::new(body).size(13.0).color(MUTED));
+    });
+}
+
+fn section_label(ui: &mut Ui, text: &str) {
+    ui.horizontal(|ui| {
+        ui.add_space(8.0);
+        ui.label(RichText::new(text).size(10.5).color(FAINT));
+    });
+}
+
+fn engine_card(ui: &mut Ui, ok: bool, version: &str) {
+    Frame::NONE
+        .fill(SURFACE)
+        .stroke(Stroke::new(1.0_f32, BORDER))
+        .corner_radius(10)
+        .inner_margin(Margin::symmetric(12, 9))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                let c = if ok { GREEN } else { RED };
+                ui.painter().circle_filled(r.center(), 6.0, c.gamma_multiply(0.2));
+                ui.painter().circle_filled(r.center(), 3.5, c);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    ui.label(
+                        RichText::new(if ok { "Engine running" } else { "Engine unreachable" })
+                            .size(12.5)
+                            .color(TEXT),
+                    );
+                    if !version.is_empty() {
+                        ui.label(RichText::new(format!("Docker {version}")).size(11.0).color(FAINT));
+                    }
+                });
+            });
+        });
+}
+
+/// Sidebar navigation entry; true when clicked.
+fn nav_item(ui: &mut Ui, tab: Tab, label: &str, badge: &str, active: bool) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 38.0), Sense::click());
+    let hovered = resp.hovered();
+    if hovered {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let p = ui.painter();
+    if active {
+        p.rect_filled(rect, 9.0, ACCENT.gamma_multiply(0.15));
+        p.rect_filled(
+            Rect::from_center_size(Pos2::new(rect.left() + 1.5, rect.center().y), Vec2::new(3.0, 18.0)),
+            2.0,
+            ACCENT,
+        );
+    } else if hovered {
+        p.rect_filled(rect, 9.0, SURFACE_HI);
+    }
+    let fg = if active || hovered { TEXT } else { MUTED };
+    let icon = Rect::from_center_size(Pos2::new(rect.left() + 22.0, rect.center().y), Vec2::splat(16.0));
+    nav_icon(p, tab, icon, if active { ACCENT } else { fg });
+    p.text(
+        Pos2::new(rect.left() + 42.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(14.0),
+        fg,
+    );
+    if !badge.is_empty() {
+        let galley = p.layout_no_wrap(badge.to_string(), FontId::proportional(11.5), if active { TEXT } else { MUTED });
+        let size = Vec2::new(galley.size().x + 14.0, 20.0);
+        let br = Rect::from_min_size(Pos2::new(rect.right() - 8.0 - size.x, rect.center().y - 10.0), size);
+        p.rect_filled(br, 10.0, if active { ACCENT.gamma_multiply(0.25) } else { SURFACE_HI });
+        p.galley(br.center() - galley.size() / 2.0, galley, MUTED);
+    }
+    resp.clicked()
+}
+
+/// Line icons drawn with the painter, so they're crisp at any scale and
+/// don't depend on an icon font being installed.
+fn nav_icon(p: &egui::Painter, tab: Tab, r: Rect, c: Color32) {
+    let s = Stroke::new(1.6_f32, c);
+    let inside = egui::epaint::StrokeKind::Inside;
+    match tab {
+        Tab::Dashboard => {
+            let h = (r.width() - 3.0) / 2.0;
+            for (dx, dy) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
+                let min = r.min + Vec2::new(dx * (h + 3.0), dy * (h + 3.0));
+                p.rect_stroke(Rect::from_min_size(min, Vec2::splat(h)), 2.0, s, inside);
+            }
+        }
+        Tab::Containers => {
+            let b = r.shrink2(Vec2::new(0.0, 2.0));
+            p.rect_stroke(b, 2.5, s, inside);
+            for f in [0.36, 0.64] {
+                let x = b.left() + b.width() * f;
+                p.line_segment([Pos2::new(x, b.top() + 3.5), Pos2::new(x, b.bottom() - 3.5)], s);
+            }
+        }
+        Tab::Images => {
+            let base = Rect::from_min_max(Pos2::new(r.left(), r.bottom() - 7.0), r.max);
+            p.rect_stroke(base, 2.0, s, inside);
+            let y1 = base.top() - 3.0;
+            p.line_segment([Pos2::new(r.left() + 2.5, y1), Pos2::new(r.right() - 2.5, y1)], s);
+            let y2 = y1 - 3.5;
+            p.line_segment([Pos2::new(r.left() + 5.0, y2), Pos2::new(r.right() - 5.0, y2)], s);
+        }
+        Tab::Volumes => {
+            let rx = r.width() / 2.0 - 0.5;
+            let top = Pos2::new(r.center().x, r.top() + 3.0);
+            let bot = Pos2::new(r.center().x, r.bottom() - 3.0);
+            p.add(egui::Shape::ellipse_stroke(top, Vec2::new(rx, 2.6), s));
+            p.line_segment([Pos2::new(r.left() + 0.5, top.y), Pos2::new(r.left() + 0.5, bot.y)], s);
+            p.line_segment([Pos2::new(r.right() - 0.5, top.y), Pos2::new(r.right() - 0.5, bot.y)], s);
+            let arc: Vec<Pos2> = (0..=16)
+                .map(|i| {
+                    let a = std::f32::consts::PI * i as f32 / 16.0;
+                    Pos2::new(bot.x + rx * a.cos(), bot.y + 2.6 * a.sin())
+                })
+                .collect();
+            p.add(egui::Shape::line(arc, s));
+        }
+        Tab::Logs => {
+            for (i, f) in [1.0, 0.65, 0.85, 0.5].iter().enumerate() {
+                let y = r.top() + 2.0 + i as f32 * 4.0;
+                p.line_segment([Pos2::new(r.left(), y), Pos2::new(r.left() + r.width() * f, y)], s);
+            }
+        }
+    }
+}
+
+/// Rounded icon tile at the left edge of a list row.
+fn icon_tile(p: &egui::Painter, row: Rect, tab: Tab, color: Color32) {
+    let tile = Rect::from_center_size(Pos2::new(row.left() + 26.0, row.center().y), Vec2::splat(34.0));
+    p.rect_filled(tile, 9.0, color.gamma_multiply(0.12));
+    nav_icon(p, tab, Rect::from_center_size(tile.center(), Vec2::splat(16.0)), color);
+}
+
+fn row_bg(p: &egui::Painter, rect: Rect, selected: bool, hovered: bool) {
+    if selected {
+        p.rect(
+            rect,
+            10.0,
+            ACCENT.gamma_multiply(0.12),
+            Stroke::new(1.0_f32, ACCENT.gamma_multiply(0.45)),
+            egui::epaint::StrokeKind::Inside,
+        );
+    } else if hovered {
+        p.rect_filled(rect, 10.0, SURFACE);
+    }
+}
+
+/// Running dots glow (eased in by `pulse`); stopped ones are hollow rings.
+fn status_dot(p: &egui::Painter, c: Pos2, running: bool, pulse: f32) {
+    if running {
+        p.circle_filled(c, 4.0 + 3.5 * pulse, GREEN.gamma_multiply(0.18));
+        p.circle_filled(c, 4.0, GREEN);
+    } else {
+        p.circle_stroke(c, 3.5, Stroke::new(1.5_f32, FAINT));
+    }
+}
+
+fn spinner_at(p: &egui::Painter, time: f64, c: Pos2, r: f32, color: Color32) {
+    let start = time * 6.0;
+    let pts: Vec<Pos2> = (0..=20)
+        .map(|i| {
+            let a = start + i as f64 / 20.0 * 4.4;
+            c + r * Vec2::new(a.cos() as f32, a.sin() as f32)
+        })
+        .collect();
+    p.add(egui::Shape::line(pts, Stroke::new(2.0_f32, color)));
+}
+
+/// Single-line text clipped to `max_w` with an ellipsis.
+fn elide(p: &egui::Painter, text: String, font: FontId, color: Color32, max_w: f32) -> Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple_singleline(text, font, color);
+    job.wrap = egui::text::TextWrapping {
+        max_width: max_w.max(1.0),
+        max_rows: 1,
+        break_anywhere: true,
+        overflow_character: Some('…'),
+    };
+    p.layout_job(job)
+}
+
+/// Right-anchored pill label painted at `right_center`.
+fn pill_at(p: &egui::Painter, right_center: Pos2, text: &str, fg: Color32, bg: Color32) {
+    let galley = p.layout_no_wrap(text.to_string(), FontId::proportional(11.5), fg);
+    let size = galley.size() + Vec2::new(16.0, 6.0);
+    let r = Rect::from_min_size(Pos2::new(right_center.x - size.x, right_center.y - size.y / 2.0), size);
+    p.rect_filled(r, size.y / 2.0, bg);
+    p.galley(r.center() - galley.size() / 2.0, galley, fg);
+}
+
+/// Small rounded label (project, driver, usage).
+fn chip(ui: &mut Ui, text: &str, color: Color32) {
+    Frame::NONE
+        .fill(color.gamma_multiply(0.14))
+        .corner_radius(10)
+        .inner_margin(Margin::symmetric(9, 3))
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).size(11.5).color(color));
+        });
+}
+
+fn state_badge(ui: &mut Ui, state: &str) {
+    let color = match state {
+        "running" => GREEN,
+        "paused" | "restarting" => AMBER,
+        "dead" => RED,
+        _ => FAINT,
+    };
+    chip(ui, &capitalize(state), color);
+}
+
+/// "● Live" indicator, painted so it sizes to its text in any layout.
+fn live_pill(ui: &mut Ui, ok: bool) {
+    let color = if ok { GREEN } else { RED };
+    let text = if ok { "Live" } else { "Offline" };
+    let galley = ui.painter().layout_no_wrap(text.to_string(), FontId::proportional(11.5), color);
+    let size = Vec2::new(galley.size().x + 30.0, 22.0);
+    let (r, _) = ui.allocate_exact_size(size, Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(r, 11.0, color.gamma_multiply(0.12));
+    p.circle_filled(Pos2::new(r.left() + 12.0, r.center().y), 3.0, color);
+    p.galley(Pos2::new(r.left() + 21.0, r.center().y - galley.size().y / 2.0), galley, color);
+}
+
+#[derive(Clone, Copy)]
+enum Btn {
+    Primary,
+    Secondary,
+    Danger,
+}
+
+fn button(ui: &mut Ui, label: &str, kind: Btn, enabled: bool) -> egui::Response {
+    let (fill, fg, stroke) = match kind {
+        Btn::Primary => (ACCENT, Color32::WHITE, ACCENT),
+        Btn::Secondary => (SURFACE_HI, TEXT, BORDER),
+        Btn::Danger => (RED.gamma_multiply(0.12), RED, RED.gamma_multiply(0.4)),
+    };
+    let btn = egui::Button::new(RichText::new(label).size(13.5).color(fg))
+        .fill(fill)
+        .stroke(Stroke::new(1.0_f32, stroke))
+        .corner_radius(8)
+        .min_size(Vec2::new(0.0, 34.0));
+    let resp = ui.add_enabled(enabled, btn);
+    if resp.hovered() && enabled {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     resp
 }
 
-fn tx(t: impl Into<WidgetText>) -> egui::Label {
-    egui::Label::new(t).selectable(false)
+/// Full-width low-emphasis button (rail footer).
+fn ghost_button(ui: &mut Ui, label: &str, width: f32) -> egui::Response {
+    ui.add(
+        egui::Button::new(RichText::new(label).size(13.0).color(MUTED))
+            .fill(SURFACE)
+            .stroke(Stroke::new(1.0_f32, BORDER))
+            .corner_radius(8)
+            .min_size(Vec2::new(width, 32.0)),
+    )
 }
 
-fn detail_row(ui: &mut Ui, k: &str, v: &str) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(format!("{k}:")).weak());
-        ui.label(RichText::new(v).monospace());
-    });
+fn toggle_chip(ui: &mut Ui, label: &str, on: bool) -> egui::Response {
+    let (fill, fg, stroke) = if on {
+        (ACCENT.gamma_multiply(0.16), ACCENT, ACCENT.gamma_multiply(0.5))
+    } else {
+        (SURFACE_HI, MUTED, BORDER)
+    };
+    ui.add(
+        egui::Button::new(RichText::new(label).size(12.5).color(fg))
+            .fill(fill)
+            .stroke(Stroke::new(1.0_f32, stroke))
+            .corner_radius(8),
+    )
 }
 
-/// Dashboard stat card: label, big number, sub-caption.
-fn stat_card(ui: &mut Ui, label: &str, value: &str, sub: &str, w: f32, color: Color32) {
-    let frame = Frame::NONE
-        .fill(Color32::from_rgb(24, 29, 39))
-        .stroke(Stroke::new(1.0_f32, Color32::from_rgb(40, 48, 62)))
-        .corner_radius(10)
-        .inner_margin(egui::Margin::same(10));
-    frame.show(ui, |ui| {
-        ui.set_width(w);
-        ui.label(RichText::new(label).small().weak());
-        ui.label(RichText::new(value).heading().color(color).size(24.0));
-        ui.label(RichText::new(sub).small().weak());
-    });
-}
-
-/// Horizontal gauge: label, bar, percent.
-fn gauge(ui: &mut Ui, label: &str, pct: f64, color: Color32, full: f64) {
-    let frac = (pct / full).clamp(0.0, 1.0) as f32;
-    ui.vertical(|ui| {
-        ui.label(RichText::new(format!("{label} {pct:.1}%")).small().weak());
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width().max(60.0), 8.0), Sense::hover());
-        let paint = ui.painter();
-        paint.rect_filled(rect, 4.0, Color32::from_rgb(30, 36, 48));
-        if frac > 0.0 {
-            let r = Rect::from_min_size(rect.min, Vec2::new(rect.width() * frac, rect.height()));
-            paint.rect_filled(r, 4.0, color);
-        }
-    });
-}
-
-/// Tiny inline sparkline.
-fn sparkline(ui: &mut Ui, series: &VecDeque<f64>, color: Color32, size: Vec2) {
-    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-    if series.len() < 2 {
-        return;
-    }
-    let max = series.iter().cloned().fold(0.0_f64, f64::max).max(1.0);
-    let n = series.len();
-    let paint = ui.painter();
-    let stroke = Stroke::new(1.2_f32, color);
-    let mut prev: Option<Pos2> = None;
-    for (i, v) in series.iter().enumerate() {
-        let x = rect.left() + rect.width() * (i as f64 / (n - 1) as f64) as f32;
-        let y = rect.bottom() - rect.height() * ((*v / max).clamp(0.0, 1.0)) as f32;
-        let p = Pos2::new(x, y);
-        if let Some(q) = prev {
-            paint.line_segment([q, p], stroke);
-        }
-        prev = Some(p);
-    }
-}
-
-/// Filled area chart with grid.
-fn area_chart(ui: &mut Ui, title: &str, series: &[f64], color: Color32, size: Vec2) {
-    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-    let paint = ui.painter();
-    paint.rect_filled(rect, 6.0, Color32::from_rgb(14, 18, 25));
-    paint.rect_stroke(rect, 6.0, Stroke::new(1.0_f32, Color32::from_rgb(36, 44, 58)), egui::epaint::StrokeKind::Outside);
-    // gridlines
-    for g in 1..4 {
-        let y = rect.top() + rect.height() * g as f32 / 4.0;
-        paint.line_segment(
-            [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
-            Stroke::new(0.5_f32, Color32::from_rgb(28, 34, 46)),
+/// Search field with a painted magnifier and a clear button.
+fn search_box(ui: &mut Ui, text: &mut String, hint: &str) {
+    let resp = ui.add(
+        egui::TextEdit::singleline(text)
+            .hint_text(RichText::new(hint).color(FAINT))
+            .margin(Margin {
+                left: 32,
+                right: 30,
+                top: 8,
+                bottom: 8,
+            })
+            .desired_width(f32::INFINITY),
+    );
+    let c = Pos2::new(resp.rect.left() + 16.0, resp.rect.center().y - 1.0);
+    let s = Stroke::new(1.5_f32, FAINT);
+    ui.painter().circle_stroke(c, 4.5, s);
+    ui.painter().line_segment([c + Vec2::new(3.3, 3.3), c + Vec2::new(6.8, 6.8)], s);
+    if !text.is_empty() {
+        let r = Rect::from_center_size(Pos2::new(resp.rect.right() - 16.0, resp.rect.center().y), Vec2::splat(18.0));
+        let clear = ui.interact(r, resp.id.with("clear"), Sense::click());
+        let col = if clear.hovered() { TEXT } else { FAINT };
+        let d = 3.5;
+        ui.painter().line_segment([r.center() - Vec2::splat(d), r.center() + Vec2::splat(d)], Stroke::new(1.5_f32, col));
+        ui.painter().line_segment(
+            [r.center() + Vec2::new(-d, d), r.center() + Vec2::new(d, -d)],
+            Stroke::new(1.5_f32, col),
         );
+        if clear.clicked() {
+            text.clear();
+        }
     }
-    if series.len() < 2 {
+}
+
+/// Segmented control; returns the newly picked value.
+fn segmented<T: PartialEq + Copy>(ui: &mut Ui, opts: &[(T, String)], cur: T) -> Option<T> {
+    let h = 32.0;
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h), Sense::hover());
+    ui.painter()
+        .rect(rect, 9.0, SURFACE, Stroke::new(1.0_f32, BORDER), egui::epaint::StrokeKind::Inside);
+    let w = (rect.width() - 6.0) / opts.len() as f32;
+    let mut out = None;
+    for (i, (v, label)) in opts.iter().enumerate() {
+        let r = Rect::from_min_size(rect.min + Vec2::new(3.0 + i as f32 * w, 3.0), Vec2::new(w, h - 6.0));
+        let resp = ui.interact(r, ui.id().with(("seg", i)), Sense::click());
+        let active = *v == cur;
+        if active {
+            ui.painter().rect_filled(r, 7.0, ELEVATED);
+        } else if resp.hovered() {
+            ui.painter().rect_filled(r, 7.0, SURFACE_HI);
+        }
+        ui.painter().text(
+            r.center(),
+            egui::Align2::CENTER_CENTER,
+            label,
+            FontId::proportional(12.5),
+            if active { TEXT } else { MUTED },
+        );
+        if resp.clicked() {
+            out = Some(*v);
+        }
+    }
+    out
+}
+
+/// Label above value, for detail grids.
+fn kv(ui: &mut Ui, k: &str, v: &str, mono: bool) {
+    ui.spacing_mut().item_spacing.y = 2.0;
+    ui.label(RichText::new(k).size(11.5).color(FAINT));
+    let t = RichText::new(v).color(TEXT);
+    let t = if mono { t.font(FontId::monospace(12.5)) } else { t.size(13.5) };
+    ui.add(egui::Label::new(t).truncate());
+    ui.add_space(8.0);
+}
+
+fn progress(p: &egui::Painter, bar: Rect, frac: f32, color: Color32) {
+    let r = bar.height() / 2.0;
+    p.rect_filled(bar, r, SURFACE_HI);
+    let frac = frac.clamp(0.0, 1.0);
+    if frac > 0.0 {
+        let w = (bar.width() * frac).max(bar.height());
+        p.rect_filled(Rect::from_min_size(bar.min, Vec2::new(w, bar.height())), r, color);
+    }
+}
+
+/// Tiny inline trend line.
+fn sparkline(p: &egui::Painter, rect: Rect, series: impl Iterator<Item = f64>, color: Color32, floor: f64) {
+    let s: Vec<f64> = series.collect();
+    if s.len() < 2 {
         return;
     }
-    let max = series.iter().cloned().fold(0.0_f64, f64::max).max(1.0);
-    let n = series.len();
-    let pts: Vec<Pos2> = series
-        .iter()
+    let pts = area_points(rect, &s, series_max(&s, floor));
+    fill_under(p, &pts, rect.bottom(), color, 45);
+    p.add(egui::Shape::line(pts, Stroke::new(1.3_f32, color)));
+}
+
+fn series_max(s: &[f64], floor: f64) -> f64 {
+    s.iter().cloned().fold(0.0_f64, f64::max).max(floor)
+}
+
+fn area_points(rect: Rect, s: &[f64], max: f64) -> Vec<Pos2> {
+    let n = s.len().max(2);
+    s.iter()
         .enumerate()
         .map(|(i, v)| {
-            let x = rect.left() + rect.width() * (i as f64 / (n - 1) as f64) as f32;
-            let y = rect.bottom() - rect.height() * ((*v / max).clamp(0.0, 1.0)) as f32;
+            let x = rect.left() + rect.width() * (i as f32 / (n - 1) as f32);
+            let y = rect.bottom() - rect.height() * (v / max).clamp(0.0, 1.0) as f32;
             Pos2::new(x, y)
         })
-        .collect();
-    // filled area
-    let mut mesh = egui::epaint::Mesh {
-        indices: Vec::new(),
-        vertices: Vec::new(),
-        texture_id: egui::TextureId::Managed(0),
-    };
-    let base = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 70);
-    mesh.vertices.push(egui::epaint::Vertex {
-        pos: Pos2::new(rect.left(), rect.bottom()),
-        uv: egui::epaint::WHITE_UV,
-        color: base,
-    });
-    for p in &pts {
-        mesh.vertices.push(egui::epaint::Vertex {
-            pos: *p,
-            uv: egui::epaint::WHITE_UV,
-            color: base,
-        });
+        .collect()
+}
+
+/// Vertical gradient under a line: `alpha` at the line fading to clear.
+fn fill_under(p: &egui::Painter, pts: &[Pos2], bottom: f32, color: Color32, alpha: u8) {
+    if pts.len() < 2 {
+        return;
     }
-    mesh.vertices.push(egui::epaint::Vertex {
-        pos: Pos2::new(rect.right(), rect.bottom()),
-        uv: egui::epaint::WHITE_UV,
-        color: base,
-    });
-    for i in 1..mesh.vertices.len() - 1 {
-        mesh.indices.extend_from_slice(&[0, i as u32, (i + 1) as u32]);
+    let top = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha);
+    let mut mesh = egui::epaint::Mesh::default();
+    for q in pts {
+        mesh.colored_vertex(*q, top);
+        mesh.colored_vertex(Pos2::new(q.x, bottom), Color32::TRANSPARENT);
     }
-    paint.add(mesh);
-    // top line
-    let stroke = Stroke::new(1.4_f32, color);
-    for w in pts.windows(2) {
-        paint.line_segment([w[0], w[1]], stroke);
+    for i in 0..pts.len() as u32 - 1 {
+        let a = i * 2;
+        mesh.add_triangle(a, a + 1, a + 2);
+        mesh.add_triangle(a + 1, a + 3, a + 2);
     }
-    if !title.is_empty() {
-        paint.text(
-            Pos2::new(rect.left() + 6.0, rect.top() + 4.0),
-            egui::Align2::LEFT_TOP,
-            title,
-            FontId::new(11.0, FontFamily::Monospace),
-            Color32::from_rgb(150, 155, 165),
+    p.add(mesh);
+}
+
+/// Area chart with gridlines, a scale label and a hover readout.
+fn area_chart(ui: &mut Ui, series: &[f64], color: Color32, size: Vec2, fmt: fn(f64) -> String) {
+    // The scale label gets its own strip above the plot.
+    let (outer, resp) = ui.allocate_exact_size(size, Sense::hover());
+    let rect = Rect::from_min_max(outer.min + Vec2::new(0.0, 16.0), outer.max);
+    let p = ui.painter();
+    for g in 0..4 {
+        let y = rect.top() + rect.height() * g as f32 / 4.0;
+        p.line_segment(
+            [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
+            Stroke::new(1.0_f32, Color32::from_rgb(28, 33, 43)),
         );
+    }
+    p.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0_f32, BORDER));
+    if series.len() < 2 {
+        return;
+    }
+    let max = series_max(series, 1e-9) * 1.15;
+    let pts = area_points(rect, series, max);
+    fill_under(p, &pts, rect.bottom(), color, 80);
+    p.add(egui::Shape::line(pts.clone(), Stroke::new(1.8_f32, color)));
+    p.text(
+        rect.right_top() - Vec2::new(0.0, 3.0),
+        egui::Align2::RIGHT_BOTTOM,
+        fmt(max),
+        FontId::proportional(10.5),
+        FAINT,
+    );
+    if let Some(pos) = resp.hover_pos() {
+        let i = (((pos.x - rect.left()) / rect.width()) * (pts.len() - 1) as f32)
+            .round()
+            .clamp(0.0, (pts.len() - 1) as f32) as usize;
+        let q = pts[i];
+        p.line_segment([Pos2::new(q.x, rect.top()), Pos2::new(q.x, rect.bottom())], Stroke::new(1.0_f32, BORDER));
+        p.circle_filled(q, 4.0, color);
+        p.circle_stroke(q, 4.0, Stroke::new(1.5_f32, SURFACE));
+        let label = fmt(series[i]);
+        let ago_s = pts.len() - 1 - i;
+        let text = if ago_s == 0 { label } else { format!("{label} · {ago_s}s ago") };
+        let galley = p.layout_no_wrap(text, FontId::proportional(11.5), TEXT);
+        let mut tip = Rect::from_min_size(q + Vec2::new(8.0, -26.0), galley.size() + Vec2::new(12.0, 6.0));
+        if tip.right() > rect.right() {
+            tip = tip.translate(Vec2::new(-tip.width() - 16.0, 0.0));
+        }
+        if tip.top() < rect.top() {
+            tip = tip.translate(Vec2::new(0.0, rect.top() - tip.top()));
+        }
+        p.rect_filled(tip, 6.0, ELEVATED);
+        p.galley(tip.min + Vec2::new(6.0, 3.0), galley, TEXT);
     }
 }
 
-fn accent() -> Color32 {
-    Color32::from_rgb(60, 150, 240)
+/// One log row: dimmed time, colored source tag (consolidated view), body.
+fn log_line_job(l: &LogLine, source: Option<&str>, font: &FontId, alpha: f32) -> egui::text::LayoutJob {
+    let fmt = |color: Color32| egui::TextFormat::simple(font.clone(), color.linear_multiply(alpha));
+    let mut job = egui::text::LayoutJob::default();
+    let mut body = l.text.as_str();
+    // Timestamped tails lead with RFC3339; show just the clock part.
+    if let Some((ts, rest)) = body.split_once(' ') {
+        if ts.len() >= 19 && ts.as_bytes()[4] == b'-' && ts.as_bytes()[10] == b'T' {
+            job.append(&ts[11..19], 0.0, fmt(FAINT));
+            job.append("  ", 0.0, fmt(FAINT));
+            body = rest;
+        }
+    }
+    if let Some(src) = source {
+        job.append(src, 0.0, fmt(source_color(src)));
+        job.append("  ", 0.0, fmt(FAINT));
+    }
+    let color = match l.stream {
+        StreamKind::Stderr => Color32::from_rgb(240, 178, 150),
+        StreamKind::Stdout => Color32::from_rgb(206, 212, 222),
+    };
+    job.append(body, 0.0, fmt(color));
+    job
+}
+
+/// Stable per-container tag color in the consolidated log view.
+fn source_color(name: &str) -> Color32 {
+    const PALETTE: [Color32; 6] = [ACCENT, GREEN, VIOLET, AMBER, CYAN, Color32::from_rgb(244, 140, 190)];
+    let h = name.bytes().fold(5381u32, |h, b| h.wrapping_mul(33) ^ b as u32);
+    PALETTE[h as usize % PALETTE.len()]
+}
+
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().chain(c).collect(),
+        None => String::new(),
+    }
+}
+
+/// "12s ago" / "4m ago" / "3h ago" / "2d ago".
+fn ago(secs: i64) -> String {
+    let s = secs.max(0);
+    match s {
+        0..=4 => "just now".to_string(),
+        5..=59 => format!("{s}s ago"),
+        60..=3599 => format!("{}m ago", s / 60),
+        3600..=86_399 => format!("{}h ago", s / 3600),
+        _ => format!("{}d ago", s / 86_400),
+    }
+}
+
+/// Brand mark: accent tile with a stack of containers.
+fn logo_mark(p: &egui::Painter, r: Rect) {
+    p.rect_filled(r, 9.0, Color32::from_rgb(52, 112, 235));
+    p.rect_filled(
+        Rect::from_min_max(r.min, Pos2::new(r.right(), r.center().y)),
+        egui::CornerRadius { nw: 9, ne: 9, sw: 0, se: 0 },
+        Color32::from_white_alpha(18),
+    );
+    let b = Vec2::new(6.5, 5.5);
+    let base_y = r.center().y + 2.0;
+    for (dx, y) in [(-7.5, base_y), (0.0, base_y), (7.5, base_y), (0.0, base_y - 7.0)] {
+        let c = Pos2::new(r.center().x + dx, y);
+        p.rect_filled(Rect::from_center_size(c, b), 1.5, Color32::WHITE);
+    }
+    p.line_segment(
+        [Pos2::new(r.left() + 7.0, base_y + 6.5), Pos2::new(r.right() - 7.0, base_y + 6.5)],
+        Stroke::new(1.5_f32, Color32::from_white_alpha(170)),
+    );
 }
 
 fn human_size(b: i64) -> String {
@@ -2480,8 +3435,8 @@ fn err_str(e: DockerError) -> String {
 pub fn run(rt: tokio::runtime::Runtime, socket: &str, refresh: f64) -> Result<(), Box<dyn std::error::Error>> {
     let icon = load_icon();
     let mut vb = egui::ViewportBuilder::default()
-        .with_inner_size([1100.0, 700.0])
-        .with_min_inner_size([800.0, 500.0])
+        .with_inner_size([1280.0, 820.0])
+        .with_min_inner_size([960.0, 600.0])
         .with_title("Simple Docker Desktop")
         .with_app_id("io.sdd.SimpleDockerDesktop");
     if let Some(icon) = icon {
