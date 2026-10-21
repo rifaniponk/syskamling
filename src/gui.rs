@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use egui::{
-    Color32, FontData, FontFamily, FontId, Frame, RichText, ScrollArea, TextStyle, Ui, Vec2,
-    WidgetText,
+    Color32, FontData, FontFamily, FontId, Frame, RichText, ScrollArea, Sense, TextStyle, Ui,
+    Vec2, WidgetText,
 };
 
 use tokio::sync::mpsc;
@@ -494,7 +494,12 @@ impl SddApp {
                 let busy = !busy_id.is_empty() && busy_id == c.id;
                 let pulse = dot_anim.get(&c.id).copied().unwrap_or(0.0);
                 let frame = Frame::NONE.fill(row_fill(is_sel, pulse));
-                let resp = frame.show(ui, |ui| {
+                // Make the whole row a click target: lay the widgets out
+                // first, then overlay an invisible click rect across the
+                // full row so clicking anywhere (dot, name, state label, or
+                // empty space) selects it.
+                let row_id = ui.id().with(("row", &c.id));
+                frame.show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(dot(running, pulse));
                         if busy {
@@ -508,12 +513,7 @@ impl SddApp {
                                 t
                             }
                         };
-                        if ui.add(tx(mk())).double_clicked() {
-                            open_logs = Some(c.id.clone());
-                        }
-                        if ui.add(tx(mk())).clicked() {
-                            new_sel = Some(i);
-                        }
+                        ui.add(tx(mk()));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let state = RichText::new(&c.state).small().color(if running {
                                 Color32::from_rgb(110, 210, 150)
@@ -523,16 +523,24 @@ impl SddApp {
                             ui.label(state);
                         });
                     });
+                    let row_rect = ui.min_rect();
+                    let click = ui.interact(row_rect, row_id, Sense::click());
+                    if click.hovered() {
+                        click.clone().on_hover_text(format!(
+                            "{}\n{}\n{}\n{}",
+                            c.short_name(),
+                            c.image,
+                            c.status,
+                            c.port_summary()
+                        ));
+                    }
+                    if click.clicked() {
+                        new_sel = Some(i);
+                    }
+                    if click.double_clicked() {
+                        open_logs = Some(c.id.clone());
+                    }
                 });
-                if resp.response.hovered() {
-                    resp.response.on_hover_text(format!(
-                        "{}\n{}\n{}\n{}",
-                        c.short_name(),
-                        c.image,
-                        c.status,
-                        c.port_summary()
-                    ));
-                }
             }
         });
 
