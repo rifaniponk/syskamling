@@ -45,12 +45,23 @@ impl UnixClient {
 
     /// GET a path, returning the raw body.
     pub async fn get_bytes(&self, path: &str) -> Result<Vec<u8>, DockerError> {
-        let req = hyper::Request::builder()
+        self.get_bytes_opts(path, &[]).await
+    }
+
+    /// GET with extra headers (used for API-version overrides).
+    pub async fn get_bytes_opts(
+        &self,
+        path: &str,
+        headers: &[(&str, String)],
+    ) -> Result<Vec<u8>, DockerError> {
+        let mut b = hyper::Request::builder()
             .method("GET")
             .uri(uri(path))
-            .header("Host", "localhost")
-            .body(EmptyBody)
-            .map_err(|e| DockerError::Request(e.to_string()))?;
+            .header("Host", "localhost");
+        for (k, v) in headers {
+            b = b.header(*k, v.clone());
+        }
+        let req = b.body(EmptyBody).map_err(|e| DockerError::Request(e.to_string()))?;
         let res = self.client().request(req).await.map_err(map_hyper_err)?;
         let status = res.status();
         let body = res
@@ -61,6 +72,53 @@ impl UnixClient {
             .to_bytes();
         check_status(status, &body)?;
         Ok(body.to_vec())
+    }
+
+    /// GET a path with an explicit `Api-Version` header, returning the raw
+    /// body plus the `API-Version` response header (empty if absent). Some
+    /// endpoints (e.g. `/system/df`) are only routed when the daemon is told
+    /// which API version the client speaks.
+    pub async fn get_with_version(
+        &self,
+        path: &str,
+        version: &str,
+    ) -> Result<(Vec<u8>, String), DockerError> {
+        let (status, headers, body) = self.request("GET", path, version).await?;
+        check_status(status, &body)?;
+        let header_version = headers
+            .get("API-Version")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        Ok((body, header_version))
+    }
+
+    /// Raw HTTP request through hyper; returns status, response headers and
+    /// the fully-buffered body.
+    async fn request(
+        &self,
+        method: &str,
+        path: &str,
+        version: &str,
+    ) -> Result<(hyper::StatusCode, hyper::HeaderMap, Vec<u8>), DockerError> {
+        let mut b = hyper::Request::builder()
+            .method(method)
+            .uri(uri(path))
+            .header("Host", "localhost");
+        if !version.is_empty() {
+            b = b.header("Api-Version", version.to_string());
+        }
+        let req = b.body(EmptyBody).map_err(|e| DockerError::Request(e.to_string()))?;
+        let res = self.client().request(req).await.map_err(map_hyper_err)?;
+        let status = res.status();
+        let headers = res.headers().clone();
+        let body = res
+            .into_body()
+            .collect()
+            .await
+            .map_err(map_hyper_err)?
+            .to_bytes();
+        Ok((status, headers, body.to_vec()))
     }
 
     /// POST/DELETE etc. with an empty body; returns the raw response body.
@@ -88,16 +146,37 @@ impl UnixClient {
     /// Writes the request bytes directly, then returns the socket so the
     /// caller can read the response head and body framing itself. The daemon
     /// answers stream endpoints with `Transfer-Encoding: chunked` followed by
-    /// the Docker multiplexed stream (when TTY is off).
-    pub async fn open_stream(&self, path: &str) -> Result<UnixStream, DockerError> {
+    /// the Docker multiplexed stream (when TTY is off). `Accept: application/json`
+    /// selects newline-delimited JSON for stats/events endpoints.
+    pub async fn open_stream(&self, path: &str, json: bool) -> Result<UnixStream, DockerError> {
+        self.open_stream_opts(path, json, "").await
+    }
+
+    /// As `open_stream`, but with an explicit `Api-Version` header.
+    pub async fn open_stream_opts(
+        &self,
+        path: &str,
+        json: bool,
+        version: &str,
+    ) -> Result<UnixStream, DockerError> {
         let mut stream = UnixStream::connect(self.socket()).await.map_err(|e| {
             DockerError::Connect(format!(
                 "cannot reach Docker daemon at {socket}: {e}",
                 socket = self.socket
             ))
         })?;
+        let accept = if json {
+            "application/json"
+        } else {
+            "application/vnd.docker.raw-stream"
+        };
+        let vhead = if version.is_empty() {
+            String::new()
+        } else {
+            format!("Api-Version: {version}\r\n")
+        };
         let req = format!(
-            "GET {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/vnd.docker.raw-stream\r\n\r\n"
+            "GET {path} HTTP/1.1\r\nHost: localhost\r\nAccept: {accept}\r\n{vhead}\r\n"
         );
         stream
             .write_all(req.as_bytes())

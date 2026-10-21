@@ -4,19 +4,42 @@ mod client;
 mod types;
 
 pub use client::{DockerError, UnixClient};
-pub use types::{ContainerSummary, ImageSummary, VolumeEntry};
+pub use types::{
+    ContainerSummary, DiskSummary, EventMessage, ImageSummary, StatsSample, SystemInfo,
+    UsageTotals, VolumeEntry,
+};
+
+use std::sync::OnceLock;
 
 use tokio::net::UnixStream;
 
 pub struct Docker {
     client: UnixClient,
+    /// Highest API version both sides support, learned from `/_ping`.
+    /// `OnceLock` because it is negotiated at runtime from daemon input.
+    negotiated: OnceLock<String>,
 }
 
 impl Docker {
     pub fn new(socket: impl Into<String>) -> Self {
         Self {
             client: UnixClient::new(socket),
+            negotiated: OnceLock::new(),
         }
+    }
+
+    /// Learn the daemon's max API version once; empty string if unknown.
+    pub async fn api_version(&self) -> &str {
+        if let Some(v) = self.negotiated.get() {
+            return v;
+        }
+        let (_, v) = self
+            .client
+            .get_with_version("/_ping", "")
+            .await
+            .unwrap_or_default();
+        let _ = self.negotiated.set(v);
+        self.negotiated.get().map(String::as_str).unwrap_or("")
     }
 
     /// List all containers, newest first (Engine default).
@@ -32,6 +55,42 @@ impl Docker {
         let v: serde_json::Value = self.client.get_json("/volumes").await?;
         Ok(serde_json::from_value(v["Volumes"].clone())
             .map_err(|e| DockerError::Decode(e.to_string()))?)
+    }
+
+    /// Daemon system info: CPU count, memory, container/image counts.
+    pub async fn system_info(&self) -> Result<SystemInfo, DockerError> {
+        self.client.get_json("/info").await
+    }
+
+    /// Disk usage aggregates: image/container/volume/build-cache totals.
+    /// The daemon only routes `/system/df` once it knows which API version
+    /// the client speaks, so this goes through the negotiated version header.
+    pub async fn disk_summary(&self) -> Result<DiskSummary, DockerError> {
+        let v = self.api_version().await;
+        let (body, _) = self.client.get_with_version("/system/df", v).await?;
+        serde_json::from_slice(&body).map_err(|e| DockerError::Decode(e.to_string()))
+    }
+
+    /// Open the live stats stream for one container (newline-delimited JSON).
+    /// Sent with the negotiated API version: Docker 29 only streams stats
+    /// when the request declares a version.
+    pub async fn open_stats_stream(&self, id: &str) -> Result<UnixStream, DockerError> {
+        let v = self.api_version().await;
+        self.client
+            .open_stream_opts(&format!("/containers/{id}/stats?stream=true"), true, v)
+            .await
+    }
+
+    /// Open the daemon event stream, filtered to container lifecycle events.
+    pub async fn open_event_stream(&self) -> Result<UnixStream, DockerError> {
+        let v = self.api_version().await;
+        self.client
+            .open_stream_opts(
+                "/events?filters=%7B%22type%22%3A%7B%22container%22%3Atrue%7D%7D",
+                true,
+                v,
+            )
+            .await
     }
 
     /// Report the daemon's API version; empty string if it doesn't say.
@@ -82,9 +141,29 @@ impl Docker {
         tail: usize,
     ) -> Result<UnixStream, DockerError> {
         self.client
-            .open_stream(&format!(
-                "/containers/{id}/logs?stdout=true&stderr=true&follow={follow}&tail={tail}"
-            ))
+            .open_stream(
+                &format!(
+                    "/containers/{id}/logs?stdout=true&stderr=true&follow={follow}&tail={tail}"
+                ),
+                false,
+            )
+            .await
+    }
+
+    /// Open a per-container log snapshot (no follow) with timestamps, for
+    /// building the consolidated Logs tab.
+    pub async fn open_log_snapshot(
+        &self,
+        id: &str,
+        tail: usize,
+    ) -> Result<UnixStream, DockerError> {
+        self.client
+            .open_stream(
+                &format!(
+                    "/containers/{id}/logs?stdout=true&stderr=true&follow=false&timestamps=true&tail={tail}"
+                ),
+                false,
+            )
             .await
     }
 }
@@ -94,6 +173,8 @@ impl Docker {
 pub struct LogLine {
     pub stream: StreamKind,
     pub text: String,
+    /// Container name when the line comes from the consolidated Logs tab.
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -136,7 +217,11 @@ impl LogStreamDecoder {
             self.buf.drain(..8 + len);
             let text = String::from_utf8_lossy(&payload).trim_end_matches('\n').to_string();
             for l in text.split('\n') {
-                lines.push(LogLine { stream: kind, text: l.to_string() });
+                lines.push(LogLine {
+                    stream: kind,
+                    text: l.to_string(),
+                    source: None,
+                });
             }
         }
         lines
