@@ -6,26 +6,24 @@
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ContainerSummary {
+    #[serde(rename = "Id")]
     pub id: String,
+    #[serde(rename = "Names")]
     pub names: Vec<String>,
+    #[serde(rename = "Image")]
     pub image: String,
-    #[serde(default)]
-    pub image_id: String,
+    #[serde(rename = "State")]
     pub state: String,
+    #[serde(rename = "Status")]
     pub status: String,
-    #[serde(default)]
-    pub created: i64,
-    #[serde(default)]
+    #[serde(default, rename = "Ports")]
     pub ports: Vec<Port>,
-    #[serde(default)]
-    pub labels: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Port {
-    #[serde(default)]
-    pub ip: Option<String>,
     #[serde(default)]
     pub private_port: Option<u16>,
     #[serde(default)]
@@ -41,10 +39,6 @@ impl ContainerSummary {
             .first()
             .map(|n| n.trim_start_matches('/').to_string())
             .unwrap_or_else(|| self.id[..12].to_string())
-    }
-
-    pub fn short_id(&self) -> &str {
-        &self.id[..12.min(self.id.len())]
     }
 
     /// Human-readable port mapping, e.g. `0.0.0.0:8080->80/tcp`.
@@ -63,13 +57,15 @@ impl ContainerSummary {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ImageSummary {
+    #[serde(rename = "Id")]
     pub id: String,
-    #[serde(default)]
+    #[serde(default, rename = "RepoTags")]
     pub repo_tags: Vec<String>,
-    #[serde(default)]
+    #[serde(rename = "Created")]
     pub created: i64,
-    #[serde(default)]
+    #[serde(rename = "Size")]
     pub size: i64,
 }
 
@@ -88,41 +84,12 @@ impl ImageSummary {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct VolumeEntry {
+    #[serde(rename = "Name")]
     pub name: String,
+    #[serde(rename = "Driver")]
     pub driver: String,
-    #[serde(default)]
+    #[serde(default, rename = "CreatedAt")]
     pub created: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct SystemDf {
-    #[serde(default)]
-    pub layers_size: i64,
-    #[serde(default)]
-    pub containers_summary: Vec<DfContainer>,
-    #[serde(default)]
-    pub images: Vec<DfImage>,
-    #[serde(default)]
-    pub volumes_summary: DfVolumes,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct DfContainer {
-    pub state: String,
-    pub size: i64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct DfImage {
-    #[serde(default)]
-    pub size: i64,
-    #[serde(default)]
-    pub shared_size: i64,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct DfVolumes {
-    #[serde(default)]
-    pub size: i64,
 }

@@ -3,13 +3,14 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use bytes::Bytes;
 use http_body::{Body, SizeHint};
 use http_body_util::BodyExt;
 use hyper::Uri;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioIo;
 use serde::de::DeserializeOwned;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 
 /// A minimal HTTP/1.1 client that dials a fresh Unix-domain connection per
@@ -26,12 +27,12 @@ impl UnixClient {
         }
     }
 
-    fn socket(&self) -> &str {
+    pub fn socket(&self) -> &str {
         &self.socket
     }
 
-    fn client(&self) -> Client<UnixStream, UnixHyperIo> {
-        Client::builder(TokioExecutor).build(UnixHyperConnector {
+    fn client(&self) -> Client<UnixConnector, EmptyBody> {
+        Client::builder(TokioExecutor).build(UnixConnector {
             socket: self.socket.clone(),
         })
     }
@@ -98,7 +99,10 @@ impl UnixClient {
         let req = format!(
             "GET {path} HTTP/1.1\r\nHost: localhost\r\nAccept: application/vnd.docker.raw-stream\r\n\r\n"
         );
-        stream.write_all(req.as_bytes()).await.map_err(|e| DockerError::Io(e.to_string()))?;
+        stream
+            .write_all(req.as_bytes())
+            .await
+            .map_err(|e| DockerError::Io(e.to_string()))?;
         Ok(stream)
     }
 }
@@ -122,7 +126,7 @@ fn check_status(status: hyper::StatusCode, body: &[u8]) -> Result<(), DockerErro
     Err(DockerError::Api(status.as_u16(), message))
 }
 
-fn map_hyper_err(e: hyper_util::client::legacy::Error) -> DockerError {
+fn map_hyper_err(e: impl std::fmt::Display) -> DockerError {
     DockerError::Transport(e.to_string())
 }
 
@@ -142,29 +146,6 @@ pub enum DockerError {
     Decode(String),
 }
 
-// ---------------------------------------------------------------------------
-// Hyper glue: connect through a Unix socket, ignore the URI authority.
-// ---------------------------------------------------------------------------
-
-struct UnixHyperConnector {
-    socket: String,
-}
-
-impl tower_service::Service<Uri> for UnixHyperConnector {
-    type Response = UnixStream;
-    type Error = std::io::Error;
-    type Future = Pin<Box<dyn Future<Output = Result<UnixStream, std::io::Error>> + Send>>;
-
-    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, _: Uri) -> Self::Future {
-        let socket = self.socket.clone();
-        Box::pin(async move { UnixStream::connect(socket).await })
-    }
-}
-
 #[derive(Clone, Copy)]
 struct TokioExecutor;
 
@@ -176,75 +157,27 @@ impl hyper::rt::Executor<UnpinBoxFuture> for TokioExecutor {
 
 type UnpinBoxFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 
-/// Adapt tokio's UnixStream to hyper's AsyncRead/AsyncWrite.
-struct UnixHyperIo(UnixStream);
+// ---------------------------------------------------------------------------
+// Hyper glue: connect through a Unix socket, ignore the URI authority.
+// ---------------------------------------------------------------------------
 
-impl hyper::rt::Read for UnixHyperIo {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        mut buf: hyper::rt::ReadBufCursor<'_>,
-    ) -> Poll<Result<(), std::io::Error>> {
-        let n = unsafe {
-            let mut tbuf = ReadBuf::uninit(buf.as_mut());
-            match tokio::io::AsyncRead::poll_read(Pin::new(&mut self.get_mut().0), cx, &mut tbuf) {
-                Poll::Ready(Ok(())) => tbuf.filled().len(),
-                other => return other,
-            }
-        };
-        unsafe {
-            buf.advance_unchecked(n);
-        }
+#[derive(Clone)]
+struct UnixConnector {
+    socket: String,
+}
+
+impl tower_service::Service<Uri> for UnixConnector {
+    type Response = TokioIo<UnixStream>;
+    type Error = std::io::Error;
+    type Future = Pin<Box<dyn Future<Output = Result<TokioIo<UnixStream>, std::io::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }
-}
 
-impl hyper::rt::Write for UnixHyperIo {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<Result<usize, std::io::Error>> {
-        tokio::io::AsyncWrite::poll_write(Pin::new(&mut self.get_mut().0), cx, buf)
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), std::io::Error>> {
-        tokio::io::AsyncWrite::poll_flush(Pin::new(&mut self.get_mut().0), cx)
-    }
-
-    fn poll_shutdown(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<(), std::io::Error>> {
-        tokio::io::AsyncWrite::poll_shutdown(Pin::new(&mut self.get_mut().0), cx)
-    }
-}
-
-impl AsyncRead for UnixHyperIo {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        tokio::io::AsyncRead::poll_read(Pin::new(&mut self.get_mut().0), cx, buf)
-    }
-}
-
-impl AsyncWrite for UnixHyperIo {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        tokio::io::AsyncWrite::poll_write(Pin::new(&mut self.get_mut().0), cx, buf)
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        tokio::io::AsyncWrite::poll_flush(Pin::new(&mut self.get_mut().0), cx)
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        tokio::io::AsyncWrite::poll_shutdown(Pin::new(&mut self.get_mut().0), cx)
+    fn call(&mut self, _: Uri) -> Self::Future {
+        let socket = self.socket.clone();
+        Box::pin(async move { UnixStream::connect(socket).await.map(TokioIo::new) })
     }
 }
 
@@ -252,7 +185,7 @@ impl AsyncWrite for UnixHyperIo {
 struct EmptyBody;
 
 impl Body for EmptyBody {
-    type Data = bytes::Bytes;
+    type Data = Bytes;
     type Error = std::convert::Infallible;
 
     fn poll_frame(

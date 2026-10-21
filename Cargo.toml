@@ -10,9 +10,12 @@ name = "sdd"
 path = "src/main.rs"
 
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+clap = { version = "4", features = ["derive"] }
 hyper = { version = "1", features = ["client", "http1"] }
-hyper-util = { version = "0.1", features = ["client-legacy", "rt-tokio"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "client", "tokio", "http1"] }
+tower-service = "0.3"
+bytes = "1"
 http-body = "1"
 http-body-util = "0.1"
 http = "1"
