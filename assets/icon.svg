@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1b2a4a"/>
+      <stop offset="1" stop-color="#0d1526"/>
+    </linearGradient>
+    <linearGradient id="whale" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4fb3f0"/>
+      <stop offset="1" stop-color="#2478c8"/>
+    </linearGradient>
+  </defs>
+
+  <!-- rounded app-tile background -->
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="url(#bg)"/>
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="none" stroke="#2c4a78" stroke-width="3"/>
+
+  <!-- waterline -->
+  <path d="M28 176 q16 -10 32 0 t32 0 t32 0 t32 0 t32 0" fill="none" stroke="#2c6ea8" stroke-width="6" stroke-linecap="round"/>
+
+  <!-- containers riding on the whale's back -->
+  <g>
+    <rect x="76" y="70" width="30" height="26" rx="4" fill="#eef4fa" stroke="#2478c8" stroke-width="3"/>
+    <rect x="110" y="70" width="30" height="26" rx="4" fill="#eef4fa" stroke="#2478c8" stroke-width="3"/>
+    <rect x="144" y="70" width="30" height="26" rx="4" fill="#eef4fa" stroke="#2478c8" stroke-width="3"/>
+    <rect x="110" y="40" width="30" height="26" rx="4" fill="#eef4fa" stroke="#2478c8" stroke-width="3"/>
+    <!-- container doors -->
+    <line x1="84" y1="76" x2="84" y2="90" stroke="#9dc4e8" stroke-width="3"/>
+    <line x1="118" y1="76" x2="118" y2="90" stroke="#9dc4e8" stroke-width="3"/>
+    <line x1="152" y1="76" x2="152" y2="90" stroke="#9dc4e8" stroke-width="3"/>
+    <line x1="118" y1="46" x2="118" y2="60" stroke="#9dc4e8" stroke-width="3"/>
+  </g>
+
+  <!-- whale body -->
+  <path d="M52 150
+           q-6 -34 34 -44
+           l124 0
+           q26 0 34 18
+           q20 -4 26 -18
+           q4 16 -6 28
+           q-10 12 -26 12
+           l-140 0
+           q-34 0 -46 -14
+           z"
+        fill="url(#whale)"/>
+  <!-- tail fluke -->
+  <path d="M224 116 q14 -10 20 -4 q-2 14 -14 20 z" fill="#2478c8"/>
+  <!-- eye -->
+  <circle cx="78" cy="122" r="5" fill="#0d1526"/>
+  <!-- smile -->
+  <path d="M64 140 q14 8 30 6" fill="none" stroke="#0d1526" stroke-width="4" stroke-linecap="round"/>
+
+  <!-- spout -->
+  <path d="M196 96 q-4 -14 4 -22 M208 98 q2 -12 12 -16" fill="none" stroke="#4fb3f0" stroke-width="5" stroke-linecap="round"/>
+</svg>
