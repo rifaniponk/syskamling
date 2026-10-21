@@ -1,0 +1,30 @@
+[package]
+name = "sdd"
+version = "0.1.0"
+edition = "2021"
+description = "Simple Docker Desktop for Linux"
+license = "MIT"
+
+[[bin]]
+name = "sdd"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "process"] }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "rt-tokio"] }
+http-body = "1"
+http-body-util = "0.1"
+http = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ratatui = "0.29"
+crossterm = "0.28"
+anyhow = "1"
+thiserror = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
