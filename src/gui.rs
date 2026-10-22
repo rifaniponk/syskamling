@@ -19,6 +19,8 @@ use crate::docker::{
     self, ContainerSummary, DiskSummary, Docker, DockerError, EventMessage, ImageSummary,
     LogLine, StatsSample, StreamKind, SystemInfo,
 };
+use crate::hw::{HwSample, Sampler};
+use crate::ports::{self as portsmod, PortEntry};
 
 /// One page of container logs held by the UI.
 const LOG_CAP: usize = 5_000;
@@ -36,6 +38,8 @@ enum Tab {
     Images,
     Volumes,
     Agents,
+    Hardware,
+    Ports,
     Logs,
 }
 
@@ -80,6 +84,7 @@ enum Msg {
     Events(Result<Vec<EventMessage>, String>),
     AllLogs(Vec<LogLine>),
     AgentsScanned(Vec<AgentSession>),
+    PortsScanned(Vec<PortEntry>),
 }
 
 struct RefreshData {
@@ -175,6 +180,21 @@ struct Gui {
     agents: Vec<AgentSession>,
     selected_agent: Option<usize>,
     agent_filter: String,
+    // --- hardware tab ---
+    hw: Option<HwSample>,
+    hw_cpu_hist: VecDeque<f64>,
+    hw_mem_hist: VecDeque<f64>,
+    hw_disk_r_hist: VecDeque<f64>,
+    hw_disk_w_hist: VecDeque<f64>,
+    hw_net_rx_hist: VecDeque<f64>,
+    hw_net_tx_hist: VecDeque<f64>,
+    // --- ports tab ---
+    ports: Vec<PortEntry>,
+    /// (proto, addr, port) of the selected socket
+    selected_port: Option<(String, String, u16)>,
+    port_filter: String,
+    /// only sockets with a discoverable owning process
+    ports_owned_only: bool,
 }
 
 impl Gui {
@@ -214,6 +234,17 @@ impl Gui {
             agents: Vec::new(),
             selected_agent: None,
             agent_filter: String::new(),
+            hw: None,
+            hw_cpu_hist: VecDeque::new(),
+            hw_mem_hist: VecDeque::new(),
+            hw_disk_r_hist: VecDeque::new(),
+            hw_disk_w_hist: VecDeque::new(),
+            hw_net_rx_hist: VecDeque::new(),
+            hw_net_tx_hist: VecDeque::new(),
+            ports: Vec::new(),
+            selected_port: None,
+            port_filter: String::new(),
+            ports_owned_only: false,
         }
     }
 
@@ -257,6 +288,56 @@ impl Gui {
                     || a.cwd.as_deref().map(|c| c.to_lowercase()).unwrap_or_default().contains(&f)
             })
             .collect()
+    }
+
+    /// Sockets matching the Ports-tab filter, with their ports-list index.
+    fn filtered_ports(&self) -> Vec<(usize, &PortEntry)> {
+        let f = self.port_filter.to_lowercase();
+        self.ports
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| {
+                if self.ports_owned_only && p.pid.is_none() {
+                    return false;
+                }
+                f.is_empty()
+                    || p.proto.contains(&f)
+                    || p.addr.contains(&f)
+                    || p.port.to_string().contains(&f)
+                    || p.proc_name.as_deref().map(|n| n.to_lowercase()).unwrap_or_default().contains(&f)
+                    || p.state.to_lowercase().contains(&f)
+            })
+            .collect()
+    }
+
+    /// Containers whose published host port matches `port` (the cross-link
+    /// from a socket to the container that forwards it).
+    fn containers_on_port(&self, port: u16) -> Vec<String> {
+        self.containers
+            .iter()
+            .filter(|c| {
+                c.ports
+                    .iter()
+                    .any(|p| p.public_port == Some(port) || p.private_port == Some(port))
+            })
+            .map(|c| c.short_name())
+            .collect()
+    }
+
+    fn push_hw(&mut self, s: HwSample) {
+        let push = |q: &mut VecDeque<f64>, v: f64| {
+            q.push_back(v);
+            while q.len() > HIST {
+                q.pop_front();
+            }
+        };
+        push(&mut self.hw_cpu_hist, s.cpu_pct);
+        push(&mut self.hw_mem_hist, (s.mem_total - s.mem_avail) as f64);
+        push(&mut self.hw_disk_r_hist, s.disk_read_bps);
+        push(&mut self.hw_disk_w_hist, s.disk_write_bps);
+        push(&mut self.hw_net_rx_hist, s.net_rx_bps);
+        push(&mut self.hw_net_tx_hist, s.net_tx_bps);
+        self.hw = Some(s);
     }
 
     fn push_logs(&mut self, lines: Vec<LogLine>) {
@@ -323,6 +404,12 @@ struct SysKamlingApp {
     /// when the scanner task was last kicked
     last_agent_scan: Instant,
     agent_scan_busy: Arc<Mutex<bool>>,
+    // --- hardware tab ---
+    sampler: Sampler,
+    last_hw_sample: Instant,
+    // --- ports tab ---
+    last_port_scan: Instant,
+    port_scan_busy: Arc<Mutex<bool>>,
 }
 
 impl SysKamlingApp {
@@ -359,6 +446,10 @@ impl SysKamlingApp {
             toast: (String::new(), Instant::now()),
             last_agent_scan: Instant::now() - Duration::from_secs(999),
             agent_scan_busy: Arc::new(Mutex::new(false)),
+            sampler: Sampler::default(),
+            last_hw_sample: Instant::now() - Duration::from_secs(999),
+            last_port_scan: Instant::now() - Duration::from_secs(999),
+            port_scan_busy: Arc::new(Mutex::new(false)),
         };
         app
     }
@@ -543,6 +634,8 @@ impl eframe::App for SysKamlingApp {
             self.reap_stats_streams();
             self.spawn_dashboard_pulls();
             self.spawn_agent_scan();
+            self.sample_hardware();
+            self.spawn_port_scan();
             ctx.request_repaint();
         }
 
@@ -559,7 +652,10 @@ impl eframe::App for SysKamlingApp {
         }
 
         self.nav_rail(ctx);
-        if matches!(self.gui.tab, Tab::Containers | Tab::Images | Tab::Volumes | Tab::Agents) {
+        if matches!(
+            self.gui.tab,
+            Tab::Containers | Tab::Images | Tab::Volumes | Tab::Agents | Tab::Ports
+        ) {
             self.list_panel(ctx);
         }
         self.center(ctx);
@@ -590,6 +686,38 @@ impl SysKamlingApp {
             let sessions = scanner.scan();
             *busy.lock().unwrap() = false;
             let _ = tx.send(Msg::AgentsScanned(sessions));
+        });
+    }
+
+    /// Hardware vitals need back-to-back samples for rates, so the sampler
+    /// lives on the UI side and is read directly at the refresh cadence.
+    /// /proc reads are cheap (microseconds); no thread needed.
+    fn sample_hardware(&mut self) {
+        if self.last_hw_sample.elapsed() < Duration::from_secs_f64(self.refresh.max(1.0)) {
+            return;
+        }
+        self.last_hw_sample = Instant::now();
+        let s = self.sampler.sample();
+        self.gui.push_hw(s);
+    }
+
+    /// Listening-socket scan: /proc/net tables plus an fd walk, so it goes
+    /// to the blocking pool like the agent scan.
+    fn spawn_port_scan(&mut self) {
+        if self.last_port_scan.elapsed() < Duration::from_secs_f64(self.refresh.max(1.0) * 2.0) {
+            return;
+        }
+        if *self.port_scan_busy.lock().unwrap() {
+            return;
+        }
+        self.last_port_scan = Instant::now();
+        *self.port_scan_busy.lock().unwrap() = true;
+        let busy = Arc::clone(&self.port_scan_busy);
+        let tx = self.tx.clone();
+        self.rt.spawn_blocking(move || {
+            let entries = portsmod::scan();
+            *busy.lock().unwrap() = false;
+            let _ = tx.send(Msg::PortsScanned(entries));
         });
     }
 
@@ -881,6 +1009,17 @@ impl SysKamlingApp {
                         g.agents.iter().position(|a| a.agent == key.0 && a.lead_pid == key.1);
                 }
             }
+            Msg::PortsScanned(entries) => {
+                g.ports = entries;
+                // keep the selection pointing at the same socket
+                if let Some(key) = g.selected_port.clone() {
+                    g.selected_port = g
+                        .ports
+                        .iter()
+                        .find(|p| (p.proto, p.addr.as_str(), p.port) == (key.0.as_str(), key.1.as_str(), key.2))
+                        .map(|p| (p.proto.to_string(), p.addr.clone(), p.port));
+                }
+            }
         }
     }
 
@@ -896,6 +1035,8 @@ impl SysKamlingApp {
             (Tab::Images, "Images", g.images.len().to_string()),
             (Tab::Volumes, "Volumes", g.volumes.len().to_string()),
             (Tab::Agents, "Agents", g.agents.len().to_string()),
+            (Tab::Hardware, "Hardware", String::new()),
+            (Tab::Ports, "Ports", g.ports.len().to_string()),
             (Tab::Logs, "Logs", String::new()),
         ];
         let version = g.info.as_ref().map(|i| i.server_version.clone()).unwrap_or_default();
@@ -1055,6 +1196,7 @@ impl SysKamlingApp {
                     ),
                     Tab::Images => ("Images", self.gui.images.len(), "Search tags"),
                     Tab::Agents => ("Agents", self.gui.agents.len(), "Search agent or project"),
+                    Tab::Ports => ("Ports", self.gui.ports.len(), "Search port, process or address"),
                     _ => ("Volumes", self.gui.volumes.len(), "Search volumes"),
                 };
                 ui.horizontal(|ui| {
@@ -1064,6 +1206,7 @@ impl SysKamlingApp {
                 ui.add_space(8.0);
                 match tab {
                     Tab::Agents => search_box(ui, &mut self.gui.agent_filter, hint),
+                    Tab::Ports => search_box(ui, &mut self.gui.port_filter, hint),
                     _ => search_box(ui, &mut self.gui.filter, hint),
                 }
                 if tab == Tab::Containers {
@@ -1085,11 +1228,22 @@ impl SysKamlingApp {
                         self.gui.selected = None;
                     }
                 }
+                if tab == Tab::Ports {
+                    ui.add_space(4.0);
+                    let mut owned = self.gui.ports_owned_only;
+                    if ui
+                        .checkbox(&mut owned, RichText::new("Owned by a process only").size(12.5).color(MUTED))
+                        .changed()
+                    {
+                        self.gui.ports_owned_only = owned;
+                    }
+                }
                 ui.add_space(8.0);
                 match tab {
                     Tab::Containers => self.container_list(ui),
                     Tab::Images => self.image_list(ui),
                     Tab::Agents => self.agent_list(ui),
+                    Tab::Ports => self.port_list(ui),
                     _ => self.volume_list(ui),
                 }
             });
@@ -1353,6 +1507,78 @@ impl SysKamlingApp {
         }
     }
 
+    fn port_list(&mut self, ui: &mut Ui) {
+        let rows = self.gui.filtered_ports();
+        let sel = self.gui.selected_port.clone();
+        if rows.is_empty() {
+            if self.gui.ports.is_empty() {
+                empty_state(
+                    ui,
+                    "No listening sockets",
+                    "Nothing is bound on this machine — or /proc/net is unreadable.",
+                );
+            } else {
+                empty_state(ui, "No sockets match", "Try another search.");
+            }
+            return;
+        }
+        let mut new_sel: Option<Option<(String, String, u16)>> = None;
+        ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
+                for (_i, p) in rows {
+                    let key = (p.proto.to_string(), p.addr.clone(), p.port);
+                    let rect_h = if p.proc_name.is_some() { 58.0 } else { 44.0 };
+                    let (rect, resp) =
+                        ui.allocate_exact_size(Vec2::new(ui.available_width(), rect_h), Sense::click());
+                    let is_sel = sel.as_ref() == Some(&key);
+                    if resp.clicked() {
+                        new_sel = Some(if is_sel { None } else { Some(key.clone()) });
+                    }
+                    if !ui.is_rect_visible(rect) {
+                        continue;
+                    }
+                    let paint = ui.painter();
+                    row_bg(paint, rect, is_sel, resp.hovered());
+                    let color = port_color(p);
+                    icon_tile(paint, rect, Tab::Ports, color);
+                    let left = rect.left() + 54.0;
+                    let text_w = (rect.width() - 54.0 - 86.0).max(40.0);
+                    let name = elide(
+                        paint,
+                        format!("{}   :{}", p.proto.to_uppercase(), p.port),
+                        FontId::monospace(14.0),
+                        TEXT,
+                        text_w,
+                    );
+                    paint.galley(Pos2::new(left, rect.top() + 8.0), name, TEXT);
+                    let sub = p
+                        .proc_name
+                        .clone()
+                        .unwrap_or_else(|| format!("{} · kernel/other", p.addr));
+                    let sub = elide(
+                        paint,
+                        sub,
+                        FontId::proportional(12.5),
+                        MUTED,
+                        text_w,
+                    );
+                    paint.galley(Pos2::new(left, rect.top() + 30.0), sub, MUTED);
+                    paint.text(
+                        Pos2::new(rect.right() - 12.0, rect.center().y),
+                        egui::Align2::RIGHT_CENTER,
+                        p.state,
+                        FontId::monospace(11.0),
+                        port_state_color(p.state),
+                    );
+                }
+            });
+        if let Some(s) = new_sel {
+            self.gui.selected_port = s;
+        }
+    }
+
     fn volume_list(&mut self, ui: &mut Ui) {
         let g = &self.gui;
         let f = g.filter.to_lowercase();
@@ -1442,6 +1668,8 @@ impl SysKamlingApp {
                     Tab::Images => self.image_detail(ui),
                     Tab::Volumes => self.volume_detail(ui),
                     Tab::Agents => self.agent_detail(ui),
+                    Tab::Hardware => self.hardware_view(ui),
+                    Tab::Ports => self.port_detail(ui),
                 }
             });
     }
@@ -2291,6 +2519,268 @@ impl SysKamlingApp {
         });
     }
 
+    // ------------------------------------------------------------------
+    // Hardware tab: host vitals, Task-Manager style
+    // ------------------------------------------------------------------
+
+    fn hardware_view(&mut self, ui: &mut Ui) {
+        let Some(s) = self.gui.hw.clone() else {
+            empty_state(ui, "Collecting…", "The first hardware sample lands in a moment.");
+            return;
+        };
+        page_header(
+            ui,
+            "Hardware",
+            &format!(
+                "{} cores · {} RAM · up {}",
+                s.ncpu,
+                human_size(s.mem_total as i64),
+                ago(s.uptime as i64)
+            ),
+        );
+        ui.add_space(16.0);
+
+        let mem_used = s.mem_total - s.mem_avail;
+        let swap_used = s.swap_total.saturating_sub(s.swap_free);
+        let cpu_hist: Vec<f64> = self.gui.hw_cpu_hist.iter().copied().collect();
+        let dr_hist: Vec<f64> = self.gui.hw_disk_r_hist.iter().copied().collect();
+        let dw_hist: Vec<f64> = self.gui.hw_disk_w_hist.iter().copied().collect();
+        let rx_hist: Vec<f64> = self.gui.hw_net_rx_hist.iter().copied().collect();
+        let tx_hist: Vec<f64> = self.gui.hw_net_tx_hist.iter().copied().collect();
+
+        let kpis = [
+            Kpi {
+                label: "CPU",
+                value: format!("{:.1}%", s.cpu_pct),
+                sub: format!("load {} · {} · {}", s.load1, s.load5, s.load15),
+                color: ACCENT,
+                viz: Viz::Spark(cpu_hist),
+            },
+            Kpi {
+                label: "Memory",
+                value: human_size(mem_used as i64),
+                sub: format!("of {} ({:.0}%)", human_size(s.mem_total as i64), mem_used as f64 / s.mem_total.max(1) as f64 * 100.0),
+                color: VIOLET,
+                viz: Viz::Ratio(mem_used as f32 / s.mem_total.max(1) as f32),
+            },
+            Kpi {
+                label: "Disk I/O",
+                value: format!("{} · {}", human_rate(s.disk_read_bps), human_rate(s.disk_write_bps)),
+                sub: "read · write per second".into(),
+                color: GREEN,
+                viz: Viz::Spark(dr_hist.into_iter().zip(dw_hist).map(|(r, w)| r + w).collect()),
+            },
+            Kpi {
+                label: "Network",
+                value: format!("{} · {}", human_rate(s.net_rx_bps), human_rate(s.net_tx_bps)),
+                sub: "down · up per second".into(),
+                color: AMBER,
+                viz: Viz::Spark(rx_hist.into_iter().zip(tx_hist).map(|(r, t)| r + t).collect()),
+            },
+        ];
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.x = 14.0;
+            ui.columns(4, |cols| {
+                for (col, k) in cols.iter_mut().zip(&kpis) {
+                    kpi_card(col, k);
+                }
+            });
+        });
+        ui.add_space(14.0);
+
+        card(ui, |ui| {
+            card_title(
+                ui,
+                &format!("Per-core load ({})", s.per_core.len()),
+                &s.temp_c.map(|t| format!("{t:.0} °C")).unwrap_or_default(),
+            );
+            if s.per_core.is_empty() {
+                ui.label(RichText::new("per-core stats unavailable").color(FAINT));
+            } else {
+                // grid of bars: one per core, labelled with its index
+                let per_row = s.per_core.len().isqrt().max(4).min(8);
+                for (row_i, row) in s.per_core.chunks(per_row).enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        for (j, v) in row.iter().enumerate() {
+                            let idx = row_i * per_row + j;
+                            let bar_w = 34.0_f32;
+                            let (r, _) = ui.allocate_exact_size(Vec2::new(bar_w, 34.0), Sense::hover());
+                            let p = ui.painter();
+                            p.rect_filled(r, 4.0, WELL);
+                            let frac = (v / 100.0).clamp(0.0, 1.0) as f32;
+                            let fill = Rect::from_min_max(
+                                Pos2::new(r.left() + 1.0, r.bottom() - 1.0 - (r.height() - 2.0) * frac),
+                                Pos2::new(r.right() - 1.0, r.bottom() - 1.0),
+                            );
+                            let c = if *v > 85.0 {
+                                RED
+                            } else if *v > 60.0 {
+                                AMBER
+                            } else {
+                                ACCENT
+                            };
+                            p.rect_filled(fill.shrink(1.0), 3.0, c.gamma_multiply(0.85));
+                            p.text(
+                                Pos2::new(r.center().x, r.center().y),
+                                egui::Align2::CENTER_CENTER,
+                                idx.to_string(),
+                                FontId::monospace(9.5),
+                                if *v > 40.0 { TEXT } else { FAINT },
+                            );
+                        }
+                    });
+                    ui.add_space(6.0);
+                }
+            }
+            if let Some(note) = swap_note(&s) {
+                ui.label(RichText::new(note).size(12.0).color(MUTED));
+            }
+        });
+        ui.add_space(10.0);
+
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.x = 14.0;
+            ui.columns(2, |cols| {
+                card(&mut cols[0], |ui| {
+                    card_title(ui, "Memory & swap", "");
+                    bar_row(ui, "Used", mem_used, s.mem_total, VIOLET);
+                    bar_row(ui, "Swap", swap_used, s.swap_total, AMBER);
+                });
+                card(&mut cols[1], |ui| {
+                    card_title(ui, "Throughput", "");
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Disk").size(12.5).color(MUTED).weak());
+                        ui.label(RichText::new(format!("↓ {}", human_rate(s.disk_read_bps))).font(FontId::monospace(12.5)).color(TEXT));
+                        ui.label(RichText::new(format!("↑ {}", human_rate(s.disk_write_bps))).font(FontId::monospace(12.5)).color(TEXT));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Net  ").size(12.5).color(MUTED).weak());
+                        ui.label(RichText::new(format!("↓ {}", human_rate(s.net_rx_bps))).font(FontId::monospace(12.5)).color(TEXT));
+                        ui.label(RichText::new(format!("↑ {}", human_rate(s.net_tx_bps))).font(FontId::monospace(12.5)).color(TEXT));
+                    });
+                    if let Some(t) = s.temp_c {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Temp ").size(12.5).color(MUTED).weak());
+                            let c = if t > 85.0 { RED } else if t > 70.0 { AMBER } else { GREEN };
+                            ui.label(RichText::new(format!("{t:.0} °C")).font(FontId::monospace(12.5)).color(c));
+                            ui.label(RichText::new("hottest sensor").size(11.5).color(FAINT));
+                        });
+                    }
+                });
+            });
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // Ports tab: the socket detail page
+    // ------------------------------------------------------------------
+
+    fn port_detail(&mut self, ui: &mut Ui) {
+        let Some(key) = self.gui.selected_port.clone() else {
+            empty_state(
+                ui,
+                "No socket selected",
+                "Pick a listening socket on the left to see its owner and links.",
+            );
+            return;
+        };
+        let Some(p) = self
+            .gui
+            .ports
+            .iter()
+            .find(|e| (e.proto, e.addr.as_str(), e.port) == (key.0.as_str(), key.1.as_str(), key.2))
+            .cloned()
+        else {
+            empty_state(ui, "Socket closed", "That socket is no longer bound.");
+            return;
+        };
+        let color = port_color(&p);
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!("{}:{}", p.addr, p.port))
+                    .font(FontId::monospace(22.0))
+                    .color(TEXT),
+            );
+            chip(ui, &format!("{}{}", p.proto, if p.family == 6 { "6" } else { "" }), color);
+            if p.state != "-" {
+                chip(ui, p.state, port_state_color(p.state));
+            }
+        });
+        ui.label(
+            RichText::new(format!("inode {}", p.inode))
+                .font(FontId::monospace(12.0))
+                .color(FAINT),
+        );
+        ui.add_space(16.0);
+
+        let kpis = [
+            Kpi {
+                label: "Process",
+                value: p.proc_name.clone().unwrap_or_else(|| "—".into()),
+                sub: p.pid.map(|x| format!("pid {x}")).unwrap_or_else(|| "owner not visible".into()),
+                color: if p.pid.is_some() { GREEN } else { FAINT },
+                viz: Viz::None,
+            },
+            Kpi {
+                label: "Protocol",
+                value: p.proto.to_uppercase(),
+                sub: format!("IPv{}", p.family),
+                color: ACCENT,
+                viz: Viz::None,
+            },
+            Kpi {
+                label: "Bind",
+                value: if p.addr == "0.0.0.0" || p.addr == "[::]" { "public" } else if p.addr.starts_with("127.") || p.addr == "[::1]" { "localhost" } else { "interface" }.into(),
+                sub: p.addr.clone(),
+                color: if p.addr == "0.0.0.0" || p.addr == "[::]" { AMBER } else { GREEN },
+                viz: Viz::None,
+            },
+        ];
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.x = 14.0;
+            ui.columns(3, |cols| {
+                for (col, k) in cols.iter_mut().zip(&kpis) {
+                    kpi_card(col, k);
+                }
+            });
+        });
+        ui.add_space(14.0);
+
+        card(ui, |ui| {
+            card_title(ui, "Working directory", "");
+            match &p.cwd {
+                Some(c) => ui.label(RichText::new(c).font(FontId::monospace(12.5)).color(TEXT)),
+                None => ui.label(RichText::new(if p.pid.is_some() { "not readable (different user?)" } else { "no owning process found" }).color(FAINT)),
+            };
+        });
+        ui.add_space(10.0);
+
+        // Cross-link: which container publishes this host port?
+        let linked = self.gui.containers_on_port(p.port);
+        card(ui, |ui| {
+            card_title(ui, "Linked containers", &linked.len().to_string());
+            if linked.is_empty() {
+                ui.label(
+                    RichText::new(if p.pid.is_some() {
+                        "No container publishes this host port."
+                    } else {
+                        "If a container publishes this port, its process lives in another namespace and shows up here as an anonymous socket forwarded by dockerd."
+                    })
+                    .size(12.5)
+                    .color(FAINT),
+                );
+            }
+            for name in linked {
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                    ui.painter().circle_filled(r.center(), 3.0, GREEN);
+                    ui.label(RichText::new(name).size(13.0).color(TEXT));
+                });
+            }
+        });
+    }
+
     fn volume_detail(&mut self, ui: &mut Ui) {
         let Some(name) = self.gui.selected_volume.clone() else {
             empty_state(ui, "No volume selected", "Pick a volume on the left to see its details.");
@@ -2825,6 +3315,33 @@ fn nav_icon(p: &egui::Painter, tab: Tab, r: Rect, c: Color32) {
                 p.line_segment([Pos2::new(r.left(), y), Pos2::new(r.left() + r.width() * f, y)], s);
             }
         }
+        Tab::Hardware => {
+            // a little CPU chip: square, pins on every side
+            let b = r.shrink2(Vec2::new(2.5, 2.5));
+            p.rect_stroke(b, 2.5, s, inside);
+            let pin = 2.2_f32;
+            for i in 1..=3 {
+                let t = b.left() + b.width() * i as f32 / 4.0;
+                p.line_segment([Pos2::new(t, b.top()), Pos2::new(t, b.top() - pin)], s);
+                p.line_segment([Pos2::new(t, b.bottom()), Pos2::new(t, b.bottom() + pin)], s);
+                let u = b.top() + b.height() * i as f32 / 4.0;
+                p.line_segment([Pos2::new(b.left(), u), Pos2::new(b.left() - pin, u)], s);
+                p.line_segment([Pos2::new(b.right(), u), Pos2::new(b.right() + pin, u)], s);
+            }
+        }
+        Tab::Ports => {
+            // a network jack / plug: rectangle body, prongs on top
+            let b = Rect::from_min_max(
+                Pos2::new(r.left() + 1.5, r.top() + 5.0),
+                Pos2::new(r.right() - 1.5, r.bottom() - 1.0),
+            );
+            p.rect_stroke(b, 2.5, s, inside);
+            for f in [0.3, 0.7] {
+                let x = b.left() + b.width() * f;
+                p.line_segment([Pos2::new(x, b.top()), Pos2::new(x, r.top() + 1.0)], s);
+            }
+            p.line_segment([Pos2::new(b.center().x, b.bottom()), Pos2::new(b.center().x, r.bottom() + 1.5)], s);
+        }
     }
 }
 
@@ -3286,6 +3803,81 @@ fn agent_color(agent: &str) -> Color32 {
         "MCP server" | "Agent Client Protocol" => MUTED,
         _ => ACCENT,
     }
+}
+
+/// Accent for a socket row: owner color if known, else bind-scope hint.
+fn port_color(p: &PortEntry) -> Color32 {
+    match p.proc_name.as_deref() {
+        Some(n) => {
+            let h = n.bytes().fold(5381u32, |h, b| h.wrapping_mul(33) ^ b as u32);
+            const PALETTE: [Color32; 5] = [ACCENT, GREEN, VIOLET, AMBER, Color32::from_rgb(120, 160, 120)];
+            PALETTE[h as usize % PALETTE.len()]
+        }
+        None => {
+            let public = p.addr == "0.0.0.0" || p.addr == "[::]";
+            if public { AMBER } else { FAINT }
+        }
+    }
+}
+
+fn port_state_color(state: &str) -> Color32 {
+    match state {
+        "LISTEN" => GREEN,
+        "ESTABLISHED" => ACCENT,
+        "-" => FAINT,
+        _ => AMBER,
+    }
+}
+
+/// "1.2 MB/s"-style rate for the hardware tab.
+fn human_rate(bps: f64) -> String {
+    if bps < 1.0 {
+        return "0 B/s".into();
+    }
+    let human = human_size(bps as i64);
+    format!("{human}/s")
+}
+
+/// Swap usage note for the per-core card footer.
+fn swap_note(s: &HwSample) -> Option<String> {
+    if s.swap_total == 0 {
+        return None;
+    }
+    let used = s.swap_total - s.swap_free;
+    Some(format!(
+        "swap {} of {} in use",
+        human_size(used as i64),
+        human_size(s.swap_total as i64)
+    ))
+}
+
+/// Labelled horizontal bar: "Used ███░░ 12.3 GB of 64 GB".
+fn bar_row(ui: &mut Ui, label: &str, used: u64, total: u64, color: Color32) {
+    if total == 0 {
+        ui.label(RichText::new(format!("{label}: none")).size(12.5).color(FAINT));
+        return;
+    }
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 22.0), Sense::hover());
+    let p = ui.painter();
+    p.text(
+        Pos2::new(rect.left(), rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        FontId::proportional(12.5),
+        MUTED,
+    );
+    let bar = Rect::from_min_max(
+        Pos2::new(rect.left() + 56.0, rect.center().y - 4.0),
+        Pos2::new(rect.right() - 150.0, rect.center().y + 4.0),
+    );
+    progress(p, bar, (used as f64 / total as f64) as f32, color);
+    p.text(
+        Pos2::new(rect.right(), rect.center().y),
+        egui::Align2::RIGHT_CENTER,
+        format!("{} of {}", human_size(used as i64), human_size(total as i64)),
+        FontId::monospace(11.5),
+        FAINT,
+    );
 }
 
 fn human_size(b: i64) -> String {

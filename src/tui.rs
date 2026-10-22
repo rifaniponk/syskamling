@@ -19,6 +19,8 @@ use tokio::sync::mpsc;
 
 use crate::agents::{AgentScanner, AgentSession};
 use crate::docker::{ContainerSummary, Docker, DockerError, LogLine, StreamKind};
+use crate::hw::{HwSample, Sampler};
+use crate::ports::{self as portsmod, PortEntry};
 
 pub fn run(
     rt: tokio::runtime::Runtime,
@@ -46,6 +48,8 @@ enum Tab {
     Images,
     Volumes,
     Agents,
+    Hardware,
+    Ports,
     Logs,
 }
 
@@ -55,7 +59,9 @@ impl Tab {
             Tab::Containers => Tab::Images,
             Tab::Images => Tab::Volumes,
             Tab::Volumes => Tab::Agents,
-            Tab::Agents => Tab::Logs,
+            Tab::Agents => Tab::Hardware,
+            Tab::Hardware => Tab::Ports,
+            Tab::Ports => Tab::Logs,
             Tab::Logs => Tab::Containers,
         }
     }
@@ -65,7 +71,9 @@ impl Tab {
             Tab::Images => Tab::Containers,
             Tab::Volumes => Tab::Images,
             Tab::Agents => Tab::Volumes,
-            Tab::Logs => Tab::Agents,
+            Tab::Hardware => Tab::Agents,
+            Tab::Ports => Tab::Hardware,
+            Tab::Logs => Tab::Ports,
         }
     }
     fn label(self) -> &'static str {
@@ -74,6 +82,8 @@ impl Tab {
             Tab::Images => " Images ",
             Tab::Volumes => " Volumes ",
             Tab::Agents => " Agents ",
+            Tab::Hardware => " Hardware ",
+            Tab::Ports => " Ports ",
             Tab::Logs => " Logs ",
         }
     }
@@ -111,6 +121,7 @@ enum Msg {
     LogDone(u64, Result<(), String>),
     ActionDone(Result<(&'static str, String), String>),
     AgentsScanned(Vec<AgentSession>),
+    PortsScanned(Vec<PortEntry>),
 }
 
 struct RefreshData {
@@ -129,6 +140,11 @@ struct App {
     volumes_state: ListState,
     agents: Vec<AgentSession>,
     agents_state: ListState,
+    hw: Option<HwSample>,
+    /// rolling CPU history for the Hardware trend line
+    hw_cpu_hist: Vec<f64>,
+    ports: Vec<PortEntry>,
+    ports_state: ListState,
     logs: Vec<LogLine>,
     logs_follow: bool,
     logs_scroll: usize,
@@ -161,6 +177,10 @@ impl App {
             volumes_state: ListState::default(),
             agents: Vec::new(),
             agents_state: ListState::default(),
+            hw: None,
+            hw_cpu_hist: Vec::new(),
+            ports: Vec::new(),
+            ports_state: ListState::default(),
             logs: Vec::new(),
             logs_follow: true,
             logs_scroll: 0,
@@ -257,6 +277,34 @@ impl App {
             .select(Some((cur + delta).clamp(0, len as i32 - 1) as usize));
     }
 
+    fn filtered_ports(&self) -> Vec<&PortEntry> {
+        if self.filter.is_empty() {
+            return self.ports.iter().collect();
+        }
+        let f = self.filter.to_lowercase();
+        self.ports
+            .iter()
+            .filter(|p| {
+                p.proto.contains(&f)
+                    || p.addr.contains(&f)
+                    || p.port.to_string().contains(&f)
+                    || p.proc_name.as_deref().map(|n| n.to_lowercase()).unwrap_or_default().contains(&f)
+                    || p.state.to_lowercase().contains(&f)
+            })
+            .collect()
+    }
+
+    fn move_ports(&mut self, delta: i32) {
+        let len = self.filtered_ports().len();
+        if len == 0 {
+            self.ports_state.select(None);
+            return;
+        }
+        let cur = self.ports_state.selected().unwrap_or(0) as i32;
+        self.ports_state
+            .select(Some((cur + delta).clamp(0, len as i32 - 1) as usize));
+    }
+
     fn push_logs(&mut self, lines: Vec<LogLine>) {
         if lines.is_empty() {
             return;
@@ -287,6 +335,9 @@ async fn run_async(
 
     let mut last_refresh = Instant::now() - Duration::from_secs(999);
     let mut last_agent_scan = Instant::now() - Duration::from_secs(999);
+    let mut last_port_scan = Instant::now() - Duration::from_secs(999);
+    let mut last_hw_sample = Instant::now() - Duration::from_secs(999);
+    let mut sampler = Sampler::default();
     let mut tick = tokio::time::interval(Duration::from_millis(300));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -337,6 +388,28 @@ async fn run_async(
                 let sessions = scanner.scan();
                 let _ = tx2.send(Msg::AgentsScanned(sessions));
             });
+        }
+
+        // Listening-socket scan: /proc/net + fd walk, on the blocking pool.
+        if refresh > 0.0 && last_port_scan.elapsed() >= Duration::from_secs_f64(refresh.max(1.0) * 2.0) {
+            last_port_scan = Instant::now();
+            let tx3 = tx.clone();
+            rt.spawn_blocking(move || {
+                let _ = tx3.send(Msg::PortsScanned(portsmod::scan()));
+            });
+        }
+
+        // Host vitals: rates need consecutive samples, so the sampler lives
+        // here and is read inline (/proc reads are microseconds).
+        if refresh > 0.0 && last_hw_sample.elapsed() >= Duration::from_secs_f64(refresh.max(1.0)) {
+            last_hw_sample = Instant::now();
+            let s = sampler.sample();
+            app.hw_cpu_hist.push(s.cpu_pct);
+            if app.hw_cpu_hist.len() > 240 {
+                let excess = app.hw_cpu_hist.len() - 240;
+                app.hw_cpu_hist.drain(..excess);
+            }
+            app.hw = Some(s);
         }
 
         // Wait for either a key or a tick/message.
@@ -445,6 +518,17 @@ fn apply_msg(app: &mut App, m: Msg) {
                 }
             } else if len > 0 && app.agents_state.selected().is_none() {
                 app.agents_state.select(Some(0));
+            }
+        }
+        Msg::PortsScanned(entries) => {
+            app.ports = entries;
+            let len = app.filtered_ports().len();
+            if let Some(sel) = app.ports_state.selected() {
+                if sel >= len {
+                    app.ports_state.select(if len == 0 { None } else { Some(len - 1) });
+                }
+            } else if len > 0 && app.ports_state.selected().is_none() {
+                app.ports_state.select(Some(0));
             }
         }
     }
@@ -711,7 +795,9 @@ fn handle_key(
         KeyCode::Char('2') => app.tab = Tab::Images,
         KeyCode::Char('3') => app.tab = Tab::Volumes,
         KeyCode::Char('4') => app.tab = Tab::Agents,
-        KeyCode::Char('5') => app.tab = Tab::Logs,
+        KeyCode::Char('5') => app.tab = Tab::Hardware,
+        KeyCode::Char('6') => app.tab = Tab::Ports,
+        KeyCode::Char('7') => app.tab = Tab::Logs,
         KeyCode::Char('/') => {
             app.filtering = true;
             app.filter.clear();
@@ -725,6 +811,8 @@ fn handle_key(
             Tab::Images => app.move_images(1),
             Tab::Volumes => app.move_volumes(1),
             Tab::Agents => app.move_agents(1),
+            Tab::Ports => app.move_ports(1),
+            Tab::Hardware => {}
             Tab::Logs => {
                 app.logs_follow = false;
                 app.logs_scroll = (app.logs_scroll + 1).min(app.logs.len());
@@ -735,6 +823,8 @@ fn handle_key(
             Tab::Images => app.move_images(-1),
             Tab::Volumes => app.move_volumes(-1),
             Tab::Agents => app.move_agents(-1),
+            Tab::Ports => app.move_ports(-1),
+            Tab::Hardware => {}
             Tab::Logs => {
                 app.logs_follow = false;
                 app.logs_scroll = app.logs_scroll.saturating_sub(1);
@@ -749,6 +839,8 @@ fn handle_key(
             Tab::Images => app.move_images(20),
             Tab::Volumes => app.move_volumes(20),
             Tab::Agents => app.move_agents(20),
+            Tab::Ports => app.move_ports(20),
+            Tab::Hardware => {}
         },
         KeyCode::PageUp => match app.tab {
             Tab::Logs => {
@@ -759,6 +851,8 @@ fn handle_key(
             Tab::Images => app.move_images(-20),
             Tab::Volumes => app.move_volumes(-20),
             Tab::Agents => app.move_agents(-20),
+            Tab::Ports => app.move_ports(-20),
+            Tab::Hardware => {}
         },
         KeyCode::Char('g') if app.tab == Tab::Logs => {
             app.logs_follow = false;
@@ -839,8 +933,16 @@ fn ui(f: &mut Frame, app: &mut App) {
         ])
         .split(f.area());
 
-    let tabs: Vec<Span> = [Tab::Containers, Tab::Images, Tab::Volumes, Tab::Agents, Tab::Logs]
-        .iter()
+    let tabs: Vec<Span> = [
+        Tab::Containers,
+        Tab::Images,
+        Tab::Volumes,
+        Tab::Agents,
+        Tab::Hardware,
+        Tab::Ports,
+        Tab::Logs,
+    ]
+    .iter()
         .flat_map(|t| {
             let active = *t == app.tab;
             vec![
@@ -875,11 +977,12 @@ fn ui(f: &mut Frame, app: &mut App) {
         format!(" {} ", app.status)
     } else {
         format!(
-            " containers: {}  images: {}  volumes: {}  agents: {}  |  q quit  tab switch  / filter  enter logs  s start/stop  t stop  r restart  x remove  R refresh ",
+            " containers: {}  images: {}  volumes: {}  agents: {}  ports: {}  |  q quit  tab switch  / filter  enter logs  s start/stop  t stop  r restart  x remove  R refresh ",
             app.containers.len(),
             app.images.len(),
             app.volumes.len(),
-            app.agents.len()
+            app.agents.len(),
+            app.ports.len()
         )
     };
     f.render_widget(Paragraph::new(status), chunks[2]);
@@ -889,6 +992,8 @@ fn ui(f: &mut Frame, app: &mut App) {
         Tab::Images => render_images(f, app, chunks[1]),
         Tab::Volumes => render_volumes(f, app, chunks[1]),
         Tab::Agents => render_agents(f, app, chunks[1]),
+        Tab::Hardware => render_hardware(f, app, chunks[1]),
+        Tab::Ports => render_ports(f, app, chunks[1]),
         Tab::Logs => render_logs(f, app, chunks[1]),
     }
 }
@@ -1073,6 +1178,197 @@ fn render_agents(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     f.render_widget(table, area);
 }
 
+/// ASCII sparkline of a series, scaled to [min..max].
+fn sparkline(s: &[f64], width: usize) -> String {
+    const CHARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    if s.is_empty() {
+        return String::new();
+    }
+    let take: Vec<f64> = s.iter().rev().take(width).rev().copied().collect();
+    let max = take.iter().cloned().fold(0.0_f64, f64::max).max(1.0);
+    take.iter()
+        .map(|v| CHARS[((*v / max) * 7.0).clamp(0.0, 7.0) as usize])
+        .collect()
+}
+
+fn render_hardware(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
+    let Some(s) = app.hw.clone() else {
+        f.render_widget(
+            Paragraph::new("collecting first sample…")
+                .block(Block::default().borders(Borders::ALL).title(" Hardware ")),
+            area,
+        );
+        return;
+    };
+    let top = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(8), Constraint::Min(4)])
+        .split(area);
+
+    let mem_used = s.mem_total.saturating_sub(s.mem_avail);
+    let mem_frac = mem_used as f64 / s.mem_total.max(1) as f64;
+    let gauge = |label: &str, frac: f64| -> Line {
+        let filled = (frac * 30.0).round() as usize;
+        let color = if frac > 0.9 {
+            Color::Red
+        } else if frac > 0.7 {
+            Color::Yellow
+        } else {
+            Color::Green
+        };
+        Line::from(vec![
+            Span::styled(format!("{label:<8}"), Style::default().fg(Color::Gray)),
+            Span::styled(
+                "█".repeat(filled) + &"░".repeat(30 - filled),
+                Style::default().fg(color),
+            ),
+            Span::raw(format!(" {:>4.0}%", frac * 100.0)),
+        ])
+    };
+    let vitals = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled(
+                format!("CPU {:>5.1}%", s.cpu_pct),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!(
+                "   load {} {} {}   {} cores",
+                s.load1, s.load5, s.load15, s.ncpu
+            )),
+            s.temp_c
+                .map(|t| Span::raw(format!("   {t:.0}°C")))
+                .unwrap_or_default(),
+        ]),
+        gauge("memory", mem_frac),
+        Line::from(vec![
+            Span::styled(format!("disk  {} ", human_rate(s.disk_read_bps)), Style::default().fg(Color::Gray)),
+            Span::raw(format!("read   {} write/s", human_rate(s.disk_write_bps))),
+        ]),
+        Line::from(vec![
+            Span::styled(format!("net   {} ", human_rate(s.net_rx_bps)), Style::default().fg(Color::Gray)),
+            Span::raw(format!("rx     {} tx/s", human_rate(s.net_tx_bps))),
+        ]),
+        Line::from(vec![
+            Span::styled("trend   ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                sparkline(&app.hw_cpu_hist, 40),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("uptime  ", Style::default().fg(Color::Gray)),
+            Span::raw(ago(s.uptime as i64)),
+        ]),
+    ])
+    .block(Block::default().borders(Borders::ALL).title(" Hardware "));
+    f.render_widget(vitals, top[0]);
+
+    // per-core bars, two cores per line
+    let rows: Vec<Line> = s
+        .per_core
+        .chunks(2)
+        .enumerate()
+        .map(|(row_i, pair)| {
+            let mut spans = Vec::new();
+            for (j, v) in pair.iter().enumerate() {
+                let idx = row_i * 2 + j;
+                let filled = (*v / 100.0 * 12.0).round() as usize;
+                let color = if *v > 85.0 {
+                    Color::Red
+                } else if *v > 60.0 {
+                    Color::Yellow
+                } else {
+                    Color::Cyan
+                };
+                if j > 0 {
+                    spans.push(Span::raw("  "));
+                }
+                spans.push(Span::styled(
+                    format!("{idx:>2} [{}{:>4.0}%]", "█".repeat(filled) + &"░".repeat(12 - filled), v),
+                    Style::default().fg(color),
+                ));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    let body = Paragraph::new(rows).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" Per-core load ({} cores) ", s.per_core.len())),
+    );
+    f.render_widget(body, top[1]);
+}
+
+fn render_ports(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
+    let list = app.filtered_ports();
+    let sel = app.ports_state.selected().unwrap_or(0);
+    let rows: Vec<Row> = list
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let state_color = match p.state {
+                "LISTEN" => Color::Green,
+                "ESTABLISHED" => Color::Cyan,
+                "-" => Color::DarkGray,
+                _ => Color::Yellow,
+            };
+            let row_style = if i == sel {
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            Row::new(vec![
+                p.proto.to_string(),
+                format!("v{}", p.family),
+                p.addr.clone(),
+                p.port.to_string(),
+                Span::styled(p.state.to_string(), Style::default().fg(state_color)).to_string(),
+                p.pid.map(|x| x.to_string()).unwrap_or_else(|| "-".into()),
+                p.proc_name.clone().unwrap_or_else(|| "-".into()),
+                p.cwd
+                    .as_deref()
+                    .map(|c| c.rsplit('/').next().unwrap_or(c).to_string())
+                    .unwrap_or_else(|| "-".into()),
+            ])
+            .style(row_style)
+        })
+        .collect();
+
+    let title = if app.filtering {
+        format!(" Ports (filter: {}) ", app.filter)
+    } else {
+        " Ports ".to_string()
+    };
+
+    // Header goes in the block title so it survives even when the terminal
+    // is too short to render any table rows.
+    let header = "PROTO  IP  ADDRESS  PORT  STATE  PID  PROCESS  CWD";
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(4),
+            Constraint::Length(3),
+            Constraint::Length(15),
+            Constraint::Length(6),
+            Constraint::Length(12),
+            Constraint::Length(7),
+            Constraint::Length(16),
+            Constraint::Min(14),
+        ],
+    )
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .title_bottom(Line::from(format!(" {header} ")).style(Style::default().fg(Color::Cyan))),
+    )
+    .column_spacing(2);
+
+    f.render_widget(table, area);
+}
+
 fn render_logs(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     let title = format!(
         " Logs: {}  ({} lines, follow: {}{}) ",
@@ -1123,6 +1419,21 @@ fn human_bytes(b: i64) -> String {
     } else {
         format!("{:.1}{}", n, UNITS[i])
     }
+}
+
+/// "1.2MB/s"-style rate for the Hardware screen.
+fn human_rate(bps: f64) -> String {
+    if bps < 1.0 {
+        return "0B/s".into();
+    }
+    let mut n = bps;
+    const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
+    let mut i = 0;
+    while n >= 1024.0 && i < UNITS.len() - 1 {
+        n /= 1024.0;
+        i += 1;
+    }
+    format!("{:.0}{}/s", n, UNITS[i])
 }
 
 fn ago(secs: i64) -> String {

@@ -1,6 +1,8 @@
 mod agents;
 mod docker;
 mod gui;
+mod hw;
+mod ports;
 mod tui;
 
 use clap::{Parser, Subcommand};
