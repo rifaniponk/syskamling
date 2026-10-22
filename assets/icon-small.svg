@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <!-- icon.svg simplified for 16-32 px: no grid or dial, heavier S,
+       bigger LED, so the mark survives the downscale. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1c2538"/>
+      <stop offset="1" stop-color="#0b0e15"/>
+    </linearGradient>
+    <linearGradient id="ink" x1="60" y1="52" x2="196" y2="204" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#38cde6"/>
+      <stop offset="0.55" stop-color="#5894ff"/>
+      <stop offset="1" stop-color="#a78bfa"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#tile)"/>
+  <path d="M172,64 H100 A32,32 0 0 0 100,128 H110 L120,98 L134,158 L144,128 H156 A32,32 0 0 1 156,192 H84"
+        fill="none" stroke="url(#ink)" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="206" cy="56" r="15" fill="#34d399"/>
+</svg>

@@ -1,6 +1,6 @@
 # syskamling
 
-**SysKamling** — a system watch for Linux, built in Rust. Like Windows Task
+**SysKamling** — a developer system monitor for Linux, built in Rust. Like Windows Task
 Manager, but for your whole machine: live hardware vitals, every listening
 port and who owns it, plus full Docker container management.
 
@@ -83,12 +83,9 @@ To get a launcher you can pin to the KDE dash:
 cp io.syskamling.SysKamling.desktop ~/.local/share/applications/
 # edit Exec= to point at your absolute target/release/syskamling path
 
-# 2. icon (the mark from assets/icon.svg, rendered to PNG)
-for s in 512 256 128 64 48 32; do
-  mkdir -p ~/.local/share/icons/hicolor/${s}x${s}/apps
-  magick assets/icon.png -resize ${s}x${s} \
-    ~/.local/share/icons/hicolor/${s}x${s}/apps/io.syskamling.SysKamling.png
-done
+# 2. icon (pre-rendered hicolor set: SVG + PNG 16..512)
+mkdir -p ~/.local/share/icons
+cp -r assets/icons/hicolor ~/.local/share/icons/
 gtk-update-icon-cache -f ~/.local/share/icons/hicolor
 ```
 

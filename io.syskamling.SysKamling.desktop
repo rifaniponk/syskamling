@@ -2,8 +2,8 @@
 Type=Application
 Version=1.0
 Name=SysKamling
-GenericName=System Monitor
-Comment=System monitor for Linux: hardware, ports, and Docker containers
+GenericName=Developer System Monitor
+Comment=Developer system monitor for Linux: hardware, ports, and Docker containers
 Exec=syskamling
 Icon=io.syskamling.SysKamling
 Terminal=false

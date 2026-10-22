@@ -912,7 +912,7 @@ impl SysKamlingApp {
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
                         ui.label(RichText::new("SysKamling").font(bold(15.0)).color(TEXT));
-                        ui.label(RichText::new("system watch for Linux").size(11.5).color(FAINT));
+                        ui.label(RichText::new("Developer system monitor").size(11.5).color(FAINT));
                     });
                 });
                 ui.add_space(16.0);
@@ -2683,7 +2683,8 @@ fn empty_state(ui: &mut Ui, title: &str, body: &str) {
     ui.vertical_centered(|ui| {
         let (r, _) = ui.allocate_exact_size(Vec2::splat(44.0), Sense::hover());
         ui.painter().rect_filled(r, 12.0, SURFACE_HI);
-        nav_icon(ui.painter(), Tab::Containers, Rect::from_center_size(r.center(), Vec2::splat(20.0)), FAINT);
+        let s = s_pulse(Rect::from_center_size(r.center(), Vec2::splat(32.0)));
+        ui.painter().add(egui::Shape::line(s, Stroke::new(2.0_f32, FAINT)));
         ui.add_space(6.0);
         ui.label(RichText::new(title).font(bold(15.0)).color(TEXT));
         ui.label(RichText::new(body).size(13.0).color(MUTED));
@@ -3208,24 +3209,54 @@ fn ago(secs: i64) -> String {
     }
 }
 
-/// Brand mark: accent tile with a stack of containers.
+/// Brand mark: dark tile, gradient "S" with a heartbeat spine, live LED.
+/// Mirrors assets/icon-small.svg (the dial and grid vanish at rail size).
 fn logo_mark(p: &egui::Painter, r: Rect) {
-    p.rect_filled(r, 9.0, Color32::from_rgb(52, 112, 235));
-    p.rect_filled(
-        Rect::from_min_max(r.min, Pos2::new(r.right(), r.center().y)),
-        egui::CornerRadius { nw: 9, ne: 9, sw: 0, se: 0 },
-        Color32::from_white_alpha(18),
+    let k = r.width() / 256.0;
+    let tile = r.shrink(8.0 * k);
+    p.rect_filled(tile, 56.0 * k, Color32::from_rgb(22, 29, 44));
+    p.rect_stroke(
+        tile,
+        56.0 * k,
+        Stroke::new(1.0_f32, Color32::from_white_alpha(22)),
+        egui::epaint::StrokeKind::Inside,
     );
-    let b = Vec2::new(6.5, 5.5);
-    let base_y = r.center().y + 2.0;
-    for (dx, y) in [(-7.5, base_y), (0.0, base_y), (7.5, base_y), (0.0, base_y - 7.0)] {
-        let c = Pos2::new(r.center().x + dx, y);
-        p.rect_filled(Rect::from_center_size(c, b), 1.5, Color32::WHITE);
+    // cyan → blue → violet along the same diagonal as the SVG gradient
+    let (a, d) = (r.min + Vec2::new(60.0, 52.0) * k, Vec2::new(136.0, 152.0) * k);
+    let ink = move |_: Rect, q: Pos2| {
+        let t = ((q - a).dot(d) / d.length_sq()).clamp(0.0, 1.0);
+        if t < 0.55 {
+            CYAN.lerp_to_gamma(ACCENT, t / 0.55)
+        } else {
+            ACCENT.lerp_to_gamma(VIOLET, (t - 0.55) / 0.45)
+        }
+    };
+    let pts = s_pulse(r);
+    let w = 30.0 * k;
+    // paths are butt-capped; round the two ends by hand
+    for end in [pts[0], pts[pts.len() - 1]] {
+        p.circle_filled(end, w / 2.0, ink(r, end));
     }
-    p.line_segment(
-        [Pos2::new(r.left() + 7.0, base_y + 6.5), Pos2::new(r.right() - 7.0, base_y + 6.5)],
-        Stroke::new(1.5_f32, Color32::from_white_alpha(170)),
-    );
+    p.add(egui::Shape::line(pts, egui::epaint::PathStroke::new_uv(w, ink)));
+    p.circle_filled(r.min + Vec2::new(206.0, 56.0) * k, 15.0 * k, GREEN);
+}
+
+/// The brand "S": top bar, left bowl, heartbeat spine, right bowl, bottom
+/// bar — the same path as assets/icon.svg, scaled from its 256-unit box.
+fn s_pulse(r: Rect) -> Vec<Pos2> {
+    let bowl = |cx: f32, cy: f32, from: f32, to: f32| {
+        (1..12).map(move |i| {
+            let a = (from + (to - from) * i as f32 / 12.0).to_radians();
+            (cx + 32.0 * a.cos(), cy + 32.0 * a.sin())
+        })
+    };
+    let mut pts = vec![(172.0, 64.0), (100.0, 64.0)];
+    pts.extend(bowl(100.0, 96.0, 270.0, 90.0));
+    pts.extend([(100.0, 128.0), (110.0, 128.0), (120.0, 98.0), (134.0, 158.0), (144.0, 128.0), (156.0, 128.0)]);
+    pts.extend(bowl(156.0, 160.0, -90.0, 90.0));
+    pts.extend([(156.0, 192.0), (84.0, 192.0)]);
+    let k = r.width() / 256.0;
+    pts.into_iter().map(|(x, y)| r.min + Vec2::new(x, y) * k).collect()
 }
 
 /// Last path component of a filesystem path, for project labels.

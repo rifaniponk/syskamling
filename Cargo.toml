@@ -2,7 +2,7 @@
 name = "syskamling"
 version = "0.1.0"
 edition = "2021"
-description = "SysKamling - system watch for Linux: hardware, ports, and Docker containers"
+description = "SysKamling - developer system monitor for Linux: hardware, ports, and Docker containers"
 license = "MIT"
 
 [[bin]]

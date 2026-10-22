@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser, Debug)]
 #[command(
     name = "syskamling",
-    about = "SysKamling: system watch for Linux - hardware, ports, and Docker containers",
+    about = "SysKamling: developer system monitor - hardware, ports, and Docker containers",
     version,
     subcommand_negates_reqs = false
 )]
