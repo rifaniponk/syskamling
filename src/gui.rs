@@ -4,7 +4,7 @@
 //! and report back through an mpsc channel, so the window never blocks.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use egui::{
@@ -14,6 +14,7 @@ use egui::{
 
 use tokio::sync::mpsc;
 
+use crate::agents::{AgentScanner, AgentSession};
 use crate::docker::{
     self, ContainerSummary, DiskSummary, Docker, DockerError, EventMessage, ImageSummary,
     LogLine, StatsSample, StreamKind, SystemInfo,
@@ -34,6 +35,7 @@ enum Tab {
     Containers,
     Images,
     Volumes,
+    Agents,
     Logs,
 }
 
@@ -77,6 +79,7 @@ enum Msg {
     Stats(String, Box<StatsSample>),
     Events(Result<Vec<EventMessage>, String>),
     AllLogs(Vec<LogLine>),
+    AgentsScanned(Vec<AgentSession>),
 }
 
 struct RefreshData {
@@ -168,6 +171,10 @@ struct Gui {
     prev_stats: HashMap<String, StatsSample>,
     hist: HashMap<String, StatHist>,
     stats_gen: u64,
+    // --- agents tab ---
+    agents: Vec<AgentSession>,
+    selected_agent: Option<usize>,
+    agent_filter: String,
 }
 
 impl Gui {
@@ -204,6 +211,9 @@ impl Gui {
             prev_stats: HashMap::new(),
             hist: HashMap::new(),
             stats_gen: 0,
+            agents: Vec::new(),
+            selected_agent: None,
+            agent_filter: String::new(),
         }
     }
 
@@ -232,6 +242,21 @@ impl Gui {
         list.into_iter()
             .find(|(i, _)| Some(*i) == self.selected)
             .map(|(_, c)| c)
+    }
+
+    /// Sessions matching the Agents-tab filter, with their agents-list index.
+    fn filtered_agents(&self) -> Vec<(usize, &AgentSession)> {
+        let f = self.agent_filter.to_lowercase();
+        self.agents
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| {
+                f.is_empty()
+                    || a.agent.to_lowercase().contains(&f)
+                    || a.vendor.to_lowercase().contains(&f)
+                    || a.cwd.as_deref().map(|c| c.to_lowercase()).unwrap_or_default().contains(&f)
+            })
+            .collect()
     }
 
     fn push_logs(&mut self, lines: Vec<LogLine>) {
@@ -294,6 +319,12 @@ struct SysKamlingApp {
     last_sync: Option<Instant>,
     /// status text currently shown as a toast, and when it appeared
     toast: (String, Instant),
+    // --- agents tab ---
+    /// shared between the scanner task and the UI
+    agent_scan: Arc<Mutex<Option<Vec<AgentSession>>>>,
+    /// when the scanner task was last kicked
+    last_agent_scan: Instant,
+    agent_scan_busy: Arc<Mutex<bool>>,
 }
 
 impl SysKamlingApp {
@@ -328,6 +359,9 @@ impl SysKamlingApp {
             all_logs_follow: Vec::new(),
             last_sync: None,
             toast: (String::new(), Instant::now()),
+            agent_scan: Arc::new(Mutex::new(None)),
+            last_agent_scan: Instant::now() - Duration::from_secs(999),
+            agent_scan_busy: Arc::new(Mutex::new(false)),
         };
         app
     }
@@ -511,6 +545,7 @@ impl eframe::App for SysKamlingApp {
             }
             self.reap_stats_streams();
             self.spawn_dashboard_pulls();
+            self.spawn_agent_scan();
             ctx.request_repaint();
         }
 
@@ -527,7 +562,7 @@ impl eframe::App for SysKamlingApp {
         }
 
         self.nav_rail(ctx);
-        if matches!(self.gui.tab, Tab::Containers | Tab::Images | Tab::Volumes) {
+        if matches!(self.gui.tab, Tab::Containers | Tab::Images | Tab::Volumes | Tab::Agents) {
             self.list_panel(ctx);
         }
         self.center(ctx);
@@ -539,6 +574,30 @@ impl eframe::App for SysKamlingApp {
 }
 
 impl SysKamlingApp {
+    /// Kick a /proc agent scan at the refresh cadence. The scan itself is
+    /// synchronous /proc reading, so it runs on the tokio blocking pool;
+    /// results land in the shared slot and are picked up next tick.
+    fn spawn_agent_scan(&mut self) {
+        if self.last_agent_scan.elapsed() < Duration::from_secs_f64(self.refresh.max(1.0)) {
+            return;
+        }
+        if *self.agent_scan_busy.lock().unwrap() {
+            return;
+        }
+        self.last_agent_scan = Instant::now();
+        *self.agent_scan_busy.lock().unwrap() = true;
+        let out = Arc::clone(&self.agent_scan);
+        let busy = Arc::clone(&self.agent_scan_busy);
+        let tx = self.tx.clone();
+        self.rt.spawn_blocking(move || {
+            let mut scanner = AgentScanner::default();
+            let sessions = scanner.scan();
+            *out.lock().unwrap() = Some(sessions.clone());
+            *busy.lock().unwrap() = false;
+            let _ = tx.send(Msg::AgentsScanned(sessions));
+        });
+    }
+
     /// Dashboard-only pulls: system info, disk usage, event stream,
     /// per-container stats streams, consolidated log snapshots.
     fn spawn_dashboard_pulls(&mut self) {
@@ -815,6 +874,18 @@ impl SysKamlingApp {
                 g.push_logs(lines);
                 g.sort_all_logs();
             }
+            Msg::AgentsScanned(sessions) => {
+                g.agents = sessions;
+                // keep the selection pointing at the same session
+                if let Some(key) = g
+                    .selected_agent
+                    .and_then(|i| g.agents.get(i))
+                    .map(|a| (a.agent, a.lead_pid))
+                {
+                    g.selected_agent =
+                        g.agents.iter().position(|a| a.agent == key.0 && a.lead_pid == key.1);
+                }
+            }
         }
     }
 
@@ -829,6 +900,7 @@ impl SysKamlingApp {
             (Tab::Containers, "Containers", format!("{n_run}/{}", g.containers.len())),
             (Tab::Images, "Images", g.images.len().to_string()),
             (Tab::Volumes, "Volumes", g.volumes.len().to_string()),
+            (Tab::Agents, "Agents", g.agents.len().to_string()),
             (Tab::Logs, "Logs", String::new()),
         ];
         let version = g.info.as_ref().map(|i| i.server_version.clone()).unwrap_or_default();
@@ -987,6 +1059,7 @@ impl SysKamlingApp {
                         "Search name, image or state",
                     ),
                     Tab::Images => ("Images", self.gui.images.len(), "Search tags"),
+                    Tab::Agents => ("Agents", self.gui.agents.len(), "Search agent or project"),
                     _ => ("Volumes", self.gui.volumes.len(), "Search volumes"),
                 };
                 ui.horizontal(|ui| {
@@ -994,7 +1067,10 @@ impl SysKamlingApp {
                     ui.label(RichText::new(count.to_string()).size(14.0).color(FAINT));
                 });
                 ui.add_space(8.0);
-                search_box(ui, &mut self.gui.filter, hint);
+                match tab {
+                    Tab::Agents => search_box(ui, &mut self.gui.agent_filter, hint),
+                    _ => search_box(ui, &mut self.gui.filter, hint),
+                }
                 if tab == Tab::Containers {
                     ui.add_space(4.0);
                     let n_all = self.gui.containers.len();
@@ -1018,6 +1094,7 @@ impl SysKamlingApp {
                 match tab {
                     Tab::Containers => self.container_list(ui),
                     Tab::Images => self.image_list(ui),
+                    Tab::Agents => self.agent_list(ui),
                     _ => self.volume_list(ui),
                 }
             });
@@ -1206,6 +1283,81 @@ impl SysKamlingApp {
         }
     }
 
+    fn agent_list(&mut self, ui: &mut Ui) {
+        let rows = self.gui.filtered_agents();
+        let sel = self.gui.selected_agent;
+        if rows.is_empty() {
+            if self.gui.agents.is_empty() {
+                empty_state(
+                    ui,
+                    "No AI agents running",
+                    "Claude Code, Codex, Cursor, omp, ollama… any recognized agent shows up here.",
+                );
+            } else {
+                empty_state(ui, "No agents match", "Try another search.");
+            }
+            return;
+        }
+        let now = epoch();
+        let mut new_sel: Option<Option<usize>> = None;
+        ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
+                for (i, a) in rows {
+                    let (rect, resp) = ui.allocate_exact_size(
+                        Vec2::new(ui.available_width(), 58.0),
+                        Sense::click(),
+                    );
+                    let is_sel = sel == Some(i);
+                    if resp.clicked() {
+                        new_sel = Some(if is_sel { None } else { Some(i) });
+                    }
+                    if !ui.is_rect_visible(rect) {
+                        continue;
+                    }
+                    let p = ui.painter();
+                    row_bg(p, rect, is_sel, resp.hovered());
+                    let color = agent_color(a.agent);
+                    icon_tile(p, rect, Tab::Agents, color);
+                    let left = rect.left() + 54.0;
+                    let text_w = (rect.width() - 54.0 - 86.0).max(40.0);
+                    let name = elide(
+                        p,
+                        a.agent.to_string(),
+                        FontId::proportional(14.0),
+                        TEXT,
+                        text_w,
+                    );
+                    p.galley(Pos2::new(left, rect.top() + 10.0), name, TEXT);
+                    let proj = a
+                        .cwd
+                        .as_deref()
+                        .map(basename)
+                        .unwrap_or_else(|| a.vendor.to_string());
+                    let sub = elide(
+                        p,
+                        format!("{} · pid {} · {}", proj, a.lead_pid, ago(now - a.started.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0))),
+                        FontId::proportional(12.0),
+                        MUTED,
+                        text_w,
+                    );
+                    p.galley(Pos2::new(left, rect.top() + 32.0), sub, MUTED);
+                    let busy = a.cpu_pct > 1.0;
+                    p.text(
+                        Pos2::new(rect.right() - 12.0, rect.center().y),
+                        egui::Align2::RIGHT_CENTER,
+                        format!("{:.0}%", a.cpu_pct),
+                        FontId::monospace(12.0),
+                        if busy { GREEN } else { FAINT },
+                    );
+                }
+            });
+        if let Some(s) = new_sel {
+            self.gui.selected_agent = s;
+        }
+    }
+
     fn volume_list(&mut self, ui: &mut Ui) {
         let g = &self.gui;
         let f = g.filter.to_lowercase();
@@ -1294,6 +1446,7 @@ impl SysKamlingApp {
                     Tab::Containers => self.container_detail(ui),
                     Tab::Images => self.image_detail(ui),
                     Tab::Volumes => self.volume_detail(ui),
+                    Tab::Agents => self.agent_detail(ui),
                 }
             });
     }
@@ -2042,6 +2195,107 @@ impl SysKamlingApp {
         });
     }
 
+    fn agent_detail(&mut self, ui: &mut Ui) {
+        let Some(i) = self.gui.selected_agent else {
+            empty_state(
+                ui,
+                "No agent selected",
+                "Pick an agent session on the left to see its details.",
+            );
+            return;
+        };
+        // The selection indexes the unfiltered list; the filtered view may
+        // hide it, in which case show the "ended" state rather than stale data.
+        let Some(a) = self
+            .gui
+            .filtered_agents()
+            .into_iter()
+            .find(|(idx, _)| *idx == i)
+            .map(|(_, a)| a)
+            .cloned()
+        else {
+            empty_state(ui, "Session ended", "That agent session is no longer running.");
+            return;
+        };
+        let color = agent_color(a.agent);
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.label(RichText::new(a.agent).font(bold(22.0)).color(TEXT));
+                ui.label(RichText::new(a.vendor).size(12.5).color(MUTED));
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                chip(ui, &format!("{} procs", a.pids.len()), color);
+            });
+        });
+        ui.add_space(16.0);
+        let uptime = epoch()
+            - a.started
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+        let kpis = [
+            Kpi {
+                label: "CPU",
+                value: format!("{:.1}%", a.cpu_pct),
+                sub: "across the session tree".into(),
+                color: GREEN,
+                viz: Viz::None,
+            },
+            Kpi {
+                label: "Memory",
+                value: human_size(a.mem_bytes as i64),
+                sub: "resident, summed".into(),
+                color: VIOLET,
+                viz: Viz::None,
+            },
+            Kpi {
+                label: "Uptime",
+                value: ago(uptime),
+                sub: format!("lead pid {}", a.lead_pid),
+                color: ACCENT,
+                viz: Viz::None,
+            },
+        ];
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.x = 14.0;
+            ui.columns(3, |cols| {
+                for (col, k) in cols.iter_mut().zip(&kpis) {
+                    kpi_card(col, k);
+                }
+            });
+        });
+        ui.add_space(14.0);
+
+        card(ui, |ui| {
+            card_title(ui, "Project", "");
+            match &a.cwd {
+                Some(c) => {
+                    ui.label(RichText::new(c).font(FontId::monospace(12.5)).color(TEXT));
+                }
+                None => {
+                    ui.label(RichText::new("not readable (different user?)").color(FAINT));
+                }
+            }
+        });
+        ui.add_space(10.0);
+        card(ui, |ui| {
+            card_title(ui, "Command line", "");
+            ui.add(
+                egui::Label::new(
+                    RichText::new(&a.cmdline).font(FontId::monospace(12.0)).color(MUTED),
+                )
+                .wrap(),
+            );
+        });
+        ui.add_space(10.0);
+        card(ui, |ui| {
+            card_title(ui, &format!("Processes ({})", a.pids.len()), "");
+            for pid in &a.pids {
+                ui.label(RichText::new(format!("pid {pid}")).font(FontId::monospace(12.0)).color(TEXT));
+            }
+        });
+    }
+
     fn volume_detail(&mut self, ui: &mut Ui) {
         let Some(name) = self.gui.selected_volume.clone() else {
             empty_state(ui, "No volume selected", "Pick a volume on the left to see its details.");
@@ -2558,6 +2812,17 @@ fn nav_icon(p: &egui::Painter, tab: Tab, r: Rect, c: Color32) {
                 .collect();
             p.add(egui::Shape::line(arc, s));
         }
+        Tab::Agents => {
+            // a small robot head: rounded box, two eyes, antenna
+            let b = r.shrink2(Vec2::new(1.5, 2.5));
+            p.rect_stroke(b, 4.0, s, inside);
+            for dx in [-0.22_f32, 0.22] {
+                let eye = Pos2::new(b.center().x + b.width() * dx, b.center().y - 1.0);
+                p.circle_filled(eye, 1.4, c);
+            }
+            p.line_segment([Pos2::new(b.center().x, b.top()), Pos2::new(b.center().x, r.top() + 1.5)], s);
+            p.circle_filled(Pos2::new(b.center().x, r.top() + 1.5), 1.2, c);
+        }
         Tab::Logs => {
             for (i, f) in [1.0, 0.65, 0.85, 0.5].iter().enumerate() {
                 let y = r.top() + 2.0 + i as f32 * 4.0;
@@ -2966,6 +3231,35 @@ fn logo_mark(p: &egui::Painter, r: Rect) {
         [Pos2::new(r.left() + 7.0, base_y + 6.5), Pos2::new(r.right() - 7.0, base_y + 6.5)],
         Stroke::new(1.5_f32, Color32::from_white_alpha(170)),
     );
+}
+
+/// Last path component of a filesystem path, for project labels.
+fn basename(p: &str) -> String {
+    p.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(p)
+        .to_string()
+}
+
+/// Stable per-agent accent color for the Agents tab.
+fn agent_color(agent: &str) -> Color32 {
+    match agent {
+        "Claude Code" => VIOLET,
+        "Codex CLI" => Color32::from_rgb(0, 197, 110),
+        "Gemini CLI" => ACCENT,
+        "Cursor" => ACCENT,
+        "Copilot" => Color32::from_rgb(0, 178, 220),
+        "Windsurf" => Color32::from_rgb(74, 104, 255),
+        "JetBrains AI" => AMBER,
+        "Zed AI" => Color32::from_rgb(252, 110, 81),
+        "OpenCode" | "Aider" | "Goose" | "Amp" => GREEN,
+        "omp" | "Hermes" | "OpenClaw" => Color32::from_rgb(236, 111, 163),
+        "ollama" | "llama.cpp server" | "vLLM" => Color32::from_rgb(120, 160, 120),
+        "MCP server" | "Agent Client Protocol" => MUTED,
+        _ => ACCENT,
+    }
 }
 
 fn human_size(b: i64) -> String {
@@ -3433,6 +3727,12 @@ fn err_str(e: DockerError) -> String {
 }
 
 pub fn run(rt: tokio::runtime::Runtime, socket: &str, refresh: f64) -> Result<(), Box<dyn std::error::Error>> {
+    run_with(rt, socket, refresh, None)
+}
+
+/// `tab_shot`: open directly on a tab and auto-close after that many
+/// seconds — used by the throwaway screenshot harness for visual checks.
+pub fn run_with(rt: tokio::runtime::Runtime, socket: &str, refresh: f64, tab_shot: Option<f64>) -> Result<(), Box<dyn std::error::Error>> {
     let icon = load_icon();
     let mut vb = egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 820.0])
@@ -3452,7 +3752,15 @@ pub fn run(rt: tokio::runtime::Runtime, socket: &str, refresh: f64) -> Result<()
         "syskamling",
         opts,
         Box::new(move |cc| {
-            let app = SysKamlingApp::new(cc, Arc::clone(&rt), &socket, refresh);
+            let mut app = SysKamlingApp::new(cc, Arc::clone(&rt), &socket, refresh);
+            if let Some(secs) = tab_shot {
+                app.gui.tab = Tab::Agents;
+                let ctx = cc.egui_ctx.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs_f64(secs));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                });
+            }
             Ok(Box::new(app))
         }),
     )?;

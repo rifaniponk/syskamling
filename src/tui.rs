@@ -17,6 +17,7 @@ use ratatui::{
 };
 use tokio::sync::mpsc;
 
+use crate::agents::{AgentScanner, AgentSession};
 use crate::docker::{ContainerSummary, Docker, DockerError, LogLine, StreamKind};
 
 pub fn run(
@@ -44,6 +45,7 @@ enum Tab {
     Containers,
     Images,
     Volumes,
+    Agents,
     Logs,
 }
 
@@ -52,7 +54,8 @@ impl Tab {
         match self {
             Tab::Containers => Tab::Images,
             Tab::Images => Tab::Volumes,
-            Tab::Volumes => Tab::Logs,
+            Tab::Volumes => Tab::Agents,
+            Tab::Agents => Tab::Logs,
             Tab::Logs => Tab::Containers,
         }
     }
@@ -61,7 +64,8 @@ impl Tab {
             Tab::Containers => Tab::Logs,
             Tab::Images => Tab::Containers,
             Tab::Volumes => Tab::Images,
-            Tab::Logs => Tab::Volumes,
+            Tab::Agents => Tab::Volumes,
+            Tab::Logs => Tab::Agents,
         }
     }
     fn label(self) -> &'static str {
@@ -69,6 +73,7 @@ impl Tab {
             Tab::Containers => " Containers ",
             Tab::Images => " Images ",
             Tab::Volumes => " Volumes ",
+            Tab::Agents => " Agents ",
             Tab::Logs => " Logs ",
         }
     }
@@ -105,6 +110,7 @@ enum Msg {
     LogLines(u64, Vec<LogLine>),
     LogDone(u64, Result<(), String>),
     ActionDone(Result<(&'static str, String), String>),
+    AgentsScanned(Vec<AgentSession>),
 }
 
 struct RefreshData {
@@ -121,6 +127,8 @@ struct App {
     images_state: ListState,
     volumes: Vec<crate::docker::VolumeEntry>,
     volumes_state: ListState,
+    agents: Vec<AgentSession>,
+    agents_state: ListState,
     logs: Vec<LogLine>,
     logs_follow: bool,
     logs_scroll: usize,
@@ -151,6 +159,8 @@ impl App {
             images_state: ListState::default(),
             volumes: Vec::new(),
             volumes_state: ListState::default(),
+            agents: Vec::new(),
+            agents_state: ListState::default(),
             logs: Vec::new(),
             logs_follow: true,
             logs_scroll: 0,
@@ -221,6 +231,32 @@ impl App {
             .select(Some((cur + delta).clamp(0, len as i32 - 1) as usize));
     }
 
+    fn filtered_agents(&self) -> Vec<&AgentSession> {
+        if self.filter.is_empty() {
+            return self.agents.iter().collect();
+        }
+        let f = self.filter.to_lowercase();
+        self.agents
+            .iter()
+            .filter(|a| {
+                a.agent.to_lowercase().contains(&f)
+                    || a.vendor.to_lowercase().contains(&f)
+                    || a.cwd.as_deref().map(|c| c.to_lowercase()).unwrap_or_default().contains(&f)
+            })
+            .collect()
+    }
+
+    fn move_agents(&mut self, delta: i32) {
+        let len = self.filtered_agents().len();
+        if len == 0 {
+            self.agents_state.select(None);
+            return;
+        }
+        let cur = self.agents_state.selected().unwrap_or(0) as i32;
+        self.agents_state
+            .select(Some((cur + delta).clamp(0, len as i32 - 1) as usize));
+    }
+
     fn push_logs(&mut self, lines: Vec<LogLine>) {
         if lines.is_empty() {
             return;
@@ -250,6 +286,7 @@ async fn run_async(
     }
 
     let mut last_refresh = Instant::now() - Duration::from_secs(999);
+    let mut last_agent_scan = Instant::now() - Duration::from_secs(999);
     let mut tick = tokio::time::interval(Duration::from_millis(300));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
@@ -288,6 +325,18 @@ async fn run_async(
         if refresh > 0.0 && last_refresh.elapsed() >= Duration::from_secs_f64(refresh) {
             last_refresh = Instant::now();
             spawn_refresh(&rt, &docker, &tx);
+        }
+
+        // /proc agent scan on the same cadence, on the blocking pool so the
+        // UI loop never waits on filesystem reads.
+        if refresh > 0.0 && last_agent_scan.elapsed() >= Duration::from_secs_f64(refresh.max(1.0)) {
+            last_agent_scan = Instant::now();
+            let tx2 = tx.clone();
+            rt.spawn_blocking(move || {
+                let mut scanner = AgentScanner::default();
+                let sessions = scanner.scan();
+                let _ = tx2.send(Msg::AgentsScanned(sessions));
+            });
         }
 
         // Wait for either a key or a tick/message.
@@ -386,6 +435,17 @@ fn apply_msg(app: &mut App, m: Msg) {
         Msg::ActionDone(Err(e)) => {
             app.pending_action = None;
             app.error = Some(e);
+        }
+        Msg::AgentsScanned(sessions) => {
+            app.agents = sessions;
+            let len = app.filtered_agents().len();
+            if let Some(sel) = app.agents_state.selected() {
+                if sel >= len {
+                    app.agents_state.select(if len == 0 { None } else { Some(len - 1) });
+                }
+            } else if len > 0 && app.agents_state.selected().is_none() {
+                app.agents_state.select(Some(0));
+            }
         }
     }
 }
@@ -650,7 +710,8 @@ fn handle_key(
         KeyCode::Char('1') => app.tab = Tab::Containers,
         KeyCode::Char('2') => app.tab = Tab::Images,
         KeyCode::Char('3') => app.tab = Tab::Volumes,
-        KeyCode::Char('4') => app.tab = Tab::Logs,
+        KeyCode::Char('4') => app.tab = Tab::Agents,
+        KeyCode::Char('5') => app.tab = Tab::Logs,
         KeyCode::Char('/') => {
             app.filtering = true;
             app.filter.clear();
@@ -663,6 +724,7 @@ fn handle_key(
             Tab::Containers => app.move_container(1),
             Tab::Images => app.move_images(1),
             Tab::Volumes => app.move_volumes(1),
+            Tab::Agents => app.move_agents(1),
             Tab::Logs => {
                 app.logs_follow = false;
                 app.logs_scroll = (app.logs_scroll + 1).min(app.logs.len());
@@ -672,6 +734,7 @@ fn handle_key(
             Tab::Containers => app.move_container(-1),
             Tab::Images => app.move_images(-1),
             Tab::Volumes => app.move_volumes(-1),
+            Tab::Agents => app.move_agents(-1),
             Tab::Logs => {
                 app.logs_follow = false;
                 app.logs_scroll = app.logs_scroll.saturating_sub(1);
@@ -685,6 +748,7 @@ fn handle_key(
             Tab::Containers => app.move_container(20),
             Tab::Images => app.move_images(20),
             Tab::Volumes => app.move_volumes(20),
+            Tab::Agents => app.move_agents(20),
         },
         KeyCode::PageUp => match app.tab {
             Tab::Logs => {
@@ -694,6 +758,7 @@ fn handle_key(
             Tab::Containers => app.move_container(-20),
             Tab::Images => app.move_images(-20),
             Tab::Volumes => app.move_volumes(-20),
+            Tab::Agents => app.move_agents(-20),
         },
         KeyCode::Char('g') if app.tab == Tab::Logs => {
             app.logs_follow = false;
@@ -774,7 +839,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         ])
         .split(f.area());
 
-    let tabs: Vec<Span> = [Tab::Containers, Tab::Images, Tab::Volumes, Tab::Logs]
+    let tabs: Vec<Span> = [Tab::Containers, Tab::Images, Tab::Volumes, Tab::Agents, Tab::Logs]
         .iter()
         .flat_map(|t| {
             let active = *t == app.tab;
@@ -810,10 +875,11 @@ fn ui(f: &mut Frame, app: &mut App) {
         format!(" {} ", app.status)
     } else {
         format!(
-            " containers: {}  images: {}  volumes: {}  |  q quit  tab switch  / filter  enter logs  s start/stop  t stop  r restart  x remove  R refresh ",
+            " containers: {}  images: {}  volumes: {}  agents: {}  |  q quit  tab switch  / filter  enter logs  s start/stop  t stop  r restart  x remove  R refresh ",
             app.containers.len(),
             app.images.len(),
-            app.volumes.len()
+            app.volumes.len(),
+            app.agents.len()
         )
     };
     f.render_widget(Paragraph::new(status), chunks[2]);
@@ -822,6 +888,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         Tab::Containers => render_containers(f, app, chunks[1]),
         Tab::Images => render_images(f, app, chunks[1]),
         Tab::Volumes => render_volumes(f, app, chunks[1]),
+        Tab::Agents => render_agents(f, app, chunks[1]),
         Tab::Logs => render_logs(f, app, chunks[1]),
     }
 }
@@ -938,6 +1005,72 @@ fn render_volumes(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
         .highlight_style(Style::default().bg(Color::DarkGray))
         .highlight_symbol("> ");
     f.render_stateful_widget(list, area, &mut app.volumes_state);
+}
+
+fn render_agents(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let list = app.filtered_agents();
+    let rows: Vec<Row> = list
+        .iter()
+        .enumerate()
+        .map(|(i, a)| {
+            let started = now
+                - a.started
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+            let row_style = if Some(i) == app.agents_state.selected() {
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            Row::new(vec![
+                a.agent.to_string(),
+                a.cwd
+                    .as_deref()
+                    .map(|c| c.rsplit('/').next().unwrap_or(c).to_string())
+                    .unwrap_or_else(|| a.vendor.to_string()),
+                a.lead_pid.to_string(),
+                a.pids.len().to_string(),
+                format!("{:.1}", a.cpu_pct),
+                human_bytes(a.mem_bytes as i64),
+                ago(started),
+            ])
+            .style(row_style)
+        })
+        .collect();
+
+    let title = if app.filtering {
+        format!(" Agents (filter: {}) ", app.filter)
+    } else {
+        " Agents ".to_string()
+    };
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(22),
+            Constraint::Min(20),
+            Constraint::Length(7),
+            Constraint::Length(5),
+            Constraint::Length(6),
+            Constraint::Length(9),
+            Constraint::Length(9),
+        ],
+    )
+    .header(
+        Row::new(vec!["AGENT", "PROJECT", "PID", "PROCS", "CPU%", "MEM", "UPTIME"])
+            .style(Style::default().fg(Color::Cyan)),
+    )
+    .block(Block::default().borders(Borders::ALL).title(title))
+    .column_spacing(2);
+
+    f.render_widget(table, area);
 }
 
 fn render_logs(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {

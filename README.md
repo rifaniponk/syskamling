@@ -10,13 +10,17 @@ egui/eframe window, ~10–20 MB resident.
 
 ## Features
 
-- Desktop GUI (default): Containers / Images / Volumes / Logs tabs, dark
-  theme, status-dot pulse, action spinners, log fade-in
+- Desktop GUI (default): Containers / Images / Volumes / Agents / Logs tabs,
+  dark theme, status-dot pulse, action spinners, log fade-in
 - Container actions from the detail panel: start/stop, restart, logs,
   remove (with confirmation dialog)
 - Live discovery with auto-refresh (2 s default) — running and stopped containers
 - Logs viewer: follow mode, scrollback (PageUp/PageDown, g/G), stderr highlighted
 - Filter-as-you-type across containers, images, and volumes
+- Agents tab: every running AI coding agent — Claude Code, Codex, Copilot,
+  Cursor, Windsurf, Gemini CLI, OpenCode, Aider, Goose, Amp, omp, Hermes,
+  JetBrains AI, Zed AI, MCP servers, ollama/vLLM/llama.cpp — grouped into
+  sessions with project dir, CPU, memory, uptime, and full process list
 - Terminal UI (`syskamling tui`) for keyboard-driven, mouse-free use over SSH
 
 ### Roadmap
@@ -55,7 +59,7 @@ syskamling -s /path/to/docker.sock
 
 | Key | Action |
 |---|---|
-| `1`–`4` / `Tab` `←` `→` | Switch screen |
+| `1`–`5` / `Tab` `←` `→` | Switch screen |
 | `j` `k` / `↑` `↓` | Move selection |
 | `Enter` | Open logs for selected container |
 | `s` | Start (if stopped) / stop (if running) |
@@ -65,7 +69,7 @@ syskamling -s /path/to/docker.sock
 | `f` | Toggle log follow |
 | `PgUp` `PgDn`, `g`/`G` | Scroll logs (`G` = bottom + follow) |
 | `c` | Clear log page (stream keeps running) |
-| `/` | Filter containers |
+| `/` | Filter containers / agents |
 | `R` | Force refresh |
 | `q` / `Esc` | Quit |
 
@@ -104,5 +108,6 @@ stream decoder, and idle CPU is ~0%.
 
 ```sh
 cargo test    # HTTP chunked + Docker stream framing decoders
-./smoke_test.py   # headless TUI drive (pty + pyte); requires a live daemon
+./smoke_test.py       # headless TUI drive (pty + pyte); requires a live daemon
+./tui_agents_check.py # headless Agents-tab drive; asserts live agents are listed
 ```

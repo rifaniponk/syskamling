@@ -1,3 +1,4 @@
+mod agents;
 mod docker;
 mod gui;
 mod tui;
