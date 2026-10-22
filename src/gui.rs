@@ -320,8 +320,6 @@ struct SysKamlingApp {
     /// status text currently shown as a toast, and when it appeared
     toast: (String, Instant),
     // --- agents tab ---
-    /// shared between the scanner task and the UI
-    agent_scan: Arc<Mutex<Option<Vec<AgentSession>>>>,
     /// when the scanner task was last kicked
     last_agent_scan: Instant,
     agent_scan_busy: Arc<Mutex<bool>>,
@@ -359,7 +357,6 @@ impl SysKamlingApp {
             all_logs_follow: Vec::new(),
             last_sync: None,
             toast: (String::new(), Instant::now()),
-            agent_scan: Arc::new(Mutex::new(None)),
             last_agent_scan: Instant::now() - Duration::from_secs(999),
             agent_scan_busy: Arc::new(Mutex::new(false)),
         };
@@ -586,13 +583,11 @@ impl SysKamlingApp {
         }
         self.last_agent_scan = Instant::now();
         *self.agent_scan_busy.lock().unwrap() = true;
-        let out = Arc::clone(&self.agent_scan);
         let busy = Arc::clone(&self.agent_scan_busy);
         let tx = self.tx.clone();
         self.rt.spawn_blocking(move || {
             let mut scanner = AgentScanner::default();
             let sessions = scanner.scan();
-            *out.lock().unwrap() = Some(sessions.clone());
             *busy.lock().unwrap() = false;
             let _ = tx.send(Msg::AgentsScanned(sessions));
         });
