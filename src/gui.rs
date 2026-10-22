@@ -841,11 +841,23 @@ impl SysKamlingApp {
         *self.strata_poll_busy.lock().unwrap() = true;
         let busy = Arc::clone(&self.strata_poll_busy);
         let tx = self.tx.clone();
-        let client = Arc::clone(&self.strata_client);
-        self.rt.spawn(async move {
-            let h = client.health().await;
+        let cfg = self.gui.strata_cfg.clone();
+        self.rt.spawn_blocking(move || {
+            let h = match strata::get_blocking(&cfg, "/health") {
+                Ok((200, body)) => serde_json::from_slice(&body).map_err(|e| format!("/health: bad JSON: {e}")),
+                Ok((s, _)) => Err(format!("/health: HTTP {s}")),
+                Err(e) => Err(e),
+            };
             let _ = tx.send(Msg::StrataHealth(h));
-            let m = client.metrics().await;
+            let m = match strata::get_blocking(&cfg, "/metrics") {
+                Ok((200, body)) => strata::parse_metrics(&body),
+                Ok((401, _)) => Err("the server needs an API key (401) — set it in the fields above".into()),
+                Ok((s, body)) => {
+                    let text = String::from_utf8_lossy(&body).chars().take(160).collect::<String>();
+                    Err(format!("/metrics: HTTP {s} {text}"))
+                }
+                Err(e) => Err(e),
+            };
             *busy.lock().unwrap() = false;
             let _ = tx.send(Msg::StrataMetrics(m.map(Box::new)));
         });
@@ -1166,7 +1178,10 @@ impl SysKamlingApp {
                 }
             },
             Msg::StrataMetrics(res) => match res {
-                Ok(m) => g.strata_metrics = Some(m),
+                Ok(m) => {
+                    g.strata_metrics = Some(m);
+                    g.strata_error = None;
+                }
                 Err(e) => g.strata_error = Some(e),
             },
         }
@@ -3354,6 +3369,12 @@ impl SysKamlingApp {
     // ------------------------------------------------------------------
 
     fn strata_view(&mut self, ui: &mut Ui) {
+        // The poller only runs while the tab is visible; pulling the instant
+        // it opens means the first metrics land without waiting a whole
+        // refresh interval for the next tick.
+        if self.gui.strata_metrics.is_none() {
+            self.last_strata_poll = Instant::now() - Duration::from_secs(999);
+        }
         // ---- settings: endpoint + API key, persisted on change ----
         let mut save = false;
         card(ui, |ui| {

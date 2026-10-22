@@ -522,12 +522,136 @@ impl tower_service::Service<Uri> for HttpConnector {
     }
 }
 
+/// Blocking GET over a plain std TcpStream, mirroring docker::UnixClient.
+/// Used by the GUI, whose tokio runtime must not be relied on for hyper's
+/// connection tasks; the TUI keeps the async path above.
+pub fn get_blocking(cfg: &StrataConfig, path: &str) -> Result<(u16, Vec<u8>), String> {
+    let base = cfg.base();
+    let rest = base.split_once("://").map(|(_, r)| r).unwrap_or(&base);
+    let (authority, prefix) = rest.split_once('/').unwrap_or((rest, ""));
+    // host:port split: an unbracketed IPv6 literal has colons but no port
+    let (host_only, explicit_port) = match authority.rsplit_once(':') {
+        Some((h, p)) if !h.contains(':') && !p.is_empty() => (h.to_string(), p.parse::<u16>().ok()),
+        _ => (authority.to_string(), None),
+    };
+    let port = explicit_port.unwrap_or(if base.starts_with("https") { 443 } else { 80 });
+    // resolve first, then connect each candidate in turn. A bare IPv6 zone
+    // literal ([::1]) carries no scope id and cannot be connected; keep only
+    // loopback/unscoped addresses from the resolver.
+    let addrs = match std::net::ToSocketAddrs::to_socket_addrs(&(host_only, port)) {
+        Ok(a) => a.filter(|a| !(a.is_ipv6() && a.ip().to_string().starts_with("fe80"))).collect::<Vec<_>>(),
+        Err(e) => return Err(format!("{path}: resolve: {e}")),
+    };
+    let mut connected = None;
+    let mut last_err = None;
+    for a in addrs {
+        match std::net::TcpStream::connect_timeout(&a, std::time::Duration::from_millis(3000)) {
+            Ok(s) => {
+                connected = Some(s);
+                break;
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    let mut stream = match connected {
+        Some(s) => s,
+        None => return Err(format!("{path}: {}", last_err.map(|e| e.to_string()).unwrap_or_else(|| "no address".into()))),
+    };
+    stream.set_nodelay(true).ok();
+    // every read is bounded: the real server closes the connection, but a
+    // misbehaving one must never wedge the UI worker thread forever
+    stream.set_read_timeout(Some(std::time::Duration::from_millis(3000))).ok();
+    // path is absolute ("/health"); prefix is "" or "/some/base"
+    let req = format!(
+        "GET {prefix}{path} HTTP/1.1\r\nHost: {authority}\r\nAccept: application/json\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
+        cfg.api_key.trim()
+    );
+    use std::io::{Read, Write};
+    stream.write_all(req.as_bytes()).map_err(|e| format!("{path}: {e}"))?;
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).map_err(|e| format!("{path}: {e}"))?;
+    let split = buf
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or_else(|| format!("{path}: truncated response"))?;
+    let head = String::from_utf8_lossy(&buf[..split]).to_string();
+    let status = head
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|c| c.parse::<u16>().ok())
+        .ok_or_else(|| format!("{path}: bad status line"))?;
+    Ok((status, buf[split + 4..].to_vec()))
+}
+
 #[derive(Clone, Copy)]
 struct TokioExecutor;
 
+#[cfg(test)]
+mod blocking_tests {
+    use super::*;
+
+    fn serve_one(response: &'static str) -> (u16, Vec<u8>, String) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let t = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            use std::io::{Read, Write};
+            let mut req = [0u8; 2048];
+            let n = sock.read(&mut req).unwrap_or(0);
+            let head = String::from_utf8_lossy(&req[..n]).to_string();
+            let body = "{\"ok\": true}";
+            let resp = format!("HTTP/1.1 {response}\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+            sock.write_all(resp.as_bytes()).unwrap();
+            head
+        });
+        let cfg = StrataConfig {
+            endpoint: format!("http://127.0.0.1:{port}/"),
+            api_key: "k".into(),
+        };
+        let out = get_blocking(&cfg, "/metrics").unwrap();
+        let head = t.join().unwrap();
+        (out.0, out.1, head)
+    }
+
+    #[test]
+    fn blocking_get_builds_the_right_path_and_keeps_the_key() {
+        let (status, body, head) = serve_one("200 OK");
+        assert_eq!(status, 200);
+        assert_eq!(body, b"{\"ok\": true}");
+        // endpoint had a trailing slash; path is absolute → exactly /metrics
+        assert!(head.contains("GET /metrics HTTP/1.1"), "{head}");
+        assert!(head.contains("Authorization: Bearer k"), "{head}");
+    }
+
+    #[test]
+    fn blocking_get_surfaces_error_statuses() {
+        let (status, _, _) = serve_one("401 Unauthorized");
+        assert_eq!(status, 401);
+    }
+}
+
 impl hyper::rt::Executor<UnpinBoxFuture> for TokioExecutor {
     fn execute(&self, fut: UnpinBoxFuture) {
-        tokio::spawn(fut);
+        // hyper uses this for its connection task. Spawning requires a tokio
+        // context; when called from a plain thread, drive the future inline
+        // instead of losing the request.
+        match tokio::runtime::Handle::try_current() {
+            Ok(h) => {
+                h.spawn(fut);
+            }
+            Err(_) => {
+                let mut fut = std::pin::pin!(fut);
+                let noop = std::task::Waker::noop();
+                let mut cx = std::task::Context::from_waker(noop);
+                loop {
+                    if fut.as_mut().poll(&mut cx).is_ready() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_micros(200));
+                }
+            }
+        }
     }
 }
 
