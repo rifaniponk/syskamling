@@ -1745,21 +1745,23 @@ impl SysKamlingApp {
 
     fn dashboard_view(&mut self, ui: &mut Ui) {
         let g = &self.gui;
-        let sub = match &g.info {
-            Some(i) => format!(
-                "Docker {} · {} · {} CPUs · {} memory",
-                i.server_version,
-                i.operating_system,
-                i.ncpu,
-                human_size(i.mem_total)
+        // The dashboard leads with the machine, not the engine: host vitals
+        // first, Docker as one sub-section below.
+        let sub = match &g.hw {
+            Some(h) => format!(
+                "{} · {} cores · {} RAM · up {}",
+                host_os_name(),
+                h.ncpu,
+                human_size(h.mem_total as i64),
+                uptime_str(h.uptime as i64)
             ),
-            None => "Connecting to the Docker engine…".to_string(),
+            None => "Collecting host vitals…".to_string(),
         };
         let ok = g.daemon_ok;
         ui.horizontal(|ui| {
             ui.vertical(|ui| page_header(ui, "Dashboard", &sub));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                live_pill(ui, ok);
+                live_pill(ui, true);
             });
         });
         ui.add_space(16.0);
@@ -1768,7 +1770,15 @@ impl SysKamlingApp {
             .show(ui, |ui| {
                 self.kpi_cards(ui);
                 ui.add_space(14.0);
-                self.usage_charts(ui);
+                self.system_charts(ui);
+                ui.add_space(14.0);
+                self.system_summary(ui);
+                ui.add_space(14.0);
+                section_heading(ui, "Docker");
+                ui.add_space(6.0);
+                self.docker_strip(ui, ok);
+                ui.add_space(14.0);
+                self.docker_charts(ui);
                 ui.add_space(14.0);
                 if ui.available_width() > 860.0 {
                     ui.scope(|ui| {
@@ -1829,25 +1839,9 @@ impl SysKamlingApp {
 
     fn kpi_cards(&mut self, ui: &mut Ui) {
         let g = &self.gui;
-        let n_all = g.containers.len();
         let n_run = g.containers.iter().filter(|c| c.state == "running").count();
-        let ncpu = g.info.as_ref().map(|i| i.ncpu.max(1)).unwrap_or(1) as f64;
-        // cpu_percent is docker-style (100% per core), so divide the sum by
-        // the core count for a host-wide figure.
-        let cpu_total: f64 = g
-            .containers
-            .iter()
-            .filter(|c| c.state == "running")
-            .filter_map(|c| StatsSample::cpu_percent(g.prev_stats.get(&c.id), g.stats.get(&c.id)?))
-            .sum::<f64>()
-            / ncpu;
-        let mem_total: i64 = g
-            .containers
-            .iter()
-            .filter(|c| c.state == "running")
-            .filter_map(|c| g.stats.get(&c.id).map(|s| s.mem_usage()))
-            .sum();
-        let host_mem = g.info.as_ref().map(|i| i.mem_total).unwrap_or(0);
+        let n_listen = g.ports.iter().filter(|p| p.state == "LISTEN").count();
+        let n_agents = g.agents.len();
         let (disk_total, disk_reclaim) = g
             .df
             .as_ref()
@@ -1858,42 +1852,82 @@ impl SysKamlingApp {
                     .fold((0, 0), |(t, r), u| (t + u.total_size, r + u.reclaimable))
             })
             .unwrap_or((0, 0));
-        let (cpu_series, mem_series, _, _) = self.host_series();
+        let cpu_hist: Vec<f64> = g.hw_cpu_hist.iter().copied().collect();
+        let mem_hist: Vec<f64> = g.hw_mem_hist.iter().copied().collect();
 
-        let kpis = [
-            Kpi {
-                label: "Containers",
-                value: n_run.to_string(),
-                sub: format!("running of {n_all}"),
-                color: GREEN,
-                viz: Viz::Ratio(n_run as f32 / n_all.max(1) as f32),
-            },
-            Kpi {
-                label: "CPU",
-                value: format!("{:.1}%", cpu_total.max(0.0)),
-                sub: format!("of {ncpu:.0} cores"),
-                color: ACCENT,
-                viz: Viz::Spark(cpu_series),
-            },
-            Kpi {
-                label: "Memory",
-                value: human_size(mem_total),
-                sub: if host_mem > 0 {
-                    format!("of {} host", human_size(host_mem))
-                } else {
-                    "in use".to_string()
+        let kpis = match &g.hw {
+            Some(h) => {
+                let mem_used = h.mem_total - h.mem_avail;
+                [
+                    Kpi {
+                        label: "CPU",
+                        value: format!("{:.1}%", h.cpu_pct),
+                        sub: format!("{} cores · load {}", h.ncpu, h.load1),
+                        color: ACCENT,
+                        viz: Viz::Spark(cpu_hist),
+                    },
+                    Kpi {
+                        label: "Memory",
+                        value: human_size(mem_used as i64),
+                        sub: format!(
+                            "of {} ({:.0}%)",
+                            human_size(h.mem_total as i64),
+                            mem_used as f64 / h.mem_total.max(1) as f64 * 100.0
+                        ),
+                        color: VIOLET,
+                        viz: Viz::Spark(mem_hist),
+                    },
+                    Kpi {
+                        label: "Ports",
+                        value: n_listen.to_string(),
+                        sub: format!("listening · {} containers", n_run),
+                        color: CYAN,
+                        viz: Viz::None,
+                    },
+                    Kpi {
+                        label: "Agents",
+                        value: n_agents.to_string(),
+                        sub: if n_agents == 0 {
+                            "no AI sessions running".into()
+                        } else {
+                            "AI coding sessions".into()
+                        },
+                        color: GREEN,
+                        viz: Viz::None,
+                    },
+                ]
+            }
+            None => [
+                Kpi {
+                    label: "CPU",
+                    value: "—".into(),
+                    sub: "collecting host vitals…".into(),
+                    color: ACCENT,
+                    viz: Viz::Spark(cpu_hist),
                 },
-                color: VIOLET,
-                viz: Viz::Spark(mem_series),
-            },
-            Kpi {
-                label: "Disk",
-                value: if g.df.is_some() { human_size(disk_total) } else { "—".into() },
-                sub: format!("{} reclaimable", human_size(disk_reclaim)),
-                color: AMBER,
-                viz: Viz::Ratio(disk_reclaim as f32 / disk_total.max(1) as f32),
-            },
-        ];
+                Kpi {
+                    label: "Memory",
+                    value: "—".into(),
+                    sub: "collecting host vitals…".into(),
+                    color: VIOLET,
+                    viz: Viz::Spark(mem_hist),
+                },
+                Kpi {
+                    label: "Ports",
+                    value: n_listen.to_string(),
+                    sub: format!("listening · {} containers", n_run),
+                    color: CYAN,
+                    viz: Viz::None,
+                },
+                Kpi {
+                    label: "Disk",
+                    value: if g.df.is_some() { human_size(disk_total) } else { "—".into() },
+                    sub: format!("{} reclaimable", human_size(disk_reclaim)),
+                    color: AMBER,
+                    viz: Viz::Ratio(disk_reclaim as f32 / disk_total.max(1) as f32),
+                },
+            ],
+        };
         let per_row = if ui.available_width() > 860.0 { 4 } else { 2 };
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.x = 14.0;
@@ -1910,7 +1944,155 @@ impl SysKamlingApp {
         });
     }
 
-    fn usage_charts(&mut self, ui: &mut Ui) {
+    /// Host-wide charts fed by the /proc sampler: CPU, memory, network.
+    fn system_charts(&mut self, ui: &mut Ui) {
+        let g = &self.gui;
+        let cpu: Vec<f64> = g.hw_cpu_hist.iter().copied().collect();
+        let mem: Vec<f64> = g.hw_mem_hist.iter().copied().collect();
+        let net: Vec<f64> = g
+            .hw_net_rx_hist
+            .iter()
+            .zip(g.hw_net_tx_hist.iter())
+            .map(|(r, t)| r + t)
+            .collect();
+        let samples = cpu.len();
+        card(ui, |ui| {
+            card_title(
+                ui,
+                "System vitals",
+                &if samples > 0 {
+                    format!("last {samples}s · /proc")
+                } else {
+                    String::new()
+                },
+            );
+            if samples < 2 {
+                ui.add_space(4.0);
+                ui.label(RichText::new("Collecting samples…").color(FAINT));
+                ui.add_space(70.0);
+                return;
+            }
+            let last = |s: &[f64]| s.last().copied().unwrap_or(0.0);
+            let charts: [(&str, String, Vec<f64>, Color32, fn(f64) -> String); 3] = [
+                ("CPU", format!("{:.1}%", last(&cpu)), cpu, ACCENT, |v| format!("{v:.1}%")),
+                ("Memory", human_size(last(&mem) as i64), mem, VIOLET, |v| human_size(v as i64)),
+                ("Network", format!("{}/s", human_size(last(&net) as i64)), net, CYAN, |v| {
+                    format!("{}/s", human_size(v as i64))
+                }),
+            ];
+            let per_row = if ui.available_width() > 720.0 { 3 } else { 1 };
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.x = 20.0;
+                for row in charts.chunks(per_row) {
+                    ui.columns(per_row, |cols| {
+                        for (col, (label, now, series, color, fmt)) in cols.iter_mut().zip(row) {
+                            col.horizontal(|ui| {
+                                ui.label(RichText::new(*label).size(12.5).color(MUTED));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.label(RichText::new(now).font(bold(14.0)).color(TEXT));
+                                });
+                            });
+                            let w = col.available_width();
+                            area_chart(col, series, *color, Vec2::new(w, 110.0), *fmt);
+                        }
+                    });
+                }
+            });
+        });
+    }
+
+    /// One-line host summary: uptime, load, temperature, ports, agents,
+    /// disk throughput — the "system at a glance" strip.
+    fn system_summary(&mut self, ui: &mut Ui) {
+        let g = &self.gui;
+        let Some(h) = &g.hw else { return };
+        let n_listen = g.ports.iter().filter(|p| p.state == "LISTEN").count();
+        let n_agents = g.agents.len();
+        let temp = h
+            .temp_c
+            .map(|t| {
+                let c = if t > 85.0 { RED } else if t > 70.0 { AMBER } else { GREEN };
+                (format!("{t:.0} °C"), c)
+            })
+            .unwrap_or_else(|| ("n/a".to_string(), FAINT));
+        let cells: Vec<(&str, String, Color32)> = vec![
+            ("Uptime", uptime_str(h.uptime as i64), TEXT),
+            (
+                "Load",
+                format!("{} · {} · {}", h.load1, h.load5, h.load15),
+                TEXT,
+            ),
+            ("Temp", temp.0, temp.1),
+            ("Listening", format!("{n_listen} ports"), CYAN),
+            (
+                "Agents",
+                format!("{n_agents} running"),
+                if n_agents > 0 { GREEN } else { FAINT },
+            ),
+            (
+                "Disk I/O",
+                format!("↓ {} ↑ {}", human_rate(h.disk_read_bps), human_rate(h.disk_write_bps)),
+                TEXT,
+            ),
+        ];
+        card(ui, |ui| {
+            let per_row = if ui.available_width() > 980.0 { 6 } else if ui.available_width() > 640.0 { 3 } else { 2 };
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.x = 14.0;
+                for (n, row) in cells.chunks(per_row).enumerate() {
+                    if n > 0 {
+                        ui.add_space(8.0);
+                    }
+                    ui.columns(per_row, |cols| {
+                        for (col, (label, value, color)) in cols.iter_mut().zip(row) {
+                            col.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 1.0;
+                                ui.label(RichText::new(*label).size(11.5).color(FAINT));
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(value).font(FontId::monospace(13.5)).color(*color),
+                                    )
+                                    .truncate(),
+                                );
+                            });
+                        }
+                    });
+                }
+            });
+        });
+    }
+
+    /// Docker one-liner under the section heading: engine state, container
+    /// counts, or the offline reason.
+    fn docker_strip(&mut self, ui: &mut Ui, ok: bool) {
+        let g = &self.gui;
+        let n_all = g.containers.len();
+        let n_run = g.containers.iter().filter(|c| c.state == "running").count();
+        let text = if !ok {
+            "Docker engine offline — containers, images and volumes are unavailable".to_string()
+        } else {
+            match &g.info {
+                Some(i) => format!(
+                    "Docker {} · {} containers, {} running · {} images · {} volumes",
+                    i.server_version,
+                    n_all,
+                    n_run,
+                    g.images.len(),
+                    g.volumes.len()
+                ),
+                None => "Connecting to the Docker engine…".to_string(),
+            }
+        };
+        let color = if ok { MUTED } else { RED };
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+            ui.painter().circle_filled(r.center(), 3.5, if ok { GREEN } else { RED });
+            ui.label(RichText::new(text).size(12.5).color(color));
+        });
+    }
+
+    /// Per-container resource charts (CPU/mem/net summed over containers).
+    fn docker_charts(&mut self, ui: &mut Ui) {
         let (cpu, mem, net, samples) = self.host_series();
         let n = self.gui.stats.len();
         card(ui, |ui| {
@@ -3186,6 +3368,50 @@ fn section_label(ui: &mut Ui, text: &str) {
         ui.add_space(8.0);
         ui.label(RichText::new(text).size(10.5).color(FAINT));
     });
+}
+
+/// Bigger in-page section divider used on the dashboard, e.g. "Docker".
+fn section_heading(ui: &mut Ui, text: &str) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(text).font(bold(15.5)).color(TEXT));
+        let (r, _) = ui.allocate_at_least(
+            Vec2::new(ui.available_width(), 1.0),
+            Sense::hover(),
+        );
+        let line = Rect::from_min_max(
+            Pos2::new(r.left(), r.center().y),
+            Pos2::new(r.right(), r.center().y + 1.0),
+        );
+        ui.painter().rect_filled(line, 0.0, BORDER);
+    });
+}
+
+/// Compact uptime like "3d 4h", "4h 12m", "12m".
+fn uptime_str(secs: i64) -> String {
+    let s = secs.max(0);
+    let d = s / 86_400;
+    let h = s % 86_400 / 3600;
+    let m = s % 3600 / 60;
+    if d > 0 {
+        format!("{d}d {h}h")
+    } else if h > 0 {
+        format!("{h}h {m}m")
+    } else {
+        format!("{m}m")
+    }
+}
+
+/// Short OS label for the dashboard header: prefers the kernel name from
+/// /proc (Linux + release) over the Docker-reported string.
+fn host_os_name() -> String {
+    if let Ok(s) = std::fs::read_to_string("/proc/sys/kernel/ostype") {
+        let name = s.trim();
+        if let Ok(rel) = std::fs::read_to_string("/proc/sys/kernel/osrelease") {
+            return format!("{name} {}", rel.trim());
+        }
+        return name.to_string();
+    }
+    "Linux".to_string()
 }
 
 fn engine_card(ui: &mut Ui, ok: bool, version: &str) {
