@@ -35,7 +35,7 @@ const ALL_LOG_TAIL: usize = 200;
 const HIST: usize = 60;
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
-enum Tab {
+pub enum Tab {
     Dashboard,
     Containers,
     Images,
@@ -531,6 +531,84 @@ impl SysKamlingApp {
         };
         app
     }
+
+    /// Test-only: render the Hardware tab into an offscreen egui context
+    /// sized like a short window, then return the ScrollArea geometry the
+    /// view records (viewport height, content height, thumb height).
+    #[cfg(test)]
+    fn probe_hardware_scroll(size: egui::Vec2) -> (f32, f32) {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let (tx, rx) = mpsc::unbounded_channel();
+        let rt = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
+        let mut app = Self {
+            gui: Gui::new(),
+            docker: Arc::new(Docker::new("/nonexistent.sock")),
+            tx,
+            rx,
+            rt: rt.handle().clone(),
+            _rt_keepalive: Arc::clone(&rt),
+            refresh: 1.0,
+            last_refresh: Instant::now() - Duration::from_secs(999),
+            tick: Instant::now(),
+            dot_anim: Default::default(),
+            spin: None,
+            logs_opened: Instant::now(),
+            prev_log_len: 0,
+            last_info: Instant::now() - Duration::from_secs(999),
+            last_df: Instant::now() - Duration::from_secs(999),
+            last_events: Instant::now() - Duration::from_secs(999),
+            last_event: Instant::now(),
+            streaming_stats: Vec::new(),
+            stats_spawned: HashMap::new(),
+            all_logs_follow: Vec::new(),
+            last_sync: None,
+            toast: (String::new(), Instant::now()),
+            last_agent_scan: Instant::now() - Duration::from_secs(999),
+            agent_scan_busy: Arc::new(Mutex::new(false)),
+            sampler: Sampler::default(),
+            last_hw_sample: Instant::now() - Duration::from_secs(999),
+            last_port_scan: Instant::now() - Duration::from_secs(999),
+            port_scan_busy: Arc::new(Mutex::new(false)),
+            last_gpu_stats: Instant::now() - Duration::from_secs(999),
+            gpu_scan_busy: Arc::new(Mutex::new(false)),
+            strata_client: Arc::new(strata::HttpClient::new(&strata::StrataConfig::default())),
+            last_strata_poll: Instant::now() - Duration::from_secs(999),
+            strata_poll_busy: Arc::new(Mutex::new(false)),
+        };
+        app.gui.tab = Tab::Hardware;
+        app.sample_hardware();
+        app.sample_hardware(); // second sample so rates/sparklines populate
+        let mut rich = app.gui.hw.clone().unwrap();
+        rich.disks = (0..8)
+            .map(|i| crate::hw::DiskStat {
+                name: format!("nvme{}n1", i),
+                reads: 10,
+                writes: 20,
+                total_read: 1000,
+                total_write: 2000,
+                ms_busy: 50,
+                ms_weighted: 3,
+                uptime: 3600.0,
+                temp_c: Some(40.0),
+                read_bps: 0.0,
+                write_bps: 0.0,
+            })
+            .collect();
+        app.gui.hw = Some(rich);
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size));
+        hw_scroll_probe::reset();
+        for _ in 0..3 {
+            ctx.begin_pass(raw.clone());
+            egui::CentralPanel::default().show(&ctx, |ui| match app.gui.tab {
+                Tab::Hardware => app.hardware_view(ui),
+                _ => {}
+            });
+            ctx.end_pass();
+        }
+        hw_scroll_probe::last()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -702,7 +780,7 @@ impl eframe::App for SysKamlingApp {
 
         // Periodic refresh + continuous repaint at ~4 fps when idle so the
         // list stays live without burning CPU.
-        if self.tick.elapsed() >= Duration::from_millis(250) {
+        if self.tick.elapsed() >= Duration::from_millis(if self.refresh > 0.0 { 250 } else { 100 }) {
             self.tick = Instant::now();
             if self.refresh > 0.0
                 && self.last_refresh.elapsed() >= Duration::from_secs_f64(self.refresh)
@@ -790,7 +868,7 @@ impl SysKamlingApp {
     /// come from hwmon here; the expensive nvidia-smi pass runs separately
     /// on the blocking pool when the Hardware tab is visible.
     fn sample_hardware(&mut self) {
-        if self.last_hw_sample.elapsed() < Duration::from_secs_f64(self.refresh.max(1.0)) {
+        if self.last_hw_sample.elapsed() < Duration::from_secs_f64(self.refresh.max(0.5)) {
             return;
         }
         self.last_hw_sample = Instant::now();
@@ -2959,7 +3037,16 @@ impl SysKamlingApp {
                 ago(s.uptime as i64)
             ),
         );
-        ui.add_space(16.0);
+        // The page is taller than most windows: KPI cards, charts, the
+        // machine inventory and per-disk detail all stack, so the body
+        // scrolls instead of clipping.
+        // regression: the body must actually scroll, not clip. The binding
+        // and the probe call are test-only; the release build renders the
+        // very same scroll area without it.
+        let hw_body = ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add_space(16.0);
 
         let mem_used = s.mem_total - s.mem_avail;
         let swap_used = s.swap_total.saturating_sub(s.swap_free);
@@ -3253,8 +3340,13 @@ impl SysKamlingApp {
                 ui.add_space(8.0);
             }
         }
+            });
+        // regression: the body must actually scroll, not clip
+        #[cfg(test)]
+        hw_scroll_probe::record(hw_body.inner_rect.height(), hw_body.content_size.y);
+        #[cfg(not(test))]
+        drop(hw_body);
     }
-
     // ------------------------------------------------------------------
     // Ports tab: the socket detail page
     // ------------------------------------------------------------------
@@ -5840,5 +5932,42 @@ fn tag(lines: Vec<LogLine>, label: &Option<String>) -> Vec<LogLine> {
             })
             .collect(),
         None => lines,
+    }
+}
+
+#[cfg(test)]
+mod hw_scroll_tests {
+    use super::*;
+
+    #[test]
+    fn hardware_page_body_scrolls_instead_of_clipping() {
+        let (viewport_h, content_h) = SysKamlingApp::probe_hardware_scroll(egui::Vec2::new(1100.0, 420.0));
+        assert!(viewport_h > 0.0, "probe never ran");
+        assert!(content_h > viewport_h, "content {content_h} must exceed viewport {viewport_h} so the body scrolls");
+        // the body must not be collapsed to nothing either
+        assert!(content_h > 1000.0, "content {content_h} looks collapsed/blank");
+    }
+}
+
+#[cfg(test)]
+pub mod hw_scroll_probe {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    // heights are stored as f32 bit patterns scaled through from_bits
+    static MAX_RECT: AtomicU32 = AtomicU32::new(0);
+    static CONTENT_H: AtomicU32 = AtomicU32::new(0);
+
+    pub fn reset() {
+        MAX_RECT.store(0.0f32.to_bits(), Ordering::Relaxed);
+        CONTENT_H.store(0.0f32.to_bits(), Ordering::Relaxed);
+    }
+    pub fn record(viewport_h: f32, content_h: f32) {
+        MAX_RECT.store(viewport_h.to_bits(), Ordering::Relaxed);
+        CONTENT_H.store(content_h.to_bits(), Ordering::Relaxed);
+    }
+    pub fn last() -> (f32, f32) {
+        (
+            f32::from_bits(MAX_RECT.load(Ordering::Relaxed)),
+            f32::from_bits(CONTENT_H.load(Ordering::Relaxed)),
+        )
     }
 }
