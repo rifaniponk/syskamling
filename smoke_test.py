@@ -38,7 +38,7 @@ def main():
         sys.exit('build first: cargo build --release')
     pid, fd = pty.fork()
     if pid == 0:
-        os.execvp('./target/release/syskamling', ['./target/release/syskamling'])
+        os.execvp('./target/release/syskamling', ['./target/release/syskamling', 'tui'])
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', ROWS, COLS, 0, 0))
     term = pyte.Screen(COLS, ROWS)
     stream = pyte.ByteStream(term)
