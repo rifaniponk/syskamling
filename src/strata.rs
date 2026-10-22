@@ -117,19 +117,51 @@ pub fn load_file() -> FileConfig {
 }
 
 /// Merge our sections into the shared config file, keeping other keys.
+#[cfg(test)]
 pub fn save_file(cfg: &FileConfig) -> Result<(), String> {
     let path = config_path().ok_or("HOME is not set")?;
+    write_at(&path, cfg)
+}
+
+/// Apply `edit` to the config on disk without touching the other sections
+/// (which may hold unsaved GUI edits). Returns the whole config as it now
+/// stands on disk.
+pub fn patch<F: FnOnce(&mut FileConfig)>(edit: F) -> Result<FileConfig, String> {
+    let path = config_path().ok_or("HOME is not set")?;
+    let mut all = read_at(&path);
+    edit(&mut all);
+    write_at(&path, &all)?;
+    Ok(all)
+}
+
+/// Read the whole config from an explicit path; defaults when missing or
+/// malformed. Foreign keys are ignored but preserved by `write_at`.
+pub fn read_at(path: &std::path::Path) -> FileConfig {
+    let Ok(txt) = std::fs::read_to_string(path) else {
+        return FileConfig::default();
+    };
+    match serde_json::from_str::<FileShape>(&txt) {
+        Ok(f) => FileConfig {
+            strata: f.strata.unwrap_or_default(),
+            general: f.general.unwrap_or_default(),
+        },
+        Err(_) => FileConfig::default(),
+    }
+}
+
+/// Merge our sections into the config at an explicit path, keeping other keys.
+pub fn write_at(path: &std::path::Path, cfg: &FileConfig) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let mut root: BTreeMap<String, Value> = std::fs::read_to_string(&path)
+    let mut root: BTreeMap<String, Value> = std::fs::read_to_string(path)
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default();
     root.insert("strata".into(), serde_json::to_value(&cfg.strata).map_err(|e| e.to_string())?);
     root.insert("general".into(), serde_json::to_value(&cfg.general).map_err(|e| e.to_string())?);
     let pretty = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
-    std::fs::write(&path, pretty).map_err(|e| e.to_string())
+    std::fs::write(path, pretty).map_err(|e| e.to_string())
 }
 
 /// Load `strata` settings; defaults when the file is missing or malformed.

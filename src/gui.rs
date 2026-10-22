@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use egui::{
     Color32, FontData, FontFamily, FontId, Frame, Margin, Pos2, Rect, RichText, ScrollArea, Sense,
-    Stroke, TextStyle, Ui, Vec2,
+    Stroke, TextStyle, Ui, UiBuilder, Vec2,
 };
 
 use tokio::sync::mpsc;
@@ -87,6 +87,9 @@ enum Msg {
     Df(Result<DiskSummary, String>),
     Stats(String, Box<StatsSample>),
     Events(Result<Vec<EventMessage>, String>),
+    /// The event stream closed normally (watchdog recycle or daemon hang-up);
+    /// reconnect quietly, nothing to report.
+    EventsClosed,
     AllLogs(Vec<LogLine>),
     AgentsScanned(Vec<AgentSession>),
     PortsScanned(Vec<PortEntry>),
@@ -224,6 +227,9 @@ struct Gui {
     /// test seam: the Settings tab records the endpoint field's rect here
     #[cfg(test)]
     probe_endpoint_rect: Option<egui::Rect>,
+    /// test seam: the Settings tab records the Test & save button's rect here
+    #[cfg(test)]
+    probe_save_rect: Option<egui::Rect>,
     strata_health: Option<strata::Health>,
     strata_metrics: Option<Box<strata::Metrics>>,
     strata_error: Option<String>,
@@ -294,6 +300,8 @@ impl Gui {
             autoscroll_logs: true,
             #[cfg(test)]
             probe_endpoint_rect: None,
+            #[cfg(test)]
+            probe_save_rect: None,
             strata_health: None,
             strata_metrics: None,
             strata_error: None,
@@ -1253,6 +1261,9 @@ impl SysKamlingApp {
             Msg::Events(Err(e)) => {
                 g.events_active = false;
                 g.error = Some(format!("events: {e}"));
+            }
+            Msg::EventsClosed => {
+                g.events_active = false;
             }
             Msg::AllLogs(lines) => {
                 g.push_logs(lines);
@@ -2218,6 +2229,7 @@ impl SysKamlingApp {
                 sub: cpu_sub.join(" · "),
                 color: ACCENT,
                 viz: Viz::Spark(hist(&g.hw_cpu_hist)),
+                glyph: Some("cpu"),
             },
             Kpi {
                 label: "Memory",
@@ -2230,6 +2242,7 @@ impl SysKamlingApp {
                 ),
                 color: VIOLET,
                 viz: Viz::Spark(hist(&g.hw_mem_hist)),
+                glyph: Some("ram"),
             },
         ];
         let gpu = g
@@ -2255,6 +2268,7 @@ impl SysKamlingApp {
                     sub: sub.join(" · "),
                     color: CYAN,
                     viz: Viz::Spark(hist(&g.hw_gpu_busy_hist)),
+                    glyph: Some("gpu"),
                 }
             }
             None => Kpi {
@@ -2263,6 +2277,7 @@ impl SysKamlingApp {
                 sub: format!("read {} · write {}", human_rate(h.disk_read_bps), human_rate(h.disk_write_bps)),
                 color: AMBER,
                 viz: Viz::Spark(sum(&g.hw_disk_r_hist, &g.hw_disk_w_hist)),
+                glyph: Some("disk"),
             },
         });
         tiles.push(Kpi {
@@ -2271,6 +2286,7 @@ impl SysKamlingApp {
             sub: format!("↓ {} · ↑ {}", human_rate(h.net_rx_bps), human_rate(h.net_tx_bps)),
             color: GREEN,
             viz: Viz::Spark(sum(&g.hw_net_rx_hist, &g.hw_net_tx_hist)),
+            glyph: Some("net"),
         });
         let per_row = if ui.available_width() > 860.0 { 4 } else { 2 };
         ui.scope(|ui| {
@@ -2611,6 +2627,7 @@ impl SysKamlingApp {
                 sub: "of one core = 100%".to_string(),
                 color: ACCENT,
                 viz: Viz::Spark(series(&|h| h.cpu.iter().copied().collect())),
+                glyph: Some("cpu"),
             },
             Kpi {
                 label: "Memory",
@@ -2622,6 +2639,7 @@ impl SysKamlingApp {
                 ),
                 color: VIOLET,
                 viz: Viz::Spark(series(&|h| h.mem.iter().map(|v| *v as f64).collect())),
+                glyph: Some("ram"),
             },
             Kpi {
                 label: "Network",
@@ -2629,6 +2647,7 @@ impl SysKamlingApp {
                 sub: format!("↑ {}/s · {} pids", human_size(txb), s.pids_stats.current),
                 color: CYAN,
                 viz: Viz::Spark(series(&|h| h.rx.iter().zip(&h.tx).map(|(a, b)| (a + b) as f64).collect())),
+                glyph: Some("net"),
             },
             Kpi {
                 label: "Disk I/O",
@@ -2636,6 +2655,7 @@ impl SysKamlingApp {
                 sub: format!("read {} · write {}", human_size(s.blk_read()), human_size(s.blk_write())),
                 color: AMBER,
                 viz: Viz::Spark(series(&|h| h.blk_r.iter().zip(&h.blk_w).map(|(a, b)| (a + b) as f64).collect())),
+                glyph: Some("disk"),
             },
         ];
         let per_row = if ui.available_width() > 560.0 { 4 } else { 2 };
@@ -2696,6 +2716,7 @@ impl SysKamlingApp {
                     sub: format!("{:.1}% of all layers", im.size as f64 / total.max(1) as f64 * 100.0),
                     color: ACCENT,
                     viz: Viz::Ratio(im.size as f32 / total.max(1) as f32),
+                    glyph: None,
                 },
                 Kpi {
                     label: "Unique",
@@ -2703,6 +2724,7 @@ impl SysKamlingApp {
                     sub: format!("{} shared with other images", human_size(im.shared_size.max(0))),
                     color: VIOLET,
                     viz: Viz::Ratio((im.size - im.shared_size.max(0)).max(0) as f32 / im.size.max(1) as f32),
+                    glyph: None,
                 },
                 Kpi {
                     label: "Containers",
@@ -2710,6 +2732,7 @@ impl SysKamlingApp {
                     sub: if im.created > 0 { format!("created {}", fmt_epoch(im.created)) } else { String::new() },
                     color: GREEN,
                     viz: Viz::None,
+                    glyph: None,
                 },
             ];
             ui.scope(|ui| {
@@ -2796,6 +2819,7 @@ impl SysKamlingApp {
                 sub: "across the session tree".into(),
                 color: GREEN,
                 viz: Viz::None,
+                glyph: Some("cpu"),
             },
             Kpi {
                 label: "Memory",
@@ -2803,6 +2827,7 @@ impl SysKamlingApp {
                 sub: "resident, summed".into(),
                 color: VIOLET,
                 viz: Viz::None,
+                glyph: Some("ram"),
             },
             Kpi {
                 label: "Uptime",
@@ -2810,6 +2835,7 @@ impl SysKamlingApp {
                 sub: format!("lead pid {}", a.lead_pid),
                 color: ACCENT,
                 viz: Viz::None,
+                glyph: None,
             },
         ];
         ui.scope(|ui| {
@@ -2903,6 +2929,7 @@ impl SysKamlingApp {
                 },
                 color: ACCENT,
                 viz: Viz::Spark(cpu_hist),
+                glyph: Some("cpu"),
             },
             Kpi {
                 label: "Memory",
@@ -2910,6 +2937,7 @@ impl SysKamlingApp {
                 sub: format!("of {} ({:.0}%)", human_size(s.mem_total as i64), mem_used as f64 / s.mem_total.max(1) as f64 * 100.0),
                 color: VIOLET,
                 viz: Viz::Ratio(mem_used as f32 / s.mem_total.max(1) as f32),
+                glyph: Some("ram"),
             },
             Kpi {
                 label: "Disk I/O",
@@ -2917,6 +2945,7 @@ impl SysKamlingApp {
                 sub: "read · write per second".into(),
                 color: GREEN,
                 viz: Viz::Spark(dr_hist.into_iter().zip(dw_hist).map(|(r, w)| r + w).collect()),
+                glyph: Some("disk"),
             },
             Kpi {
                 label: "Network",
@@ -2924,6 +2953,7 @@ impl SysKamlingApp {
                 sub: "down · up per second".into(),
                 color: AMBER,
                 viz: Viz::Spark(rx_hist.into_iter().zip(tx_hist).map(|(r, t)| r + t).collect()),
+                glyph: Some("net"),
             },
         ];
         if let Some(g) = gpus.iter().max_by(|a, b| a.busy_pct.unwrap_or(0.0).partial_cmp(&b.busy_pct.unwrap_or(0.0)).unwrap_or(std::cmp::Ordering::Equal)) {
@@ -2937,6 +2967,7 @@ impl SysKamlingApp {
                 },
                 color: CYAN,
                 viz: Viz::Spark(gpu_busy_hist.clone()),
+                glyph: Some("gpu"),
             });
         }
         if let Some(t) = s.disks.iter().filter_map(|d| d.temp_c).max_by(|a, b| a.partial_cmp(b).unwrap()) {
@@ -2946,6 +2977,7 @@ impl SysKamlingApp {
                 sub: "drive temperature".into(),
                 color: if t > 70.0 { RED } else if t > 60.0 { AMBER } else { GREEN },
                 viz: Viz::Spark(self.gui.hw_disk_temp_hist.iter().copied().collect()),
+                glyph: Some("disk"),
             });
         }
         ui.scope(|ui| {
@@ -3232,6 +3264,7 @@ impl SysKamlingApp {
                 sub: p.pid.map(|x| format!("pid {x}")).unwrap_or_else(|| "owner not visible".into()),
                 color: if p.pid.is_some() { GREEN } else { FAINT },
                 viz: Viz::None,
+                glyph: None,
             },
             Kpi {
                 label: "Protocol",
@@ -3239,6 +3272,7 @@ impl SysKamlingApp {
                 sub: format!("IPv{}", p.family),
                 color: ACCENT,
                 viz: Viz::None,
+                glyph: None,
             },
             Kpi {
                 label: "Bind",
@@ -3246,6 +3280,7 @@ impl SysKamlingApp {
                 sub: p.addr.clone(),
                 color: if p.addr == "0.0.0.0" || p.addr == "[::]" { AMBER } else { GREEN },
                 viz: Viz::None,
+                glyph: None,
             },
         ];
         ui.scope(|ui| {
@@ -3297,141 +3332,232 @@ impl SysKamlingApp {
     // ------------------------------------------------------------------
 
     fn settings_view(&mut self, ui: &mut Ui) {
-        page_header(ui, "Settings", "general behaviour and connected servers, saved to ~/.config/syskamling/config.json");
+        page_header(
+            ui,
+            "Settings",
+            "how SysKamling behaves and which servers it watches",
+        );
         ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.add_space(16.0);
-                let mut save = false;
+                let mut general_dirty = false;
 
+                // ---- General ------------------------------------------------
                 card(ui, |ui| {
-                    card_title(ui, "General", "how SysKamling behaves");
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Refresh interval").size(13.0).color(TEXT));
-                        ui.label(RichText::new("seconds between live pulls · 0 disables polling").size(11.5).color(FAINT));
-                    });
-                    let re = ui.add(
-                        egui::DragValue::new(&mut self.gui.refresh_edit)
+                    card_title(ui, "General", "");
+                    ui.label(
+                        RichText::new("changes apply the moment you touch them · saved automatically")
+                            .size(12.0)
+                            .color(FAINT),
+                    );
+                    ui.add_space(4.0);
+
+                    // refresh interval: stepper + quick presets
+                    let presets = [1.0_f64, 2.0, 5.0, 10.0];
+                    let preset_hit = setting_row(ui, "Refresh interval", "seconds between live pulls · 0 disables polling", |ui| {
+                        let mut hit = None;
+                        for p in presets {
+                            let on = (self.gui.refresh_edit - p).abs() < 0.01;
+                            let b = ui.add_sized(
+                                [40.0, 26.0],
+                                egui::Button::new(RichText::new(format!("{p:.0}s")).size(12.0).color(if on { ACCENT } else { MUTED }))
+                                    .fill(if on { ACCENT.gamma_multiply(0.18) } else { SURFACE_HI })
+                                    .stroke(Stroke::new(1.0_f32, if on { ACCENT.gamma_multiply(0.6) } else { BORDER })),
+                            );
+                            if b.clicked() {
+                                hit = Some(p);
+                            }
+                        }
+                        let dv = egui::DragValue::new(&mut self.gui.refresh_edit)
                             .range(0.0..=60.0)
                             .speed(0.25)
                             .suffix(" s")
-                            .max_decimals(1),
-                    );
-                    if re.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        self.refresh = self.gui.refresh_edit.max(0.0);
-                        save = true;
-                        self.gui.status = format!("refresh every {} s", self.gui.refresh_edit);
+                            .max_decimals(1);
+                        let r = ui.add_sized([92.0, 26.0], dv);
+                        if r.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            general_dirty = true;
+                        }
+                        if let Some(p) = hit {
+                            self.gui.refresh_edit = p;
+                            general_dirty = true;
+                        }
+                    });
+                    let _ = preset_hit;
+                    // apply live so the stepper feels responsive...
+                    self.refresh = self.gui.refresh_edit.max(0.0);
+                    if general_dirty {
+                        // ...and persist once the edit settles (Enter / focus loss)
+                        if let Err(e) = strata::patch(|c| {
+                            c.general = strata::GeneralConfig {
+                                refresh_secs: self.refresh,
+                                autoscroll_logs: self.gui.autoscroll_logs,
+                            };
+                        }) {
+                            self.gui.status = format!("could not save settings: {e}");
+                        } else {
+                            let v = self.refresh;
+                            let vs = if v.fract() == 0.0 { format!("{}", v as i64) } else { format!("{v}") };
+                            self.gui.status = format!("refresh every {vs} s");
+                        }
+                        general_dirty = false;
                     }
-                    ui.add_space(4.0);
-                    if ui
-                        .checkbox(&mut self.gui.autoscroll_logs, RichText::new("Follow log output (stick to the bottom as new lines land)").size(13.0))
-                        .changed()
-                    {
-                        self.gui.logs_follow = self.gui.autoscroll_logs;
-                        save = true;
+
+                    let autoscroll = setting_row(ui, "Follow log output", "stick to the bottom as new lines land", |ui| {
+                        let on = self.gui.autoscroll_logs;
+                        if switch(ui, on).clicked() {
+                            self.gui.autoscroll_logs = !on;
+                            self.gui.logs_follow = !on;
+                            general_dirty = true;
+                        }
+                    });
+                    let _ = autoscroll;
+                    if general_dirty {
+                        if let Err(e) = strata::patch(|c| {
+                            c.general = strata::GeneralConfig {
+                                refresh_secs: self.refresh,
+                                autoscroll_logs: self.gui.autoscroll_logs,
+                            };
+                        }) {
+                            self.gui.status = format!("could not save settings: {e}");
+                        } else {
+                            self.gui.status = if self.gui.autoscroll_logs { "log follow on".into() } else { "log follow off".into() };
+                        }
+                        general_dirty = false;
                     }
                 });
                 ui.add_space(12.0);
 
-        // ---- settings: endpoint + API key, persisted on change ----
-        card(ui, |ui| {
-            card_title(ui, "Strata server", "endpoint and key are kept in ~/.config/syskamling/config.json");
-            ui.columns(2, |cols| {
-                let ep_resp = cols[0].add(
-                    egui::TextEdit::singleline(&mut self.gui.strata_endpoint_edit)
-                        .hint_text("http://127.0.0.1:9191")
-                        .desired_width(cols[0].available_width() - 8.0),
-                );
-                #[cfg(test)]
-                {
-                    self.gui.probe_endpoint_rect = Some(ep_resp.rect);
-                }
-                let ep_changed =
-                    ep_resp.lost_focus() || cols[0].input(|i| i.key_pressed(egui::Key::Enter));
-                let mut key = std::mem::take(&mut self.gui.strata_key_edit);
-                let kr = cols[1].add(
-                    egui::TextEdit::singleline(&mut key)
-                        .hint_text("API key")
-                        .password(self.gui.strata_key_masked)
-                        .desired_width(cols[1].available_width() - 44.0),
-                );
-                let key_changed = kr.lost_focus() || cols[1].input(|i| i.key_pressed(egui::Key::Enter));
-                cols[1].with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .button(RichText::new(if self.gui.strata_key_masked { "show" } else { "hide" }).size(11.5).color(MUTED))
-                        .clicked()
-                    {
-                        self.gui.strata_key_masked = !self.gui.strata_key_masked;
-                    }
-                });
-                self.gui.strata_key_edit = key;
-                if ep_changed && !self.gui.strata_endpoint_edit.trim().is_empty() {
-                    self.gui.strata_cfg.endpoint = self.gui.strata_endpoint_edit.trim().to_string();
-                    save = true;
-                }
-                if key_changed {
-                    self.gui.strata_cfg.api_key = self.gui.strata_key_edit.trim().to_string();
-                    save = true;
-                }
-            });
-            ui.horizontal(|ui| {
-                if ui
-                    .button(RichText::new("⟳ Test & save").font(bold(12.5)).color(ACCENT))
-                    .clicked()
-                {
-                    self.gui.strata_cfg.endpoint = self.gui.strata_endpoint_edit.trim().to_string();
-                    self.gui.strata_cfg.api_key = self.gui.strata_key_edit.trim().to_string();
-                    save = true;
-                    self.last_strata_poll = Instant::now() - Duration::from_secs(999);
-                }
-                if let Some(h) = &self.gui.strata_health {
-                    let svc = if h.service.is_empty() { "strata" } else { h.service.as_str() };
-                    let model = if h.model.is_empty() { "no model" } else { &h.model };
-                    ui.label(
-                        RichText::new(format!(
-                            "● {svc} · {} · {} ctx · {} · {} · images {} · key {}",
-                            h.status,
-                            h.max_context,
-                            model,
-                            if h.loaded { "loaded" } else { "not loaded" },
-                            if h.images { "on" } else { "off" },
-                            if h.api_key { "set" } else { "none" }
-                        ))
-                        .size(12.0)
-                        .color(GREEN),
-                    );
-                } else if let Some(e) = &self.gui.strata_error {
-                    ui.label(RichText::new(format!("● {e}")).size(12.0).color(RED));
-                } else {
-                    ui.label(RichText::new("● connecting…").size(12.0).color(FAINT));
-                }
-            });
-        });
+                // ---- Strata server ------------------------------------------
+                // edits are staged in the fields; nothing touches the config
+                // file until Test & save, so half-typed values can't break the
+                // live connection
+                let mut test_now = false;
+                card(ui, |ui| {
+                    let connected = self.gui.strata_health.is_some();
+                    let dot = if connected { GREEN } else if self.gui.strata_error.is_some() { RED } else { FAINT };
+                    card_title(ui, "Strata server", "");
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("●").size(13.0).color(dot));
+                        let sub = if let Some(h) = &self.gui.strata_health {
+                            let svc = if h.service.is_empty() { "strata" } else { h.service.as_str() };
+                            let model = if h.model.is_empty() { "no model" } else { &h.model };
+                            format!(
+                                "{svc} · {} · {} ctx · {model} · {}",
+                                h.status,
+                                h.max_context,
+                                if h.loaded { "loaded" } else { "not loaded" }
+                            )
+                        } else if let Some(e) = &self.gui.strata_error {
+                            e.clone()
+                        } else {
+                            "not connected yet — set the endpoint and key, then Test & save".into()
+                        };
+                        ui.label(RichText::new(sub).size(12.0).color(if connected { GREEN } else { MUTED }));
+                    });
+                    ui.add_space(6.0);
 
-                if save {
-                    let all = strata::FileConfig {
-                        strata: self.gui.strata_cfg.clone(),
-                        general: strata::GeneralConfig {
-                            refresh_secs: self.refresh,
-                            autoscroll_logs: self.gui.autoscroll_logs,
+                    let ep_resp = field(ui, &mut self.gui.strata_endpoint_edit, "http://127.0.0.1:9191", true, false, None);
+                    #[cfg(test)]
+                    {
+                        self.gui.probe_endpoint_rect = Some(ep_resp.rect);
+                    }
+                    #[cfg(not(test))]
+                    let _ = ep_resp;
+                    ui.add_space(8.0);
+
+                    let masked = self.gui.strata_key_masked;
+                    let key_resp = field(ui, &mut self.gui.strata_key_edit, "sk-…", true, masked, Some((
+                        if masked { "eye" } else { "eye_off" },
+                        masked,
+                        &mut |on: bool| {
+                            self.gui.strata_key_masked = !on;
                         },
-                    };
-                    match strata::save_file(&all) {
-                        Ok(()) => {
+                    )));
+                    // pull the save row up flush under the fields instead of
+                    // leaving a full spacing gap
+                    let c = ui.cursor();
+                    ui.scope_builder(
+                        UiBuilder::new().max_rect(Rect::from_min_max(
+                            Pos2::new(c.min.x, key_resp.rect.bottom() + 10.0),
+                            ui.max_rect().max,
+                        )),
+                        |ui| {
+                            ui.horizontal(|ui| {
+                                let btn = ui.add_sized(
+                                    [118.0, 30.0],
+                                    egui::Button::new(
+                                        RichText::new("⟳  Test & save").font(bold(12.5)).color(ACCENT),
+                                    )
+                                    .fill(ACCENT.gamma_multiply(0.14))
+                                    .stroke(Stroke::new(1.0_f32, ACCENT.gamma_multiply(0.55))),
+                                );
+                                #[cfg(test)]
+                                {
+                                    self.gui.probe_save_rect = Some(btn.rect);
+                                }
+                                if btn.clicked() {
+                                    test_now = true;
+                                    // commit the trimmed values right away so
+                                    // the status line can't echo a half-typed
+                                    // edit before the save block runs
+                                    self.gui.strata_cfg.endpoint =
+                                        self.gui.strata_endpoint_edit.trim().to_string();
+                                    self.gui.strata_cfg.api_key =
+                                        self.gui.strata_key_edit.trim().to_string();
+                                }
+                                if let Some(h) = &self.gui.strata_health {
+                                    let svc = if h.service.is_empty() { "strata" } else { h.service.as_str() };
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "● {svc} · {} · {} ctx · images {} · key {}",
+                                            h.status,
+                                            h.max_context,
+                                            if h.images { "on" } else { "off" },
+                                            if h.api_key { "set" } else { "none" }
+                                        ))
+                                        .size(12.0)
+                                        .color(GREEN),
+                                    );
+                                } else if let Some(e) = &self.gui.strata_error {
+                                    ui.label(RichText::new(format!("● {e}")).size(12.0).color(RED));
+                                }
+                            });
+                        },
+                    );
+
+                    // save row: button flush against the fields, live status
+                    // to its right — no dead gap between them
+                });
+
+                if test_now {
+                    self.gui.strata_cfg.endpoint = self.gui.strata_endpoint_edit.trim().to_string();
+                    self.gui.strata_cfg.api_key = self.gui.strata_key_edit.trim().to_string();
+                    match strata::patch(|c| c.strata = self.gui.strata_cfg.clone()) {
+                        Ok(_) => {
                             self.strata_client = Arc::new(strata::HttpClient::new(&self.gui.strata_cfg));
                             self.last_strata_poll = Instant::now() - Duration::from_secs(999);
                             self.spawn_strata_poll_inner(true);
-                            self.gui.status = "settings saved".into();
+                            self.gui.status = "strata settings saved".into();
                         }
-                        Err(e) => self.gui.strata_error = Some(format!("could not save settings: {e}")),
+                        Err(e) => self.gui.status = format!("could not save settings: {e}"),
                     }
                 }
                 ui.add_space(12.0);
+
+                // ---- config file ---------------------------------------------
                 card(ui, |ui| {
-                    card_title(ui, "Config file", "");
-                    let path = strata::config_path().map(|p| p.display().to_string()).unwrap_or_else(|| "unavailable".into());
-                    ui.label(RichText::new(path).font(FontId::monospace(12.0)).color(MUTED));
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Config file").font(bold(14.5)).color(TEXT));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let path = strata::config_path()
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_else(|| "unavailable".into());
+                            ui.label(RichText::new(path).font(FontId::monospace(12.0)).color(MUTED));
+                        });
+                    });
                 });
+                ui.add_space(8.0);
             });
     }
 
@@ -3598,6 +3724,7 @@ impl SysKamlingApp {
                 sub: if m.state == "generating" { "tok/s · decode now".into() } else { "tok/s · decode last request".into() },
                 color: ACCENT,
                 viz: Viz::Spark(hist("tok_s")),
+                glyph: Some("gauge"),
             },
             Kpi {
                 label: "GPU PREFILL",
@@ -3605,6 +3732,7 @@ impl SysKamlingApp {
                 sub: if m.state == "idle" { "t/s · prefill last request".into() } else { "t/s · prefill this request".into() },
                 color: CYAN,
                 viz: Viz::Spark(hist("prefill_tok_s_mean")),
+                glyph: Some("gauge"),
             },
             Kpi {
                 label: "GPU LOAD",
@@ -3612,6 +3740,7 @@ impl SysKamlingApp {
                 sub: format!("% · {}", gpu_sub),
                 color: GREEN,
                 viz: Viz::Spark(hist("gpu_util")),
+                glyph: Some("gauge"),
             },
             Kpi {
                 label: "GPU VRAM",
@@ -3622,6 +3751,7 @@ impl SysKamlingApp {
                     .unwrap_or_else(|| "GB".into()),
                 color: VIOLET,
                 viz: Viz::Spark(hist("gpu_mem_used")),
+                glyph: Some("gpu"),
             },
             Kpi {
                 label: "GPU TEMP",
@@ -3629,6 +3759,7 @@ impl SysKamlingApp {
                 sub: "°C".into(),
                 color: temp_color(m.gpu_temp.unwrap_or(0.0), 85.0),
                 viz: Viz::Spark(hist("gpu_temp")),
+                glyph: Some("thermo"),
             },
             Kpi {
                 label: "GPU POWER",
@@ -3639,6 +3770,7 @@ impl SysKamlingApp {
                     .unwrap_or_else(|| "W".into()),
                 color: AMBER,
                 viz: Viz::Spark(hist("gpu_power")),
+                glyph: Some("gauge"),
             },
             Kpi {
                 label: "GPU PCIe",
@@ -3650,6 +3782,7 @@ impl SysKamlingApp {
                 ),
                 color: ORANGE,
                 viz: Viz::Spark(hist("gpu_pcie_rx_mb")),
+                glyph: Some("net"),
             },
             Kpi {
                 label: "CPU",
@@ -3664,6 +3797,7 @@ impl SysKamlingApp {
                 ),
                 color: ACCENT,
                 viz: Viz::Spark(hist("cpu")),
+                glyph: Some("cpu"),
             },
             Kpi {
                 label: "DISK READ",
@@ -3674,6 +3808,7 @@ impl SysKamlingApp {
                     .unwrap_or_else(|| "MB/s".into()),
                 color: GREEN,
                 viz: Viz::Spark(hist("disk_read_mb")),
+                glyph: Some("disk"),
             },
             Kpi {
                 label: "FIRST TOKEN",
@@ -3690,6 +3825,7 @@ impl SysKamlingApp {
                 },
                 color: VIOLET,
                 viz: Viz::Spark(m.requests.iter().rev().filter_map(|r| r.hit_rate.map(|h| h * 100.0)).collect()),
+                glyph: Some("gauge"),
             },
             Kpi {
                 label: "BATCH SLOTS",
@@ -3716,6 +3852,7 @@ impl SysKamlingApp {
                 },
                 color: CYAN,
                 viz: Viz::None,
+                glyph: Some("gauge"),
             },
         ];
         ui.scope(|ui| {
@@ -4021,6 +4158,7 @@ impl SysKamlingApp {
                 sub: if size.is_some() { "on disk".into() } else { "not reported by driver".into() },
                 color: VIOLET,
                 viz: Viz::None,
+                glyph: None,
             },
             Kpi {
                 label: "References",
@@ -4028,6 +4166,7 @@ impl SysKamlingApp {
                 sub: if refs.is_some() { "containers mounting it".into() } else { "not reported by the daemon".into() },
                 color: GREEN,
                 viz: Viz::None,
+                glyph: None,
             },
             Kpi {
                 label: "Created",
@@ -4035,6 +4174,7 @@ impl SysKamlingApp {
                 sub: v.created.get(11..19).unwrap_or("").to_string(),
                 color: ACCENT,
                 viz: Viz::None,
+                glyph: None,
             },
         ];
         ui.scope(|ui| {
@@ -4388,6 +4528,8 @@ struct Kpi {
     sub: String,
     color: Color32,
     viz: Viz,
+    /// optional line-icon drawn in the tile's top-right corner
+    glyph: Option<&'static str>,
 }
 
 /// What a metric tile draws under its number.
@@ -4410,6 +4552,12 @@ fn kpi_card(ui: &mut Ui, k: &Kpi) {
                 let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
                 ui.painter().circle_filled(r.center(), 3.5, k.color);
                 ui.label(RichText::new(k.label).size(12.5).color(MUTED));
+                if let Some(g) = k.glyph {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let (gr, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                        icon_glyph(ui.painter(), g, gr.center(), 7.0, k.color.gamma_multiply(0.75));
+                    });
+                }
             });
             ui.add(egui::Label::new(RichText::new(&k.value).font(bold(24.0)).color(TEXT)).truncate());
             ui.add(egui::Label::new(RichText::new(&k.sub).size(12.0).color(FAINT)).truncate());
@@ -4535,6 +4683,314 @@ fn card_title(ui: &mut Ui, title: &str, right: &str) {
         });
     });
     ui.add_space(4.0);
+}
+
+/// Small line icons for inline buttons (eye, refresh) drawn with the
+/// painter, matching the nav-rail icon language.
+fn icon_glyph(p: &egui::Painter, kind: &str, c: Pos2, r: f32, col: Color32) {
+    let s = Stroke::new(1.5_f32, col);
+    match kind {
+        "cpu" => {
+            // chip: square, inner die, four pins per side
+            let b = Rect::from_center_size(c, Vec2::splat(r * 1.35));
+            p.rect_stroke(
+                b,
+                2.0,
+                Stroke::new(1.4_f32, col),
+                egui::epaint::StrokeKind::Inside,
+            );
+            p.rect_stroke(
+                b.shrink(2.4),
+                1.0,
+                Stroke::new(1.1_f32, col),
+                egui::epaint::StrokeKind::Inside,
+            );
+            for i in 0..4 {
+                let t = b.left() + b.width() * (i as f32 + 0.5) / 4.0;
+                p.line_segment([Pos2::new(t, b.top()), Pos2::new(t, b.top() - r * 0.3)], s);
+                p.line_segment([Pos2::new(t, b.bottom()), Pos2::new(t, b.bottom() + r * 0.3)], s);
+                let u = b.top() + b.height() * (i as f32 + 0.5) / 4.0;
+                p.line_segment([Pos2::new(b.left(), u), Pos2::new(b.left() - r * 0.3, u)], s);
+                p.line_segment([Pos2::new(b.right(), u), Pos2::new(b.right() + r * 0.3, u)], s);
+            }
+        }
+        "ram" => {
+            // memory module: body, notch, three cells, pins below
+            let b = Rect::from_center_size(c, Vec2::new(r * 2.3, r * 1.3));
+            p.rect_stroke(
+                b,
+                1.5,
+                Stroke::new(1.4_f32, col),
+                egui::epaint::StrokeKind::Inside,
+            );
+            for i in 1..=3 {
+                let x = b.left() + b.width() * i as f32 / 4.0;
+                p.line_segment(
+                    [Pos2::new(x, b.top() + 1.5), Pos2::new(x, b.bottom() - 1.5)],
+                    Stroke::new(1.1_f32, col),
+                );
+            }
+            for i in 0..4 {
+                let x = b.left() + b.width() * (i as f32 + 0.5) / 4.0;
+                p.line_segment([Pos2::new(x, b.bottom()), Pos2::new(x, b.bottom() + r * 0.3)], s);
+            }
+        }
+        "disk" => {
+            // platter: rounded body, spindle dot, actuator arm
+            let b = Rect::from_center_size(c, Vec2::new(r * 2.1, r * 1.7));
+            p.rect_stroke(
+                b,
+                2.5,
+                Stroke::new(1.4_f32, col),
+                egui::epaint::StrokeKind::Inside,
+            );
+            p.circle_filled(Pos2::new(b.left() + r * 0.62, b.center().y), r * 0.28, col);
+            p.line_segment(
+                [
+                    Pos2::new(b.left() + r * 0.62, b.center().y),
+                    Pos2::new(b.right() - r * 0.55, b.top() + r * 0.42),
+                ],
+                s,
+            );
+        }
+        "gauge" => {
+            // speedometer: arc + needle
+            let arc = |a: f32| c + Vec2::new(a.cos(), a.sin()) * r;
+            let a0 = std::f32::consts::PI * 0.85;
+            let a1 = std::f32::consts::PI * 0.15;
+            let mut prev = arc(a0);
+            for k in 1..=10 {
+                let a = a0 + (std::f32::consts::TAU - (a0 - a1)) * k as f32 / 10.0;
+                let pt = arc(a);
+                p.line_segment([prev, pt], s);
+                prev = pt;
+            }
+            let na = std::f32::consts::PI * 0.72;
+            p.line_segment([c, c + (arc(na) - c) * 0.8], Stroke::new(1.6_f32, col));
+        }
+        "gpu" => {
+            // card: bracket on the left, long body, two fan circles
+            let b = Rect::from_center_size(c + Vec2::new(r * 0.25, 0.0), Vec2::new(r * 2.1, r * 1.35));
+            p.rect_stroke(
+                b,
+                2.0,
+                Stroke::new(1.4_f32, col),
+                egui::epaint::StrokeKind::Inside,
+            );
+            p.line_segment(
+                [Pos2::new(b.left() - r * 0.45, b.top() - r * 0.2), Pos2::new(b.left() - r * 0.45, b.bottom() + r * 0.2)],
+                Stroke::new(1.8_f32, col),
+            );
+            p.circle_stroke(Pos2::new(b.left() + b.width() * 0.33, b.center().y), r * 0.42, Stroke::new(1.1_f32, col));
+            p.circle_stroke(Pos2::new(b.left() + b.width() * 0.72, b.center().y), r * 0.42, Stroke::new(1.1_f32, col));
+        }
+        "thermo" => {
+            // thermometer: stem + bulb
+            p.circle_stroke(Pos2::new(c.x, c.y + r * 0.62), r * 0.5, s);
+            p.circle_filled(Pos2::new(c.x, c.y + r * 0.62), r * 0.24, col);
+            p.line_segment([Pos2::new(c.x - r * 0.28, c.y - r * 0.9), Pos2::new(c.x - r * 0.28, c.y + r * 0.35)], s);
+            p.line_segment([Pos2::new(c.x + r * 0.28, c.y - r * 0.9), Pos2::new(c.x + r * 0.28, c.y + r * 0.35)], s);
+            p.line_segment([Pos2::new(c.x - r * 0.28, c.y - r * 0.9), Pos2::new(c.x + r * 0.28, c.y - r * 0.9)], s);
+        }
+        "net" => {
+            // up/down arrows side by side
+            let x1 = c.x - r * 0.5;
+            let x2 = c.x + r * 0.5;
+            p.line_segment([Pos2::new(x1, c.y + r * 0.8), Pos2::new(x1, c.y - r * 0.8)], s);
+            p.line_segment([Pos2::new(x1 - r * 0.35, c.y - r * 0.4), Pos2::new(x1, c.y - r * 0.85)], s);
+            p.line_segment([Pos2::new(x1 + r * 0.35, c.y - r * 0.4), Pos2::new(x1, c.y - r * 0.85)], s);
+            p.line_segment([Pos2::new(x2, c.y - r * 0.8), Pos2::new(x2, c.y + r * 0.8)], s);
+            p.line_segment([Pos2::new(x2 - r * 0.35, c.y + r * 0.4), Pos2::new(x2, c.y + r * 0.85)], s);
+            p.line_segment([Pos2::new(x2 + r * 0.35, c.y + r * 0.4), Pos2::new(x2, c.y + r * 0.85)], s);
+        }
+        "eye" => {
+            // almond outline + pupil
+            let w = r * 1.35;
+            let h = r * 0.78;
+            p.add(
+                egui::epaint::CubicBezierShape::from_points_stroke(
+                    [
+                        c + Vec2::new(-w, 0.0),
+                        c + Vec2::new(-w * 0.42, -h),
+                        c + Vec2::new(w * 0.42, -h),
+                        c + Vec2::new(w, 0.0),
+                    ],
+                    false,
+                    Color32::TRANSPARENT,
+                    s,
+                ),
+            );
+            p.add(
+                egui::epaint::CubicBezierShape::from_points_stroke(
+                    [
+                        c + Vec2::new(w, 0.0),
+                        c + Vec2::new(w * 0.42, h),
+                        c + Vec2::new(-w * 0.42, h),
+                        c + Vec2::new(-w, 0.0),
+                    ],
+                    false,
+                    Color32::TRANSPARENT,
+                    s,
+                ),
+            );
+            p.circle_filled(c, r * 0.34, col);
+        }
+        "eye_off" => {
+            // almond with the pupil shrunk to a ring, plus the slash
+            let w = r * 1.35;
+            let h = r * 0.78;
+            p.add(
+                egui::epaint::CubicBezierShape::from_points_stroke(
+                    [
+                        c + Vec2::new(-w, 0.0),
+                        c + Vec2::new(-w * 0.42, -h),
+                        c + Vec2::new(w * 0.42, -h),
+                        c + Vec2::new(w, 0.0),
+                    ],
+                    false,
+                    Color32::TRANSPARENT,
+                    s,
+                ),
+            );
+            p.add(
+                egui::epaint::CubicBezierShape::from_points_stroke(
+                    [
+                        c + Vec2::new(w, 0.0),
+                        c + Vec2::new(w * 0.42, h),
+                        c + Vec2::new(-w * 0.42, h),
+                        c + Vec2::new(-w, 0.0),
+                    ],
+                    false,
+                    Color32::TRANSPARENT,
+                    s,
+                ),
+            );
+            p.circle_stroke(c, r * 0.34, s);
+            p.line_segment(
+                [c + Vec2::new(-r * 1.15, r * 1.05), c + Vec2::new(r * 1.15, -r * 1.05)],
+                Stroke::new(1.6_f32, col),
+            );
+        }
+        "refresh" => {
+            // open arc + arrowhead
+            let arc = |a: f32| c + Vec2::new(a.cos(), a.sin()) * r;
+            let a0 = -2.4_f32;
+            let a1 = 1.9_f32;
+            let mut prev = arc(a0);
+            for k in 1..=14 {
+                let a = a0 + (a1 - a0) * k as f32 / 14.0;
+                let pt = arc(a);
+                p.line_segment([prev, pt], s);
+                prev = pt;
+            }
+            let tip = arc(a1);
+            let tang = Vec2::new((a1 + std::f32::consts::FRAC_2_PI).cos(), (a1 + std::f32::consts::FRAC_2_PI).sin());
+            let nrm = Vec2::new(-tang.y, tang.x);
+            p.line_segment([tip, tip - tang * r * 0.55 + nrm * r * 0.38], s);
+            p.line_segment([tip, tip - tang * r * 0.55 - nrm * r * 0.38], s);
+        }
+        _ => {}
+    }
+}
+
+/// Settings text field: inset well, roomy padding, monospace where it
+/// matters, and an optional icon button docked inside the right edge.
+/// `on_trail` receives the clicked state and returns the new one.
+fn field(
+    ui: &mut Ui,
+    value: &mut String,
+    hint: &str,
+    mono: bool,
+    password: bool,
+    trail: Option<(&str, bool, &mut dyn FnMut(bool))>,
+) -> egui::Response {
+    // lay the inset well down first, then the TextEdit on top of it
+    let w = ui.available_width();
+    let well = Rect::from_min_size(ui.cursor().min, Vec2::new(w, 38.0));
+    ui.allocate_rect(well, Sense::hover());
+    ui.painter().rect_filled(well, 9.0, SURFACE_HI);
+    let mut te = egui::TextEdit::singleline(value)
+        .hint_text(RichText::new(hint).color(FAINT))
+        .margin(Margin {
+            left: 12,
+            right: if trail.is_some() { 40 } else { 12 },
+            top: 9,
+            bottom: 9,
+        })
+        .interactive(true);
+    if mono {
+        te = te.font(FontId::monospace(13.0));
+    }
+    if password {
+        te = te.password(true);
+    }
+    let resp = ui.put(well, te);
+    let stroke = Stroke::new(
+        1.0_f32,
+        if resp.has_focus() {
+            ACCENT
+        } else if resp.hovered() {
+            BORDER.gamma_multiply(1.9)
+        } else {
+            BORDER
+        },
+    );
+    ui.painter().rect_stroke(well, 9.0, stroke, egui::epaint::StrokeKind::Middle);
+    if let Some((icon, state, on_trail)) = trail {
+        let r = Rect::from_center_size(
+            Pos2::new(resp.rect.right() - 20.0, resp.rect.center().y),
+            Vec2::splat(24.0),
+        );
+        let hit = ui.interact(r, resp.id.with("trail"), Sense::click());
+        if hit.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        let col = if hit.hovered() { TEXT } else { MUTED };
+        icon_glyph(ui.painter(), icon, r.center(), 7.0, col);
+        if hit.clicked() {
+            on_trail(state);
+        }
+    }
+    resp
+}
+
+/// Labelled settings row: caption + optional hint on the left, control on
+/// the right, with a hairline separating rows.
+fn setting_row<R>(
+    ui: &mut Ui,
+    label: &str,
+    hint: &str,
+    add: impl FnOnce(&mut Ui) -> R,
+) -> R {
+    let top = ui.cursor().top();
+    let inner = ui
+        .horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                ui.label(RichText::new(label).size(13.5).color(TEXT));
+                if !hint.is_empty() {
+                    ui.label(RichText::new(hint).size(11.5).color(FAINT));
+                }
+            });
+            let r = ui
+                .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 10.0;
+                    add(ui)
+                })
+                .inner;
+            r
+        })
+        .inner;
+    // hairline under the row, then breathing room
+    let bottom = ui.cursor().top().max(top + 34.0);
+    let left = ui.cursor().left();
+    ui.painter().hline(
+        left..=ui.max_rect().right() - 18.0,
+        bottom + 7.0,
+        Stroke::new(1.0_f32, BORDER.gamma_multiply(0.7)),
+    );
+    ui.add_space(14.0);
+    inner
 }
 
 fn page_header(ui: &mut Ui, title: &str, subtitle: &str) {
@@ -4918,6 +5374,23 @@ fn ghost_button(ui: &mut Ui, label: &str, width: f32) -> egui::Response {
             .corner_radius(8)
             .min_size(Vec2::new(width, 32.0)),
     )
+}
+
+/// iOS-style on/off switch: 40×22 track with a sliding knob.
+fn switch(ui: &mut Ui, on: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(40.0, 22.0), Sense::click());
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    let p = ui.painter();
+    let track = if on { ACCENT } else { SURFACE_HI };
+    let stroke = if on { ACCENT } else { BORDER };
+    p.rect_filled(rect, 11.0, track);
+    p.rect_stroke(rect, 11.0, Stroke::new(1.0_f32, stroke), egui::epaint::StrokeKind::Inside);
+    let knob = 16.0_f32;
+    let cx = if on { rect.right() - knob / 2.0 - 3.0 } else { rect.left() + knob / 2.0 + 3.0 };
+    p.circle_filled(Pos2::new(cx, rect.center().y), knob / 2.0, if on { Color32::WHITE } else { MUTED });
+    resp
 }
 
 fn toggle_chip(ui: &mut Ui, label: &str, on: bool) -> egui::Response {
@@ -5444,7 +5917,7 @@ fn spawn_events(
                 _ = quiet.tick() => {
                     // No data for the whole watchdog window: recycle the
                     // connection instead of leaving the feed stale.
-                    let _ = tx.send(Msg::Events(Err("events: idle".into())));
+                    let _ = tx.send(Msg::EventsClosed);
                     return;
                 }
                 r = lines.next_line() => match r {
@@ -5485,7 +5958,7 @@ fn spawn_events(
                         }
                     }
                     Ok(None) => {
-                        let _ = tx.send(Msg::Events(Err("event stream ended".into())));
+                        let _ = tx.send(Msg::EventsClosed);
                         return;
                     }
                     Err(e) => {
@@ -6132,10 +6605,10 @@ mod settings_tab_tests {
         texts
     }
 
-    /// Editing the endpoint field and pressing Enter must commit it to the
+    /// Typing an endpoint and pressing ⟳ Test & save must commit it to the
     /// live config — the whole point of moving the fields here.
     #[test]
-    fn typing_endpoint_and_pressing_enter_commits_it() {
+    fn typing_endpoint_then_test_and_save_commits_it() {
         let _home = isolate_home();
         let (ctx, mut app) = settings_probe();
         // Pass 1 paints the tab; the view records the endpoint field's rect
@@ -6151,70 +6624,75 @@ mod settings_tab_tests {
             .probe_endpoint_rect
             .expect("endpoint field not painted")
             .center();
+        // Pass 2: type into the focused field, then read back the save
+        // button's rect (its position depends on the typed text's layout).
+        let type_events = vec![
+            egui::Event::PointerButton {
+                pos: click,
+                pressed: true,
+                button: egui::PointerButton::Primary,
+                modifiers: Default::default(),
+            },
+            egui::Event::PointerButton {
+                pos: click,
+                pressed: false,
+                button: egui::PointerButton::Primary,
+                modifiers: Default::default(),
+            },
+            egui::Event::Text("http://10.0.0.9:9999".into()),
+        ];
+        raw.events = type_events;
+        ctx.begin_pass(raw.clone());
+        egui::CentralPanel::default().show(&ctx, |ui| app.settings_view(ui));
+        let _ = ctx.end_pass();
+        assert_eq!(
+            app.gui.strata_endpoint_edit, "http://10.0.0.9:9999",
+            "typing never reached the field"
+        );
+        let save_btn = app
+            .gui
+            .probe_save_rect
+            .expect("test & save button not painted")
+            .center();
         let events = vec![
             egui::Event::PointerButton {
-                pos: click,
+                pos: save_btn,
                 pressed: true,
                 button: egui::PointerButton::Primary,
                 modifiers: Default::default(),
             },
             egui::Event::PointerButton {
-                pos: click,
+                pos: save_btn,
                 pressed: false,
                 button: egui::PointerButton::Primary,
                 modifiers: Default::default(),
-            },
-            egui::Event::Key {
-                key: egui::Key::Home,
-                pressed: true,
-                repeat: false,
-                modifiers: Default::default(),
-                physical_key: None,
-            },
-            // select-to-end + cut, so the committed value is exactly what
-            // the test types
-            egui::Event::Key {
-                key: egui::Key::End,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::SHIFT,
-                physical_key: None,
-            },
-            egui::Event::Key {
-                key: egui::Key::End,
-                pressed: false,
-                repeat: false,
-                modifiers: egui::Modifiers::SHIFT,
-                physical_key: None,
-            },
-            egui::Event::Key {
-                key: egui::Key::X,
-                pressed: true,
-                repeat: false,
-                modifiers: egui::Modifiers::CTRL,
-                physical_key: None,
-            },
-            egui::Event::Key {
-                key: egui::Key::X,
-                pressed: false,
-                repeat: false,
-                modifiers: egui::Modifiers::CTRL,
-                physical_key: None,
-            },
-            egui::Event::Cut,
-            egui::Event::Text("http://10.0.0.9:9999".into()),
-            egui::Event::Key {
-                key: egui::Key::Enter,
-                pressed: true,
-                repeat: false,
-                modifiers: Default::default(),
-                physical_key: None,
             },
         ];
         let texts = paint(&ctx, &mut app, events);
         assert_eq!(app.gui.strata_cfg.endpoint, "http://10.0.0.9:9999");
         let all = texts.join("\n");
         assert!(all.contains("Strata server"), "settings card title never painted");
+    }
+
+    /// Layout sanity for the redesigned tab: the Test & save button must sit
+    /// tight under the key field (no dead gap), and the whole card column
+    /// must fit a short window without sideways overflow.
+    #[test]
+    fn save_button_sits_close_under_the_fields() {
+        let _home = isolate_home();
+        let (ctx, mut app) = settings_probe();
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect =
+            Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1100.0, 420.0)));
+        ctx.begin_pass(raw.clone());
+        egui::CentralPanel::default().show(&ctx, |ui| app.settings_view(ui));
+        let _ = ctx.end_pass();
+        let key = app.gui.probe_endpoint_rect.expect("endpoint field");
+        let save = app.gui.probe_save_rect.expect("save button");
+        // second field sits ~10px below the first; the button ~12px below that
+        let gap = save.top() - (key.bottom() + 48.0); // 48 ≈ key field height+spacing
+        assert!(gap.abs() < 20.0, "dead gap between fields and save: {gap:.1}px");
+        assert!(save.left() >= key.left() - 1.0, "save button not aligned to card");
     }
 
     /// Changing the refresh interval must retune the poller at once.
