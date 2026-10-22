@@ -33,8 +33,10 @@ egui/eframe window, ~10–20 MB resident.
   and `/metrics` API): model state, decode/prefill speed, GPU load/VRAM/temp/
   power/PCIe, host CPU & disk, time-to-first-token, context fill, conversation
   cache, and the recent-request table. Endpoint + API key are configured once
-  in the GUI settings card (stored in `~/.config/syskamling/config.json`) and
+  on the Settings tab (stored in `~/.config/syskamling/config.json`) and
   shared with the TUI
+- Settings tab — general behaviour (refresh interval, log autoscroll) and
+  connected servers (Strata endpoint + key), all persisted to the same file
 - Dashboard leads with the machine: host CPU/memory/swap/GPU KPIs, system
   vitals charts, CPU/GPU/SSD temperatures, and the hardware identity line —
   with Docker as one section below

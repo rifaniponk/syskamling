@@ -45,6 +45,7 @@ pub enum Tab {
     Ports,
     Strata,
     Logs,
+    Settings,
 }
 
 /// Sidebar state filter for the container list.
@@ -212,10 +213,17 @@ struct Gui {
     ports_owned_only: bool,
     // --- strata tab ---
     strata_cfg: strata::StrataConfig,
-    /// endpoint text being typed; applied on Enter / focus loss
+    /// endpoint text being typed; applied on Enter / focus loss. Shared by
+    /// the Settings tab and the Strata tab, so both stay in sync.
     strata_endpoint_edit: String,
     strata_key_edit: String,
     strata_key_masked: bool,
+    /// general settings, edited on the Settings tab
+    refresh_edit: f64,
+    autoscroll_logs: bool,
+    /// test seam: the Settings tab records the endpoint field's rect here
+    #[cfg(test)]
+    probe_endpoint_rect: Option<egui::Rect>,
     strata_health: Option<strata::Health>,
     strata_metrics: Option<Box<strata::Metrics>>,
     strata_error: Option<String>,
@@ -282,6 +290,10 @@ impl Gui {
             strata_endpoint_edit: String::new(),
             strata_key_edit: String::new(),
             strata_key_masked: true,
+            refresh_edit: 2.0,
+            autoscroll_logs: true,
+            #[cfg(test)]
+            probe_endpoint_rect: None,
             strata_health: None,
             strata_metrics: None,
             strata_error: None,
@@ -489,11 +501,20 @@ impl SysKamlingApp {
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         apply_theme(&cc.egui_ctx);
-        let strata_cfg = strata::load();
+        let file_cfg = strata::load_file();
+        let strata_cfg = file_cfg.strata.clone();
         let mut gui = Gui::new();
         gui.strata_cfg = strata_cfg.clone();
         gui.strata_endpoint_edit = strata_cfg.endpoint.clone();
         gui.strata_key_edit = strata_cfg.api_key.clone();
+        // a saved refresh interval overrides the CLI default
+        let mut refresh = refresh;
+        if file_cfg.general.refresh_secs > 0.0 {
+            refresh = file_cfg.general.refresh_secs;
+        }
+        gui.refresh_edit = refresh;
+        gui.autoscroll_logs = file_cfg.general.autoscroll_logs;
+        gui.logs_follow = file_cfg.general.autoscroll_logs;
         let app = Self {
             gui,
             docker: Arc::new(Docker::new(socket)),
@@ -536,12 +557,14 @@ impl SysKamlingApp {
     /// sized like a short window, then return the ScrollArea geometry the
     /// view records (viewport height, content height, thumb height).
     #[cfg(test)]
-    fn probe_hardware_scroll(size: egui::Vec2) -> (f32, f32) {
-        let ctx = egui::Context::default();
-        apply_theme(&ctx);
-        let (tx, rx) = mpsc::unbounded_channel();
-        let rt = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
-        let mut app = Self {
+    fn new_offscreen(
+        ctx: &egui::Context,
+        tx: mpsc::UnboundedSender<Msg>,
+        rx: mpsc::UnboundedReceiver<Msg>,
+        rt: Arc<tokio::runtime::Runtime>,
+    ) -> SysKamlingApp {
+        apply_theme(ctx);
+        let app = SysKamlingApp {
             gui: Gui::new(),
             docker: Arc::new(Docker::new("/nonexistent.sock")),
             tx,
@@ -576,6 +599,15 @@ impl SysKamlingApp {
             last_strata_poll: Instant::now() - Duration::from_secs(999),
             strata_poll_busy: Arc::new(Mutex::new(false)),
         };
+        app
+    }
+
+    #[cfg(test)]
+    fn probe_hardware_scroll(size: egui::Vec2) -> (f32, f32) {
+        let ctx = egui::Context::default();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let rt = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
+        let mut app = Self::new_offscreen(&ctx, tx, rx, rt);
         app.gui.tab = Tab::Hardware;
         app.sample_hardware();
         app.sample_hardware(); // second sample so rates/sparklines populate
@@ -605,7 +637,7 @@ impl SysKamlingApp {
                 Tab::Hardware => app.hardware_view(ui),
                 _ => {}
             });
-            ctx.end_pass();
+            let _ = ctx.end_pass();
         }
         hw_scroll_probe::last()
     }
@@ -906,10 +938,16 @@ impl SysKamlingApp {
     /// only while the Strata tab is open, on the blocking pool so a slow or
     /// unreachable server never touches the UI thread.
     fn spawn_strata_poll(&mut self) {
-        if self.gui.tab != Tab::Strata || self.refresh <= 0.0 {
+        self.spawn_strata_poll_inner(false)
+    }
+
+    /// `force` bypasses the visible-tab gate (used for the first pull when
+    /// the tab opens and right after settings change).
+    fn spawn_strata_poll_inner(&mut self, force: bool) {
+        if (!force && self.gui.tab != Tab::Strata) || self.refresh <= 0.0 {
             return;
         }
-        if self.last_strata_poll.elapsed() < Duration::from_secs_f64(self.refresh.max(1.0)) {
+        if !force && self.last_strata_poll.elapsed() < Duration::from_secs_f64(self.refresh.max(1.0)) {
             return;
         }
         if *self.strata_poll_busy.lock().unwrap() {
@@ -1282,6 +1320,7 @@ impl SysKamlingApp {
             (Tab::Strata, "Strata", String::new()),
             (Tab::Logs, "Logs", String::new()),
         ];
+        let sys_items = [(Tab::Settings, "Settings", String::new())];
         let version = g.info.as_ref().map(|i| i.server_version.clone()).unwrap_or_default();
         let synced = self.last_sync.map(|t| t.elapsed().as_secs());
         egui::SidePanel::left("nav")
@@ -1306,6 +1345,14 @@ impl SysKamlingApp {
                 ui.add_space(2.0);
                 ui.spacing_mut().item_spacing.y = 2.0;
                 for (tab, label, badge) in &items {
+                    if nav_item(ui, *tab, label, badge, g.tab == *tab) {
+                        new_tab = Some(*tab);
+                    }
+                }
+                ui.add_space(14.0);
+                section_label(ui, "SYSTEM");
+                ui.add_space(2.0);
+                for (tab, label, badge) in &sys_items {
                     if nav_item(ui, *tab, label, badge, g.tab == *tab) {
                         new_tab = Some(*tab);
                     }
@@ -1370,6 +1417,12 @@ impl SysKamlingApp {
     /// stream; opening the dashboard (re)starts stats streams.
     fn on_tab_change(&mut self, t: Tab) {
         self.gui.tab = t;
+        // the poller gates on the visible tab; a forced pull means the
+        // Strata page is never blank on arrival
+        if t == Tab::Strata {
+            self.last_strata_poll = Instant::now() - Duration::from_secs(999);
+            self.spawn_strata_poll_inner(true);
+        }
         match t {
             Tab::Logs => {
                 if self.gui.logs_container.is_none() {
@@ -1914,6 +1967,7 @@ impl SysKamlingApp {
                     Tab::Hardware => self.hardware_view(ui),
                     Tab::Ports => self.port_detail(ui),
                     Tab::Strata => self.strata_view(ui),
+                    Tab::Settings => self.settings_view(ui),
                 }
             });
     }
@@ -3343,6 +3397,7 @@ impl SysKamlingApp {
             });
         // regression: the body must actually scroll, not clip
         #[cfg(test)]
+                #[cfg(test)]
         hw_scroll_probe::record(hw_body.inner_rect.height(), hw_body.content_size.y);
         #[cfg(not(test))]
         drop(hw_body);
@@ -3457,29 +3512,61 @@ impl SysKamlingApp {
     }
 
     // ------------------------------------------------------------------
-    // Strata: a remote Strata inference server's monitor, statistics only
+    // Settings: every persisted knob lives here
     // ------------------------------------------------------------------
 
-    fn strata_view(&mut self, ui: &mut Ui) {
-        // The poller only runs while the tab is visible; pulling the instant
-        // it opens means the first metrics land without waiting a whole
-        // refresh interval for the next tick.
-        if self.gui.strata_metrics.is_none() {
-            self.last_strata_poll = Instant::now() - Duration::from_secs(999);
-        }
+    fn settings_view(&mut self, ui: &mut Ui) {
+        page_header(ui, "Settings", "general behaviour and connected servers, saved to ~/.config/syskamling/config.json");
+        ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.add_space(16.0);
+                let mut save = false;
+
+                card(ui, |ui| {
+                    card_title(ui, "General", "how SysKamling behaves");
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Refresh interval").size(13.0).color(TEXT));
+                        ui.label(RichText::new("seconds between live pulls · 0 disables polling").size(11.5).color(FAINT));
+                    });
+                    let re = ui.add(
+                        egui::DragValue::new(&mut self.gui.refresh_edit)
+                            .range(0.0..=60.0)
+                            .speed(0.25)
+                            .suffix(" s")
+                            .max_decimals(1),
+                    );
+                    if re.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        self.refresh = self.gui.refresh_edit.max(0.0);
+                        save = true;
+                        self.gui.status = format!("refresh every {} s", self.gui.refresh_edit);
+                    }
+                    ui.add_space(4.0);
+                    if ui
+                        .checkbox(&mut self.gui.autoscroll_logs, RichText::new("Follow log output (stick to the bottom as new lines land)").size(13.0))
+                        .changed()
+                    {
+                        self.gui.logs_follow = self.gui.autoscroll_logs;
+                        save = true;
+                    }
+                });
+                ui.add_space(12.0);
+
         // ---- settings: endpoint + API key, persisted on change ----
-        let mut save = false;
         card(ui, |ui| {
             card_title(ui, "Strata server", "endpoint and key are kept in ~/.config/syskamling/config.json");
             ui.columns(2, |cols| {
-                let ep_changed = cols[0]
-                    .add(
-                        egui::TextEdit::singleline(&mut self.gui.strata_endpoint_edit)
-                            .hint_text("http://127.0.0.1:9191")
-                            .desired_width(cols[0].available_width() - 8.0),
-                    )
-                    .lost_focus()
-                        || cols[0].input(|i| i.key_pressed(egui::Key::Enter));
+                let ep_resp = cols[0].add(
+                    egui::TextEdit::singleline(&mut self.gui.strata_endpoint_edit)
+                        .hint_text("http://127.0.0.1:9191")
+                        .desired_width(cols[0].available_width() - 8.0),
+                );
+                #[cfg(test)]
+                {
+                    self.gui.probe_endpoint_rect = Some(ep_resp.rect);
+                }
+                let ep_changed =
+                    ep_resp.lost_focus() || cols[0].input(|i| i.key_pressed(egui::Key::Enter));
                 let mut key = std::mem::take(&mut self.gui.strata_key_edit);
                 let kr = cols[1].add(
                     egui::TextEdit::singleline(&mut key)
@@ -3539,16 +3626,82 @@ impl SysKamlingApp {
                 }
             });
         });
-        if save {
-            match strata::save(&self.gui.strata_cfg) {
-                Ok(()) => {
-                    self.strata_client = Arc::new(strata::HttpClient::new(&self.gui.strata_cfg));
-                    self.last_strata_poll = Instant::now() - Duration::from_secs(999);
-                    self.gui.status = "strata settings saved".into();
+
+                if save {
+                    let all = strata::FileConfig {
+                        strata: self.gui.strata_cfg.clone(),
+                        general: strata::GeneralConfig {
+                            refresh_secs: self.refresh,
+                            autoscroll_logs: self.gui.autoscroll_logs,
+                        },
+                    };
+                    match strata::save_file(&all) {
+                        Ok(()) => {
+                            self.strata_client = Arc::new(strata::HttpClient::new(&self.gui.strata_cfg));
+                            self.last_strata_poll = Instant::now() - Duration::from_secs(999);
+                            self.spawn_strata_poll_inner(true);
+                            self.gui.status = "settings saved".into();
+                        }
+                        Err(e) => self.gui.strata_error = Some(format!("could not save settings: {e}")),
+                    }
                 }
-                Err(e) => self.gui.strata_error = Some(format!("could not save settings: {e}")),
-            }
+                ui.add_space(12.0);
+                card(ui, |ui| {
+                    card_title(ui, "Config file", "");
+                    let path = strata::config_path().map(|p| p.display().to_string()).unwrap_or_else(|| "unavailable".into());
+                    ui.label(RichText::new(path).font(FontId::monospace(12.0)).color(MUTED));
+                });
+            });
+    }
+
+    // ------------------------------------------------------------------
+    // Strata: a remote Strata inference server's monitor, statistics only
+    // ------------------------------------------------------------------
+
+    fn strata_view(&mut self, ui: &mut Ui) {
+        // The poller only runs while the tab is visible; pulling the instant
+        // it opens means the first metrics land without waiting a whole
+        // refresh interval for the next tick.
+        if self.gui.strata_metrics.is_none() {
+            self.last_strata_poll = Instant::now() - Duration::from_secs(999);
+            // poll_now bypasses the visible-tab gate, so the first pull
+            // lands even when the tick order puts the fetch before the view
+            self.spawn_strata_poll();
         }
+        // ---- connection status (settings live on the Settings tab) ----
+        card(ui, |ui| {
+            ui.horizontal(|ui| {
+                if let Some(h) = &self.gui.strata_health {
+                    let svc = if h.service.is_empty() { "strata" } else { h.service.as_str() };
+                    let model = if h.model.is_empty() { "no model" } else { &h.model };
+                    ui.label(
+                        RichText::new(format!(
+                            "● {svc} · {} · {} ctx · {} · {} · images {} · key {}",
+                            h.status,
+                            h.max_context,
+                            model,
+                            if h.loaded { "loaded" } else { "not loaded" },
+                            if h.images { "on" } else { "off" },
+                            if h.api_key { "set" } else { "none" }
+                        ))
+                        .size(12.0)
+                        .color(GREEN),
+                    );
+                } else if let Some(e) = &self.gui.strata_error {
+                    ui.label(RichText::new(format!("● {e}")).size(12.0).color(RED));
+                } else {
+                    ui.label(RichText::new("● connecting…").size(12.0).color(FAINT));
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .button(RichText::new("⚙ Settings").font(bold(12.5)).color(ACCENT))
+                        .clicked()
+                    {
+                        self.on_tab_change(Tab::Settings);
+                    }
+                });
+            });
+        });
         ui.add_space(12.0);
 
         // ---- the statistics themselves ----
@@ -3559,7 +3712,7 @@ impl SysKamlingApp {
                 empty_state(
                     ui,
                     "No API key set",
-                    "This server keeps /metrics behind a key — type it in the field above and press ⟳ Test & save.",
+                    "This server keeps /metrics behind a key — open ⚙ Settings, fill in endpoint and key, and press ⟳ Test & save.",
                 );
             } else {
                 empty_state(ui, "Collecting…", "The first /metrics pull lands in a moment.");
@@ -4758,6 +4911,20 @@ fn nav_icon(p: &egui::Painter, tab: Tab, r: Rect, c: Color32) {
             }
             p.line_segment([Pos2::new(b.center().x, b.bottom()), Pos2::new(b.center().x, r.bottom() + 1.5)], s);
         }
+        Tab::Settings => {
+            // a gear: ring, hub, six teeth
+            let ring = r.shrink2(Vec2::new(3.5, 3.5));
+            p.circle_stroke(ring.center(), ring.width().min(ring.height()) / 2.0 - 1.0, s);
+            p.circle_filled(ring.center(), 1.7, c);
+            for k in 0..6 {
+                let a = std::f32::consts::TAU * k as f32 / 6.0;
+                let (sin, cos) = a.sin_cos();
+                let rad = ring.width().min(ring.height()) / 2.0 - 1.0;
+                let p1 = ring.center() + Vec2::new(cos, sin) * (rad - 0.5);
+                let p2 = ring.center() + Vec2::new(cos, sin) * (rad + 2.2);
+                p.line_segment([p1, p2], Stroke::new(2.4_f32, c));
+            }
+        }
         Tab::Strata => {
             // a chip mark: outline square, filled core, pins like the brand icon
             let b = r.shrink2(Vec2::new(3.0, 3.0));
@@ -5936,6 +6103,297 @@ fn tag(lines: Vec<LogLine>, label: &Option<String>) -> Vec<LogLine> {
 }
 
 #[cfg(test)]
+mod strata_tab_tests {
+    use super::*;
+
+    /// The Strata page must render its statistics once metrics have landed,
+    /// even though the poller itself is async and gated on the visible tab.
+    #[test]
+    fn strata_page_renders_stats_when_metrics_are_present() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let (tx, rx) = mpsc::unbounded_channel();
+        let rt = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
+        let mut app = SysKamlingApp::new_offscreen(&ctx, tx, rx, rt);
+        app.gui.tab = Tab::Strata;
+        let mut m = strata::Metrics::default();
+        m.model = "probe-model".into();
+        m.state = "generating".into();
+        m.tok_s = Some(123.4);
+        m.tot_requests = 7;
+        app.gui.strata_metrics = Some(Box::new(m));
+        app.gui.strata_health = Some(strata::Health {
+            status: "ok".into(),
+            model: "probe-model".into(),
+            max_context: 8192,
+            images: true,
+            api_key: true,
+            loaded: true,
+            service: "strata".into(),
+        });
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1200.0, 800.0)));
+        let mut texts = Vec::new();
+        for _ in 0..3 {
+            ctx.begin_pass(raw.clone());
+            egui::CentralPanel::default().show(&ctx, |ui| {
+                if app.gui.tab == Tab::Strata {
+                    app.strata_view(ui);
+                }
+            });
+            let out = ctx.end_pass();
+            for s in &out.shapes {
+                if let egui::Shape::Text(t) = &s.shape {
+                    texts.push(t.galley.text().to_owned());
+                }
+            }
+        }
+        let all = texts.join("\n");
+        assert!(all.contains("probe-model"), "model name never painted — page is blank");
+        assert!(all.contains("123"), "throughput stat never painted");
+        assert!(!all.contains("Collecting"), "stats present but page still says Collecting");
+    }
+
+    /// Without metrics yet the page must still paint *something* (status
+    /// card + empty state), never a blank panel.
+    #[test]
+    fn strata_page_never_goes_blank_before_first_pull() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let (tx, rx) = mpsc::unbounded_channel();
+        let rt = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
+        let mut app = SysKamlingApp::new_offscreen(&ctx, tx, rx, rt);
+        app.gui.tab = Tab::Strata;
+        app.gui.strata_cfg.api_key = "k".into();
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1200.0, 800.0)));
+        let mut painted = 0usize;
+        for _ in 0..3 {
+            ctx.begin_pass(raw.clone());
+            egui::CentralPanel::default().show(&ctx, |ui| {
+                if app.gui.tab == Tab::Strata {
+                    app.strata_view(ui);
+                }
+            });
+            let out = ctx.end_pass();
+            painted += out
+                .shapes
+                .iter()
+                .filter(|s| matches!(s.shape, egui::Shape::Text(_)))
+                .count();
+        }
+        assert!(painted > 8, "strata waiting state painted only {painted} text shapes — page is blank");
+    }
+
+    /// The Settings tab must paint its General + Strata cards.
+    #[test]
+    fn settings_tab_renders_both_cards() {
+        let ctx = egui::Context::default();
+        apply_theme(&ctx);
+        let (tx, rx) = mpsc::unbounded_channel();
+        let rt = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
+        let mut app = SysKamlingApp::new_offscreen(&ctx, tx, rx, rt);
+        app.gui.tab = Tab::Settings;
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1200.0, 800.0)));
+        let mut painted = 0usize;
+        for _ in 0..3 {
+            ctx.begin_pass(raw.clone());
+            egui::CentralPanel::default().show(&ctx, |ui| {
+                if app.gui.tab == Tab::Settings {
+                    app.settings_view(ui);
+                }
+            });
+            let out = ctx.end_pass();
+            painted += out
+                .shapes
+                .iter()
+                .filter(|s| matches!(s.shape, egui::Shape::Text(_)))
+                .count();
+        }
+        assert!(painted > 15, "settings tab painted only {painted} text shapes — cards missing");
+    }
+}
+
+#[cfg(test)]
+mod settings_tab_tests {
+    use super::*;
+
+    fn settings_probe() -> (egui::Context, SysKamlingApp) {
+        let ctx = egui::Context::default();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let rt = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
+        let mut app = SysKamlingApp::new_offscreen(&ctx, tx, rx, rt);
+        app.gui.tab = Tab::Settings;
+        (ctx, app)
+    }
+
+    /// Point $HOME at a throwaway directory (serialised against the config
+    /// tests' lock) so "Test & save" can never touch the real config file.
+    struct HomeGuard {
+        original: Option<std::ffi::OsString>,
+        dir: std::path::PathBuf,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(h) => std::env::set_var("HOME", h),
+                None => std::env::remove_var("HOME"),
+            }
+            std::fs::remove_dir_all(&self.dir).ok();
+        }
+    }
+    fn isolate_home() -> HomeGuard {
+        let dir = std::env::temp_dir().join(format!(
+            "syskamling-gui-settings-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(dir.join(".config/syskamling")).unwrap();
+        HomeGuard {
+            original: std::env::var_os("HOME"),
+            dir,
+            _lock: crate::strata::tests::HOME_TEST_LOCK
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()),
+        }
+    }
+
+    fn paint(ctx: &egui::Context, app: &mut SysKamlingApp, events: Vec<egui::Event>) -> Vec<String> {
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect =
+            Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1200.0, 800.0)));
+        raw.events = events;
+        let mut texts = Vec::new();
+        for _ in 0..2 {
+            ctx.begin_pass(raw.clone());
+            egui::CentralPanel::default().show(ctx, |ui| {
+                if app.gui.tab == Tab::Settings {
+                    app.settings_view(ui);
+                }
+            });
+            let out = ctx.end_pass();
+            for sh in &out.shapes {
+                if let egui::Shape::Text(t) = &sh.shape {
+                    texts.push(t.galley.text().to_owned());
+                }
+            }
+        }
+        texts
+    }
+
+    /// Editing the endpoint field and pressing Enter must commit it to the
+    /// live config — the whole point of moving the fields here.
+    #[test]
+    fn typing_endpoint_and_pressing_enter_commits_it() {
+        let _home = isolate_home();
+        let (ctx, mut app) = settings_probe();
+        // Pass 1 paints the tab; the view records the endpoint field's rect
+        // into the probe field (cfg(test) seam), so Pass 2 can click it.
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect =
+            Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1200.0, 800.0)));
+        ctx.begin_pass(raw.clone());
+        egui::CentralPanel::default().show(&ctx, |ui| app.settings_view(ui));
+        let _ = ctx.end_pass();
+        let click = app
+            .gui
+            .probe_endpoint_rect
+            .expect("endpoint field not painted")
+            .center();
+        let events = vec![
+            egui::Event::PointerButton {
+                pos: click,
+                pressed: true,
+                button: egui::PointerButton::Primary,
+                modifiers: Default::default(),
+            },
+            egui::Event::PointerButton {
+                pos: click,
+                pressed: false,
+                button: egui::PointerButton::Primary,
+                modifiers: Default::default(),
+            },
+            egui::Event::Key {
+                key: egui::Key::Home,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+                physical_key: None,
+            },
+            // select-to-end + cut, so the committed value is exactly what
+            // the test types
+            egui::Event::Key {
+                key: egui::Key::End,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::SHIFT,
+                physical_key: None,
+            },
+            egui::Event::Key {
+                key: egui::Key::End,
+                pressed: false,
+                repeat: false,
+                modifiers: egui::Modifiers::SHIFT,
+                physical_key: None,
+            },
+            egui::Event::Key {
+                key: egui::Key::X,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::CTRL,
+                physical_key: None,
+            },
+            egui::Event::Key {
+                key: egui::Key::X,
+                pressed: false,
+                repeat: false,
+                modifiers: egui::Modifiers::CTRL,
+                physical_key: None,
+            },
+            egui::Event::Cut,
+            egui::Event::Text("http://10.0.0.9:9999".into()),
+            egui::Event::Key {
+                key: egui::Key::Enter,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+                physical_key: None,
+            },
+        ];
+        let texts = paint(&ctx, &mut app, events);
+        assert_eq!(app.gui.strata_cfg.endpoint, "http://10.0.0.9:9999");
+        let all = texts.join("\n");
+        assert!(all.contains("Strata server"), "settings card title never painted");
+    }
+
+    /// Changing the refresh interval must retune the poller at once.
+    #[test]
+    fn refresh_interval_drag_takes_effect() {
+        let _home = isolate_home();
+        let (ctx, mut app) = settings_probe();
+        app.gui.refresh_edit = 7.5;
+        let events = vec![
+            egui::Event::PointerButton {
+                pos: egui::pos2(60.0, 120.0),
+                pressed: true,
+                button: egui::PointerButton::Primary,
+                modifiers: Default::default(),
+            },
+            egui::Event::Key {
+                key: egui::Key::Enter,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+                physical_key: None,
+            },
+        ];
+        paint(&ctx, &mut app, events);
+        assert!((app.refresh - 7.5).abs() < 1e-6, "refresh not applied: {}", app.refresh);
+    }
+}
+
+#[cfg(test)]
 mod hw_scroll_tests {
     use super::*;
 
@@ -5949,6 +6407,7 @@ mod hw_scroll_tests {
     }
 }
 
+#[cfg(test)]
 #[cfg(test)]
 pub mod hw_scroll_probe {
     use std::sync::atomic::{AtomicU32, Ordering};

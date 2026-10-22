@@ -59,28 +59,65 @@ pub fn config_path() -> Option<std::path::PathBuf> {
         .map(|h| h.join(".config").join("syskamling").join("config.json"))
 }
 
+/// General (non-Strata) settings, kept in the same config file under
+/// "general" so every setting SysKamling owns lives in one place.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct GeneralConfig {
+    /// refresh interval in seconds; 0 disables polling
+    #[serde(default = "default_refresh")]
+    pub refresh_secs: f64,
+    /// follow log output to the bottom as new lines land
+    #[serde(default = "default_true")]
+    pub autoscroll_logs: bool,
+}
+
+fn default_refresh() -> f64 {
+    2.0
+}
+fn default_true() -> bool {
+    true
+}
+
+impl Default for GeneralConfig {
+    fn default() -> Self {
+        Self { refresh_secs: 2.0, autoscroll_logs: true }
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct FileShape {
     #[serde(default)]
     strata: Option<StrataConfig>,
+    #[serde(default)]
+    general: Option<GeneralConfig>,
 }
 
-/// Load `strata` settings; defaults when the file is missing or malformed.
-pub fn load() -> StrataConfig {
+/// Everything SysKamling persists, read from the shared config file.
+#[derive(Clone, Debug, Default)]
+pub struct FileConfig {
+    pub strata: StrataConfig,
+    pub general: GeneralConfig,
+}
+
+/// Load settings; defaults when the file is missing or malformed.
+pub fn load_file() -> FileConfig {
     let Some(path) = config_path() else {
-        return StrataConfig::default();
+        return FileConfig::default();
     };
     let Ok(txt) = std::fs::read_to_string(&path) else {
-        return StrataConfig::default();
+        return FileConfig::default();
     };
     match serde_json::from_str::<FileShape>(&txt) {
-        Ok(f) => f.strata.unwrap_or_default(),
-        Err(_) => StrataConfig::default(),
+        Ok(f) => FileConfig {
+            strata: f.strata.unwrap_or_default(),
+            general: f.general.unwrap_or_default(),
+        },
+        Err(_) => FileConfig::default(),
     }
 }
 
-/// Merge our section into the shared config file, keeping other keys.
-pub fn save(cfg: &StrataConfig) -> Result<(), String> {
+/// Merge our sections into the shared config file, keeping other keys.
+pub fn save_file(cfg: &FileConfig) -> Result<(), String> {
     let path = config_path().ok_or("HOME is not set")?;
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -89,10 +126,15 @@ pub fn save(cfg: &StrataConfig) -> Result<(), String> {
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default();
-    let me = serde_json::to_value(cfg).map_err(|e| e.to_string())?;
-    root.insert("strata".into(), me);
+    root.insert("strata".into(), serde_json::to_value(&cfg.strata).map_err(|e| e.to_string())?);
+    root.insert("general".into(), serde_json::to_value(&cfg.general).map_err(|e| e.to_string())?);
     let pretty = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
     std::fs::write(&path, pretty).map_err(|e| e.to_string())
+}
+
+/// Load `strata` settings; defaults when the file is missing or malformed.
+pub fn load() -> StrataConfig {
+    load_file().strata
 }
 
 // ---------------------------------------------------------------------------
@@ -684,7 +726,7 @@ impl Body for EmptyBody {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
 
     fn sample() -> &'static str {
@@ -774,7 +816,7 @@ mod tests {
     /// `set_var` is process-wide, so they hold a lock while they run and
     /// restore the original value afterwards — other tests (and any later
     /// one) must never observe the scratch HOME.
-    static HOME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub static HOME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     struct HomeGuard {
         original: Option<std::ffi::OsString>,
@@ -805,17 +847,54 @@ mod tests {
         std::env::set_var("HOME", &dir);
                 let path = dir.join(".config/syskamling/config.json");
         std::fs::write(&path, r#"{"other": 7}"#).unwrap();
-        let cfg = StrataConfig {
-            endpoint: "http://127.0.0.1:9191/".into(),
-            api_key: "secret".into(),
+        let all = FileConfig {
+            strata: StrataConfig {
+                endpoint: "http://127.0.0.1:9191/".into(),
+                api_key: "secret".into(),
+            },
+            general: GeneralConfig::default(),
         };
-        save(&cfg).unwrap();
+        save_file(&all).unwrap();
         let txt = std::fs::read_to_string(&path).unwrap();
         let loaded = load();
         assert_eq!(loaded.endpoint, "http://127.0.0.1:9191/");
         assert_eq!(loaded.api_key, "secret");
         assert!(txt.contains("\"other\"")); // foreign keys survive
-        assert_eq!(cfg.base(), "http://127.0.0.1:9191");
+        assert_eq!(all.strata.base(), "http://127.0.0.1:9191");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn general_settings_round_trip_and_merge() {
+        let _home = isolate_home();
+        let dir = std::env::temp_dir().join(format!("syskamling-general-rt-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(".config/syskamling")).unwrap();
+        std::env::set_var("HOME", &dir);
+        let path = dir.join(".config/syskamling/config.json");
+        std::fs::write(&path, r#"{"other": {"keep": 1}}"#).unwrap();
+        let all = FileConfig {
+            strata: StrataConfig { endpoint: "http://h:1".into(), api_key: "k".into() },
+            general: GeneralConfig { refresh_secs: 5.0, autoscroll_logs: false },
+        };
+        save_file(&all).unwrap();
+        let back = load_file();
+        assert_eq!(back.general.refresh_secs, 5.0);
+        assert!(!back.general.autoscroll_logs);
+        assert_eq!(back.strata.api_key, "k");
+        let txt = std::fs::read_to_string(&path).unwrap();
+        assert!(txt.contains("\"other\"")); // foreign keys survive
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn general_defaults_when_absent() {
+        let _home = isolate_home();
+        let dir = std::env::temp_dir().join(format!("syskamling-general-def-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(".config/syskamling")).unwrap();
+        std::env::set_var("HOME", &dir);
+        std::fs::write(dir.join(".config/syskamling/config.json"), r#"{"strata":{"api_key":"k"}}"#).unwrap();
+        let back = load_file();
+        assert_eq!(back.general, GeneralConfig::default());
         std::fs::remove_dir_all(&dir).ok();
     }
 
