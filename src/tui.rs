@@ -164,6 +164,8 @@ struct App {
     procs_state: ListState,
     proc_sort: crate::procs::SortCol,
     proc_sort_desc: bool,
+    /// icon name of the app group expanded in the processes table
+    proc_group: Option<String>,
     // strata screen: settings live in the shared config file; the TUI is
     // read-only and points at it when the server is not configured
     strata_cfg: strata::StrataConfig,
@@ -212,6 +214,7 @@ impl App {
             procs_state: ListState::default(),
             proc_sort: crate::procs::SortCol::Mem,
             proc_sort_desc: true,
+            proc_group: None,
             strata_cfg: strata::StrataConfig::default(),
             strata_health: None,
             strata_metrics: None,
@@ -356,8 +359,25 @@ impl App {
         }
     }
 
+    /// The flat row list render_procs draws: app groups, with an expanded
+    /// group's members spliced in right behind it.
+    fn proc_row_count(&self) -> usize {
+        let rows = self.sorted_procs();
+        let groups = crate::procs::group_rows(&rows, self.proc_sort, self.proc_sort_desc);
+        groups
+            .iter()
+            .map(|g| {
+                1 + if self.proc_group.as_deref() == Some(g.icon.as_str()) {
+                    g.members.len()
+                } else {
+                    0
+                }
+            })
+            .sum()
+    }
+
     fn move_procs(&mut self, delta: i32) {
-        let len = self.sorted_procs().len();
+        let len = self.proc_row_count();
         if len == 0 {
             self.procs_state.select(None);
             return;
@@ -365,6 +385,35 @@ impl App {
         let cur = self.procs_state.selected().unwrap_or(0) as i32;
         self.procs_state
             .select(Some(((cur + delta).clamp(0, len as i32 - 1)) as usize));
+    }
+
+    /// Enter on the Processes tab: toggle the app group under the cursor.
+    fn toggle_proc_group(&mut self) {
+        let sel = match self.procs_state.selected() {
+            Some(s) => s,
+            None => return,
+        };
+        let rows = self.sorted_procs();
+        let groups = crate::procs::group_rows(&rows, self.proc_sort, self.proc_sort_desc);
+        let mut i = 0usize;
+        for g in &groups {
+            if i == sel {
+                // every app row (icon resolved) can expand, even with one
+                // process; standalone rows have nothing to expand
+                self.proc_group = if self.proc_group.as_deref() == Some(g.icon.as_str()) {
+                    None
+                } else if !g.icon.is_empty() {
+                    Some(g.icon.clone())
+                } else {
+                    None
+                };
+                return;
+            }
+            i += 1;
+            if self.proc_group.as_deref() == Some(g.icon.as_str()) {
+                i += g.members.len();
+            }
+        }
     }
 
     fn move_ports(&mut self, delta: i32) {
@@ -653,7 +702,12 @@ fn apply_msg(app: &mut App, m: Msg) {
         }
         Msg::ProcsScanned(rows) => {
             app.procs = rows;
-            let len = app.sorted_procs().len();
+            if app.proc_group.as_deref().is_some_and(|g| {
+                !app.procs.iter().any(|r| r.app_icon == g)
+            }) {
+                app.proc_group = None;
+            }
+            let len = app.proc_row_count();
             if let Some(sel) = app.procs_state.selected() {
                 if sel >= len {
                     app.procs_state.select(if len == 0 { None } else { Some(len - 1) });
@@ -1018,6 +1072,9 @@ fn handle_key(
             app.logs_follow = true;
         }
         KeyCode::Enter => {
+            if app.tab == Tab::Processes {
+                app.toggle_proc_group();
+            }
             if app.tab == Tab::Containers {
                 if let Some(c) = app.selected_container().cloned() {
                     app.logs_gen += 1;
@@ -1587,52 +1644,102 @@ fn render_ports(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
 }
 
 fn render_procs(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
+    // one row per app (processes sharing a desktop icon collapse), then the
+    // standalone processes; Enter on an app row expands it to its members.
     let rows_data = app.sorted_procs();
+    let groups = crate::procs::group_rows(&rows_data, app.proc_sort, app.proc_sort_desc);
     let sel = app.procs_state.selected().unwrap_or(0);
-    let rows: Vec<Row> = rows_data
-        .iter()
-        .enumerate()
-        .map(|(i, r)| {
-            let cpu = r.cpu_pct;
-            let cpu_color = if cpu > 80.0 {
-                Color::Red
-            } else if cpu > 30.0 {
-                Color::Yellow
-            } else {
-                Color::White
-            };
-            let row_style = if i == sel {
-                Style::default()
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
+    let mut rows: Vec<Row> = Vec::new();
+    let mut i = 0usize;
+    for g in &groups {
+        let open = app.proc_group.as_deref() == Some(g.icon.as_str());
+        let name = if g.sub.is_empty() {
+            g.title.clone()
+        } else {
+            format!("{} [{}]", g.title, g.sub)
+        };
+        let cpu = g.cpu;
+        let cpu_color = if cpu > 80.0 {
+            Color::Red
+        } else if cpu > 30.0 {
+            Color::Yellow
+        } else {
+            Color::White
+        };
+        let cpu_cell = Span::styled(format!("{cpu:>5.1}"), Style::default().fg(cpu_color)).to_string();
+        let row_style = if i == sel {
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        rows.push(
             Row::new(vec![
-                r.name.clone(),
-                r.user.clone(),
-                r.pid.to_string(),
-                Span::styled(format!("{cpu:>5.1}", cpu = cpu), Style::default().fg(cpu_color)).to_string(),
-                human_bytes(r.rss_bytes as i64),
-                r.state.to_string(),
-                r.threads.to_string(),
-                r.cmdline.clone(),
+                name,
+                g.user.clone(),
+                g.pid_label.clone(),
+                cpu_cell,
+                human_bytes(g.mem as i64),
+                if g.members.len() > 1 {
+                    g.members.len().to_string()
+                } else {
+                    g.members[0].state.to_string()
+                },
+                g.members.iter().map(|m| m.threads as u64).sum::<u64>().to_string(),
+                if open {
+                    g.members
+                        .iter()
+                        .map(|m| m.cmdline.clone())
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                } else {
+                    g.members[0].cmdline.clone()
+                },
             ])
-            .style(row_style)
-        })
-        .collect();
+            .style(row_style),
+        );
+        i += 1;
+        if open {
+            for m in &g.members {
+                let mcpu = m.cpu_pct;
+                let mc = if mcpu > 80.0 {
+                    Color::Red
+                } else if mcpu > 30.0 {
+                    Color::Yellow
+                } else {
+                    Color::Gray
+                };
+                rows.push(
+                    Row::new(vec![
+                        format!("  {}", m.name),
+                        m.user.clone(),
+                        m.pid.to_string(),
+                        format!("{mcpu:>5.1}"),
+                        human_bytes(m.rss_bytes as i64),
+                        m.state.to_string(),
+                        m.threads.to_string(),
+                        m.cmdline.clone(),
+                    ])
+                    .style(Style::default().fg(mc)),
+                );
+                i += 1;
+            }
+        }
+    }
 
     let title = if app.filtering {
         format!(" Processes (filter: {}) ", app.filter)
     } else {
         format!(
-            " Processes: {}  (c sort cpu, m sort mem, n sort name, p sort pid) ",
+            " Processes: {} apps, {} procs  (c/m/n/p sort, Enter expand) ",
+            groups.len(),
             rows_data.len()
         )
     };
 
     let header = Row::new(vec![
-        "NAME",
+        "APP",
         "USER",
         "PID",
         "CPU",
@@ -2159,6 +2266,7 @@ mod procs_screen_tests {
             cwd: "/home/rifan".into(),
             user: "rifan".into(),
             icon: crate::procs::icon_for(name, cmd),
+            app_icon: String::new(),
         }
     }
 
@@ -2193,13 +2301,13 @@ mod procs_screen_tests {
     }
 
     /// The Processes screen is a real table: header row, then one row per
-    /// process, with the USER column populated.
+    /// app (grouped), with the USER column populated.
     #[test]
     fn procs_screen_renders_a_table_with_a_user_column() {
         let mut app = app_with_procs();
         let lines = screen(&mut app);
         let joined = lines.join("\n");
-        assert!(joined.contains("NAME"), "no NAME header");
+        assert!(joined.contains("APP"), "no APP header");
         assert!(joined.contains("USER"), "no USER header");
         assert!(joined.contains("rifan"), "user column never painted");
         assert!(joined.contains("901"), "pid column never painted");
@@ -2207,6 +2315,39 @@ mod procs_screen_tests {
         let hog = lines.iter().position(|l| l.contains("hog")).unwrap();
         let busy = lines.iter().position(|l| l.contains("busy")).unwrap();
         assert!(hog < busy, "memory-desc: hog above busy");
+    }
+
+    /// The TUI table collapses processes that share a desktop icon into one
+    /// app row ("name [N processes]", "N pids"), and Enter expands it to the
+    /// member rows; pressing Enter again collapses it.
+    #[test]
+    fn app_rows_collapse_and_enter_expands_members() {
+        let mut app = App::new();
+        app.tab = Tab::Processes;
+        let mut a = row(100, "chrome", "/opt/google/chrome/chrome", 20.0, 300 << 20);
+        a.app_icon = "google-chrome".into();
+        let mut b = row(101, "chrome", "/opt/google/chrome/chrome --type=zygote", 5.0, 50 << 20);
+        b.app_icon = "google-chrome".into();
+        app.procs = vec![a, b, row(1, "systemd", "/sbin/init", 0.1, 12 << 20)];
+        let lines = screen(&mut app);
+        let joined = lines.join("\n");
+        assert!(joined.contains("chrome [2 processes]"), "collapsed app row missing:\n{joined}");
+        assert!(joined.contains("2 pids"), "pid column must count the group");
+        // collapsed: the zygote cmdline must not show; the title bar counts apps
+        assert!(joined.contains("2 apps, 3 procs"), "title must count apps and procs");
+        // cursor on the first row (chrome), Enter expands
+        app.procs_state.select(Some(0));
+        app.toggle_proc_group();
+        let lines = screen(&mut app);
+        let joined = lines.join("\n");
+        assert!(joined.contains("zygote"), "expanded group must show member cmdlines");
+        // both member pids appear
+        assert!(joined.contains("100") && joined.contains("101"), "member pids paint");
+        // cursor navigation counts the expanded rows
+        assert_eq!(app.proc_row_count(), 4, "2 group rows + 2 members for the expanded one");
+        app.toggle_proc_group();
+        let lines = screen(&mut app);
+        assert!(!lines.join("\n").contains("zygote"), "Enter collapses again");
     }
 
     /// Tab cycling must visit Processes, and the nav bar must show it in

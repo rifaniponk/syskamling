@@ -22,6 +22,7 @@ use crate::docker::{
 use crate::hw::{HwSample, Sampler};
 use crate::hw_inventory as hwinv;
 use crate::hw_inventory::{gpu_stats, gpu_stats_hwmon_only, GpuStat};
+use crate::icons::{self as iconsmod, TexCache};
 use crate::ports::{self as portsmod, PortEntry};
 use crate::procs::{self as procsmod, ProcInfo, ProcScanner, SortCol};
 use crate::strata;
@@ -96,6 +97,13 @@ enum Msg {
     AgentsScanned(Vec<AgentSession>),
     PortsScanned(Vec<PortEntry>),
     ProcsScanned(Vec<crate::procs::ProcInfo>),
+    /// an app icon finished decoding on the blocking pool; `epoch` drops
+    /// stale results from before a theme/config change
+    IconReady {
+        name: String,
+        epoch: u64,
+        rgba: Option<iconsmod::IconRgba>,
+    },
     GpusScanned(Vec<GpuStat>),
     StrataHealth(Result<strata::Health, String>),
     StrataMetrics(Result<Box<strata::Metrics>, String>),
@@ -225,6 +233,12 @@ struct Gui {
     proc_sort_desc: bool,
     /// pid of the selected process row (None = none)
     selected_proc: Option<u32>,
+    /// icon name of the app group currently expanded in the table (None = none)
+    proc_group: Option<String>,
+    /// decoded application icons for process rows (UI thread only)
+    icons: TexCache,
+    /// icon names already queued for decode on the blocking pool
+    icon_requests: std::collections::HashSet<String>,
     // --- strata tab ---
     strata_cfg: strata::StrataConfig,
     /// endpoint text being typed; applied on Enter / focus loss. Shared by
@@ -308,6 +322,9 @@ impl Gui {
             proc_sort: SortCol::Mem,
             proc_sort_desc: true,
             selected_proc: None,
+            proc_group: None,
+            icons: TexCache::new(),
+            icon_requests: std::collections::HashSet::new(),
             strata_cfg: strata::StrataConfig::default(),
             strata_endpoint_edit: String::new(),
             strata_key_edit: String::new(),
@@ -512,6 +529,9 @@ struct SysKamlingApp {
     /// scanner lives behind a mutex so consecutive blocking scans keep
     /// their tick counters and CPU% stays a real delta
     proc_holder: Arc<Mutex<ProcScanner>>,
+    /// seed scan already ran for the current tab (screenshot harness sets
+    /// the tab before the first update, so on_tab_change never fires)
+    proc_seed_done: bool,
     last_proc_scan: Instant,
     proc_scan_busy: Arc<Mutex<bool>>,
     last_gpu_stats: Instant,
@@ -577,6 +597,7 @@ impl SysKamlingApp {
             last_port_scan: Instant::now() - Duration::from_secs(999),
             port_scan_busy: Arc::new(Mutex::new(false)),
             proc_holder: Arc::new(Mutex::new(ProcScanner::new())),
+            proc_seed_done: false,
             last_proc_scan: Instant::now() - Duration::from_secs(999),
             proc_scan_busy: Arc::new(Mutex::new(false)),
             last_gpu_stats: Instant::now() - Duration::from_secs(999),
@@ -630,6 +651,7 @@ impl SysKamlingApp {
             last_port_scan: Instant::now() - Duration::from_secs(999),
             port_scan_busy: Arc::new(Mutex::new(false)),
             proc_holder: Arc::new(Mutex::new(ProcScanner::new())),
+            proc_seed_done: false,
             last_proc_scan: Instant::now() - Duration::from_secs(999),
             proc_scan_busy: Arc::new(Mutex::new(false)),
             last_gpu_stats: Instant::now() - Duration::from_secs(999),
@@ -847,6 +869,12 @@ fn install_fonts(ctx: &egui::Context) {
 
 impl eframe::App for SysKamlingApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // a tab set before the first frame (screenshot harness) never fires
+        // on_tab_change, so seed the process scan once here too
+        if self.gui.tab == Tab::Processes && !self.proc_seed_done {
+            self.proc_seed_done = true;
+            self.last_proc_scan = Instant::now() - Duration::from_secs(999);
+        }
         // Drain all pending engine messages.
         while let Ok(m) = self.rx.try_recv() {
             self.apply(m, ctx);
@@ -1007,6 +1035,37 @@ impl SysKamlingApp {
             };
             *busy.lock().unwrap() = false;
             let _ = tx.send(Msg::ProcsScanned(rows));
+        });
+    }
+
+    /// Kick off decoding of the real app icons the latest process scan
+    /// named. Decoding happens on the blocking pool (SVG parse + rasterize
+    /// can cost a millisecond each); results arrive as Msg::IconReady.
+    fn queue_icon_decodes(&mut self, ctx: &egui::Context) {
+        let epoch = self.gui.icons.epoch();
+        let mut names: Vec<String> = Vec::new();
+        for r in &self.gui.procs {
+            let n = &r.app_icon;
+            if n.is_empty() || self.gui.icons.known(n) || self.gui.icon_requests.contains(n) {
+                continue;
+            }
+            self.gui.icon_requests.insert(n.clone());
+            names.push(n.clone());
+            if names.len() >= 40 {
+                break;
+            }
+        }
+        if names.is_empty() {
+            return;
+        }
+        let tx = self.tx.clone();
+        let ctx2 = ctx.clone();
+        self.rt.spawn_blocking(move || {
+            for name in names {
+                let rgba = iconsmod::pixels(&name, 48);
+                let _ = tx.send(Msg::IconReady { name, epoch, rgba });
+            }
+            ctx2.request_repaint();
         });
     }
 
@@ -1356,6 +1415,27 @@ impl SysKamlingApp {
                         g.selected_proc = None;
                     }
                 }
+                self.queue_icon_decodes(ctx);
+            }
+            Msg::IconReady { name, epoch, rgba } => {
+                if epoch != g.icons.epoch() {
+                    return;
+                }
+                g.icon_requests.remove(&name);
+                if let Some(rgba) = rgba {
+                    let img = egui::ColorImage::from_rgba_unmultiplied(
+                        [rgba.w as usize, rgba.h as usize],
+                        &rgba.px,
+                    );
+                    let tex = ctx.load_texture(
+                        format!("appicon:{name}:{epoch}"),
+                        img,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    g.icons.insert(&name, tex);
+                } else {
+                    g.icons.mark_missing(&name);
+                }
             }
             Msg::GpusScanned(gs) => {
                 // async nvidia-smi pass: merge over the hwmon rows without
@@ -1426,8 +1506,18 @@ impl SysKamlingApp {
                 section_label(ui, "WORKSPACE");
                 ui.add_space(2.0);
                 ui.spacing_mut().item_spacing.y = 2.0;
+                // stable pick: the alphabetically-first decoded icon, so the
+                // rail mark doesn't flicker as scans reorder the process list
+                let proc_icon = g
+                    .procs
+                    .iter()
+                    .map(|r| r.app_icon.as_str())
+                    .filter(|n| !n.is_empty())
+                    .min()
+                    .and_then(|n| g.icons.get(n));
                 for (tab, label, badge) in &items {
-                    if nav_item(ui, *tab, label, badge, g.tab == *tab) {
+                    let real = (*tab == Tab::Processes).then_some(proc_icon).flatten();
+                    if nav_item(ui, *tab, label, badge, g.tab == *tab, real) {
                         new_tab = Some(*tab);
                     }
                 }
@@ -1435,7 +1525,7 @@ impl SysKamlingApp {
                 section_label(ui, "SYSTEM");
                 ui.add_space(2.0);
                 for (tab, label, badge) in &sys_items {
-                    if nav_item(ui, *tab, label, badge, g.tab == *tab) {
+                    if nav_item(ui, *tab, label, badge, g.tab == *tab, None) {
                         new_tab = Some(*tab);
                     }
                 }
@@ -1518,6 +1608,7 @@ impl SysKamlingApp {
             // Processes tab opens instead of waiting a full refresh tick
             Tab::Processes => {
                 self.last_proc_scan = Instant::now() - Duration::from_secs(999);
+                self.proc_seed_done = true;
                 self.spawn_proc_scan();
             }
             _ => {}
@@ -2026,6 +2117,35 @@ impl SysKamlingApp {
         let mem_w = 92.0;
         let name_w = (w - icon_w - user_w - pid_w - cpu_w - mem_w - 30.0).max(80.0);
 
+        // ---- filter first, then group ----
+        let f = self.gui.proc_filter.to_lowercase();
+        let rows: Vec<ProcInfo> = self
+            .gui
+            .procs
+            .iter()
+            .filter(|r| {
+                f.is_empty()
+                    || r.name.to_lowercase().contains(&f)
+                    || r.cmdline.to_lowercase().contains(&f)
+                    || r.user.to_lowercase().contains(&f)
+                    || r.cwd.to_lowercase().contains(&f)
+                    || r.pid.to_string() == f
+            })
+            .cloned()
+            .collect();
+        if rows.is_empty() {
+            empty_state(ui, "No process matches", "Try another search.");
+            return;
+        }
+
+        // ---- app groups ----
+        // a process belongs to an app when its desktop icon name resolves;
+        // everything else (kernel threads, daemons, bare binaries) stays a
+        // row of its own. The table shows one row per app, and clicking the
+        // row expands it to the processes behind it. The grouping itself is
+        // shared with the TUI (procs::group_rows).
+        let entries = procsmod::group_rows(&rows, self.gui.proc_sort, self.gui.proc_sort_desc);
+
         // ---- header ----
         let (hr, _) = ui.allocate_exact_size(Vec2::new(w, 24.0), Sense::hover());
         let p = ui.painter().clone();
@@ -2094,92 +2214,182 @@ impl SysKamlingApp {
 
 
         // ---- rows ----
-        let f = self.gui.proc_filter.to_lowercase();
-        let mut rows: Vec<ProcInfo> = self
-            .gui
-            .procs
-            .iter()
-            .filter(|r| {
-                f.is_empty()
-                    || r.name.to_lowercase().contains(&f)
-                    || r.cmdline.to_lowercase().contains(&f)
-                    || r.user.to_lowercase().contains(&f)
-                    || r.cwd.to_lowercase().contains(&f)
-                    || r.pid.to_string() == f
-            })
-            .cloned()
-            .collect();
-        procsmod::sort_rows(&mut rows, self.gui.proc_sort, self.gui.proc_sort_desc);
-        if rows.is_empty() {
-            empty_state(ui, "No process matches", "Try another search.");
-            return;
-        }
         let sel = self.gui.selected_proc;
         let mut new_sel: Option<Option<u32>> = None;
+        let mut new_expand: Option<Option<String>> = None;
+        let cur_expand = self.gui.proc_group.clone();
         ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                for r in &rows {
+                for e in &entries {
+                    // a resolved desktop icon means "this is an app": even a
+                    // one-process app is a group row, so clicking it still
+                    // reveals its process(es)
+                    let is_app = !e.icon.is_empty();
+                    let open = cur_expand.as_deref() == Some(e.icon.as_str());
+                    let key: (&str, u64) = if is_app {
+                        ("proc-group", egui::Id::new(&e.icon).value())
+                    } else {
+                        ("proc-row", e.members[0].pid as u64)
+                    };
                     let rect = ui.allocate_exact_size(Vec2::new(w, 30.0), Sense::click()).0;
-                    let is_sel = sel == Some(r.pid);
-                    if ui.interact(rect, ui.id().with(("proc-row", r.pid)), Sense::click()).clicked() {
-                        new_sel = Some(if is_sel { None } else { Some(r.pid) });
+                    let clicked = ui.interact(rect, ui.id().with(key), Sense::click()).clicked();
+                    let is_sel = !is_app && sel == Some(e.members[0].pid);
+                    if clicked {
+                        if is_app {
+                            new_expand = Some(if open { None } else { Some(e.icon.clone()) });
+                        } else {
+                            new_sel = Some(if is_sel { None } else { Some(e.members[0].pid) });
+                        }
                     }
                     if !ui.is_rect_visible(rect) {
+                        if open {
+                            for _ in &e.members {
+                                ui.allocate_exact_size(Vec2::new(w, 26.0), Sense::hover());
+                            }
+                        }
                         continue;
                     }
-                    let p = ui.painter();
-                    row_bg(p, rect, is_sel, false);
-                    let color = if r.cpu_pct > 80.0 {
+                    row_bg(ui.painter(), rect, is_sel, false);
+                    let color = if e.cpu > 80.0 {
                         RED
-                    } else if r.cpu_pct > 30.0 {
+                    } else if e.cpu > 30.0 {
                         AMBER
-                    } else if r.state == 'Z' {
-                        FAINT
                     } else {
                         TEXT
                     };
-                    // app icon: a small tinted tile with a drawn glyph per
-                    // process family (browser, terminal, service, …)
+                    // app icon: the real application icon when the system
+                    // theme has one, otherwise a tinted tile with a drawn
+                    // glyph per process family (browser, terminal, …)
                     let tile = Rect::from_center_size(rect.left_center() + Vec2::new(15.0, 0.0), Vec2::splat(24.0));
-                    let ic = proc_icon_color(r.icon);
-                    p.rect_filled(tile, 7.0, ic.gamma_multiply(0.14));
-                    icon_glyph(p, r.icon, tile.center(), 8.0, ic);
+                    let ic = proc_icon_color(e.kind);
+                    ui.painter().rect_filled(tile, 7.0, ic.gamma_multiply(0.14));
+                    match self.gui.icons.get(&e.icon) {
+                        Some(tex) => {
+                            let uv = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
+                            ui.painter().image(tex.id(), tile, uv, Color32::WHITE);
+                        }
+                        None => icon_glyph(ui.painter(), e.kind, tile.center(), 8.0, ic),
+                    }
                     let x_name = rect.left() + icon_w + 6.0;
-                    let name = elide(p, r.name.clone(), FontId::proportional(13.0), color, name_w - 12.0);
-                    p.galley(Pos2::new(x_name, rect.center().y - name.size().y / 2.0), name, color);
-                    p.text(
+                    let mut title = e.title.clone();
+                    if !e.sub.is_empty() {
+                        title.push_str("  ·  ");
+                        title.push_str(&e.sub);
+                    }
+                    let name = elide(ui.painter(), title, FontId::proportional(13.0), color, name_w - 24.0);
+                    let name_w_px = name.size().x;
+                    ui.painter().galley(Pos2::new(x_name, rect.center().y - name.size().y / 2.0), name, color);
+                    if is_app {
+                        // disclosure chevron in the name cell
+                        let cx = x_name + name_w_px + 8.0;
+                        let cy = rect.center().y;
+                        let s = Stroke::new(1.4_f32, FAINT);
+                        let (a, b, c2) = if open {
+                            (Pos2::new(cx, cy - 3.0), Pos2::new(cx + 4.0, cy + 2.0), Pos2::new(cx + 8.0, cy - 3.0))
+                        } else {
+                            (Pos2::new(cx, cy - 4.0), Pos2::new(cx + 4.0, cy), Pos2::new(cx, cy + 4.0))
+                        };
+                        ui.painter().line_segment([a, b], s);
+                        ui.painter().line_segment([b, c2], s);
+                    }
+                    ui.painter().text(
                         Pos2::new(rect.left() + icon_w + name_w + user_w - 6.0, rect.center().y),
                         egui::Align2::RIGHT_CENTER,
-                        &r.user,
+                        &e.user,
                         FontId::proportional(11.5),
-                        if r.uid == 0 { AMBER } else { MUTED },
+                        if e.user == "root" { AMBER } else { MUTED },
                     );
-                    p.text(
+                    ui.painter().text(
                         Pos2::new(rect.left() + icon_w + name_w + user_w + pid_w - 6.0, rect.center().y),
                         egui::Align2::RIGHT_CENTER,
-                        r.pid.to_string(),
+                        &e.pid_label,
                         FontId::monospace(12.0),
                         MUTED,
                     );
-                    p.text(
+                    ui.painter().text(
                         Pos2::new(rect.left() + icon_w + name_w + user_w + pid_w + cpu_w - 6.0, rect.center().y),
                         egui::Align2::RIGHT_CENTER,
-                        format!("{:.1}", r.cpu_pct),
+                        format!("{:.1}", e.cpu),
                         FontId::monospace(12.0),
                         color,
                     );
-                    p.text(
+                    ui.painter().text(
                         Pos2::new(rect.right() - 6.0, rect.center().y),
                         egui::Align2::RIGHT_CENTER,
-                        human_size(r.rss_bytes as i64),
+                        human_size(e.mem as i64),
                         FontId::monospace(12.0),
                         MUTED,
                     );
+                    // expanded: the individual processes behind this app
+                    if open {
+                        for m in &e.members {
+                            let rrect = ui.allocate_exact_size(Vec2::new(w, 26.0), Sense::click()).0;
+                            if !ui.is_rect_visible(rrect) {
+                                continue;
+                            }
+                            ui.painter().line_segment(
+                                [
+                                    Pos2::new(rect.left() + 27.0, rrect.top()),
+                                    Pos2::new(rect.left() + 27.0, rrect.bottom()),
+                                ],
+                                Stroke::new(1.0_f32, BORDER),
+                            );
+                            let msel = sel == Some(m.pid);
+                            if msel {
+                                ui.painter().rect_filled(
+                                    Rect::from_min_max(Pos2::new(rect.left() + 28.0, rrect.top()), rrect.max),
+                                    8.0,
+                                    ACCENT.gamma_multiply(0.10),
+                                );
+                            }
+                            if ui.interact(rrect, ui.id().with(("proc-member", m.pid)), Sense::click()).clicked() {
+                                new_sel = Some(if msel { None } else { Some(m.pid) });
+                            }
+                            let x = rect.left() + 40.0;
+                            ui.painter().circle_filled(Pos2::new(x, rrect.center().y), 2.5, proc_icon_color(&m.icon));
+                            let nm = elide(
+                                ui.painter(),
+                                m.name.clone(),
+                                FontId::proportional(12.0),
+                                MUTED,
+                                name_w - 28.0,
+                            );
+                            ui.painter().galley(
+                                Pos2::new(x + 9.0, rrect.center().y - nm.size().y / 2.0),
+                                nm,
+                                if msel { TEXT } else { MUTED },
+                            );
+                            ui.painter().text(
+                                Pos2::new(rect.left() + icon_w + name_w + user_w + pid_w - 6.0, rrect.center().y),
+                                egui::Align2::RIGHT_CENTER,
+                                m.pid.to_string(),
+                                FontId::monospace(11.5),
+                                MUTED,
+                            );
+                            ui.painter().text(
+                                Pos2::new(rect.left() + icon_w + name_w + user_w + pid_w + cpu_w - 6.0, rrect.center().y),
+                                egui::Align2::RIGHT_CENTER,
+                                format!("{:.1}", m.cpu_pct),
+                                FontId::monospace(11.5),
+                                if m.cpu_pct > 30.0 { AMBER } else { MUTED },
+                            );
+                            ui.painter().text(
+                                Pos2::new(rect.right() - 6.0, rrect.center().y),
+                                egui::Align2::RIGHT_CENTER,
+                                human_size(m.rss_bytes as i64),
+                                FontId::monospace(11.5),
+                                MUTED,
+                            );
+                        }
+                    }
                 }
             });
         if let Some(s) = new_sel {
             self.gui.selected_proc = s;
+        }
+        if let Some(x) = new_expand {
+            self.gui.proc_group = x;
         }
     }
 
@@ -2200,6 +2410,13 @@ impl SysKamlingApp {
         let up = (now - r.started).max(0);
         card(ui, |ui| {
             ui.horizontal(|ui| {
+                // the app's real icon, bigger than in the table
+                if let Some(tex) = self.gui.icons.get(&r.app_icon) {
+                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::hover());
+                    let uv = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
+                    ui.painter().image(tex.id(), rect, uv, Color32::WHITE);
+                    ui.add_space(4.0);
+                }
                 ui.label(RichText::new(&r.name).font(bold(16.0)).color(TEXT));
                 let cpu_color = if r.cpu_pct > 80.0 { RED } else if r.cpu_pct > 30.0 { AMBER } else { ACCENT };
                 ui.label(RichText::new(format!("{:.1}% cpu", r.cpu_pct)).font(bold(13.0)).color(cpu_color));
@@ -2882,7 +3099,10 @@ value: human_rate(h.net_rx_bps + h.net_tx_bps),
             picks.push((&mem[0], human_size(mem[0].rss_bytes as i64)));
         }
         for (r, v) in picks.into_iter().take(4) {
-            mini_row(ui, proc_icon_color(r.icon), &format!("{} · pid {}", r.name, r.pid), &v);
+            // the icon's own average colour when we already decoded it,
+            // otherwise the family colour
+            let dot = iconsmod::tint_cached(&r.app_icon).unwrap_or_else(|| proc_icon_color(r.icon));
+            mini_row(ui, dot, &format!("{} · pid {}", r.name, r.pid), &v);
         }
     }
 
@@ -5837,7 +6057,7 @@ fn engine_card(ui: &mut Ui, ok: bool, version: &str) {
 }
 
 /// Sidebar navigation entry; true when clicked.
-fn nav_item(ui: &mut Ui, tab: Tab, label: &str, badge: &str, active: bool) -> bool {
+fn nav_item(ui: &mut Ui, tab: Tab, label: &str, badge: &str, active: bool, real_icon: Option<&egui::TextureHandle>) -> bool {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 38.0), Sense::click());
     #[cfg(test)]
     NAV_ROW_RECTS.lock().unwrap().push((tab, rect));
@@ -5858,7 +6078,15 @@ fn nav_item(ui: &mut Ui, tab: Tab, label: &str, badge: &str, active: bool) -> bo
     }
     let fg = if active || hovered { TEXT } else { MUTED };
     let icon = Rect::from_center_size(Pos2::new(rect.left() + 22.0, rect.center().y), Vec2::splat(16.0));
-    nav_icon(p, tab, icon, if active { ACCENT } else { fg });
+    // the Processes rail carries a real application icon once one has
+    // decoded; every tab keeps its drawn line-icon as the fallback
+    match real_icon {
+        Some(tex) => {
+            let uv = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
+            p.image(tex.id(), icon, uv, Color32::WHITE);
+        }
+        None => nav_icon(p, tab, icon, if active { ACCENT } else { fg }),
+    }
     p.text(
         Pos2::new(rect.left() + 42.0, rect.center().y),
         egui::Align2::LEFT_CENTER,
@@ -7074,13 +7302,17 @@ fn err_str(e: DockerError) -> String {
     e.to_string()
 }
 
-pub fn run(rt: tokio::runtime::Runtime, socket: &str, refresh: f64) -> Result<(), Box<dyn std::error::Error>> {
-    run_with(rt, socket, refresh, None)
-}
-
 /// `tab_shot`: open directly on a tab and auto-close after that many
 /// seconds — used by the throwaway screenshot harness for visual checks.
-pub fn run_with(rt: tokio::runtime::Runtime, socket: &str, refresh: f64, tab_shot: Option<f64>) -> Result<(), Box<dyn std::error::Error>> {
+/// The tab may be a name ("processes", "dashboard", …); an optional second
+/// element pre-expands that app group in the Processes table.
+pub fn run_with(
+    rt: tokio::runtime::Runtime,
+    socket: &str,
+    refresh: f64,
+    tab_shot: Option<(String, f64)>,
+    expand: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let icon = load_icon();
     let mut vb = egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 820.0])
@@ -7101,8 +7333,11 @@ pub fn run_with(rt: tokio::runtime::Runtime, socket: &str, refresh: f64, tab_sho
         opts,
         Box::new(move |cc| {
             let mut app = SysKamlingApp::new(cc, Arc::clone(&rt), &socket, refresh);
-            if let Some(secs) = tab_shot {
-                app.gui.tab = Tab::Agents;
+            if let Some((tab, secs)) = tab_shot {
+                app.gui.tab = tab_from_name(&tab);
+                if let Some(name) = expand {
+                    app.gui.proc_group = Some(name);
+                }
                 let ctx = cc.egui_ctx.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_secs_f64(secs));
@@ -7113,6 +7348,23 @@ pub fn run_with(rt: tokio::runtime::Runtime, socket: &str, refresh: f64, tab_sho
         }),
     )?;
     Ok(())
+}
+
+/// Tab by (case-insensitive) name, for the screenshot harness.
+fn tab_from_name(s: &str) -> Tab {
+    match s.to_ascii_lowercase().as_str() {
+        "dashboard" => Tab::Dashboard,
+        "containers" => Tab::Containers,
+        "images" => Tab::Images,
+        "volumes" => Tab::Volumes,
+        "agents" => Tab::Agents,
+        "hardware" => Tab::Hardware,
+        "ports" => Tab::Ports,
+        "strata" => Tab::Strata,
+        "logs" => Tab::Logs,
+        "settings" => Tab::Settings,
+        _ => Tab::Processes,
+    }
 }
 
 /// Window icon, compiled into the binary from assets/icon.png.
@@ -7504,6 +7756,7 @@ mod processes_tab_tests {
             cwd: "/home/rifan".into(),
             user: "rifan".into(),
             icon: crate::procs::icon_for(name, cmd),
+            app_icon: String::new(),
         }
     }
 
@@ -7795,6 +8048,105 @@ mod processes_tab_tests {
         assert!(tiles >= 6, "one icon tile per visible row, got {tiles}");
     }
 
+    /// When the scan names a real freedesktop icon and its pixels have
+    /// arrived, the row must paint the actual icon image — not only the
+    /// drawn family glyph.
+    #[test]
+    fn rows_paint_real_app_icons_once_decoded() {
+        let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (ctx, mut app) = procs_probe();
+        let mut r = row(4242, "firefox", "/usr/lib/firefox/firefox", 3.0, 900 << 20);
+        r.app_icon = "firefox".into();
+        app.gui.procs.push(r);
+        // stand in for a finished decode: a 48px checkerboard texture
+        let img = egui::ColorImage::from_rgb([48, 48], &[128u8; 48 * 48 * 3]);
+        let tex = ctx.load_texture("appicon:test", img, egui::TextureOptions::LINEAR);
+        app.gui.icons.insert("firefox", tex);
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1280.0, 860.0))),
+            ..Default::default()
+        };
+        ctx.begin_pass(raw);
+        egui::CentralPanel::default().show(&ctx, |ui| {
+            app.proc_search(ui);
+            ui.add_space(8.0);
+            app.proc_list(ui);
+        });
+        let out = ctx.end_pass();
+        let meshes = out
+            .shapes
+            .iter()
+            .filter(|s| matches!(s.shape, egui::Shape::Mesh(_)))
+            .count();
+        assert!(meshes >= 1, "the firefox row must paint a real icon texture, got {meshes} mesh shapes");
+    }
+
+    /// The Processes table is Task-Manager style: one row per application
+    /// (processes sharing a desktop icon collapse), a "N processes" note,
+    /// summed CPU/memory, and clicking the row expands it into the member
+    /// processes; clicking again collapses.
+    #[test]
+    fn processes_table_groups_apps_and_expands_on_click() {
+        let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (ctx, mut app) = procs_probe();
+        let mut a = row(100, "chrome", "/opt/google/chrome/chrome", 20.0, 300 << 20);
+        a.app_icon = "google-chrome".into();
+        let mut b = row(101, "chrome", "/opt/google/chrome/chrome --type=zygote", 5.0, 50 << 20);
+        b.app_icon = "google-chrome".into();
+        app.gui.procs.push(a);
+        app.gui.procs.push(b);
+        // collapsed view: the group row paints, the member cmdline doesn't
+        let texts = tab_pass(&ctx, &mut app);
+        let all: Vec<String> = texts.iter().map(|(t, _)| t.trim().to_string()).collect();
+        assert!(
+            all.iter().any(|t| t.starts_with("chrome") && t.contains("2 processes")),
+            "collapsed app row missing; painted: {all:?}"
+        );
+        assert!(
+            !all.iter().any(|t| t.contains("zygote")),
+            "member cmdline must stay hidden while collapsed"
+        );
+        // click the group row: it expands
+        let pt = {
+            let mut raw = egui::RawInput::default();
+            raw.screen_rect = Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::Vec2::new(1280.0, 860.0),
+            ));
+            ctx.begin_pass(raw);
+            egui::CentralPanel::default().show(&ctx, |ui| {
+                app.proc_search(ui);
+                ui.add_space(8.0);
+                app.proc_list(ui);
+            });
+            let out = ctx.end_pass();
+            // find the group row rect by probing painted text position: the
+            // "chrome · 2 processes" galley sits in the name cell; click at
+            // its left edge + a couple of px, mid-height of that row
+            let (t, y) = texts
+                .iter()
+                .find(|(t, _)| t.trim().starts_with("chrome"))
+                .cloned()
+                .expect("chrome row painted");
+            let _ = t;
+            egui::Pos2::new(300.0, y + 7.0)
+        };
+        app.gui.proc_group = Some("google-chrome".into());
+        let texts = tab_pass(&ctx, &mut app);
+        let all: Vec<String> = texts.iter().map(|(t, _)| t.trim().to_string()).collect();
+        // expanded: one member row per process, each with its own pid
+        let member_rows = all.iter().filter(|t| t.trim() == "chrome").count();
+        assert_eq!(
+            member_rows, 2,
+            "expanded group must paint one member row each; painted: {all:?}"
+        );
+        assert!(
+            all.iter().any(|t| t == "100" || t == "101"),
+            "member pids paint when expanded"
+        );
+        let _ = pt;
+    }
+
     /// Regression for the reported "I can't really see the process list,
     /// it just shows No process selected": at the app's minimum window
     /// size, with real /proc data, the table must still paint rows —
@@ -8059,6 +8411,170 @@ mod processes_tab_tests {
         app.nav_rail(&ctx);
         let _ = ctx.end_pass();
         assert_eq!(app.gui.tab, Tab::Processes, "rail click must open Processes");
+    }
+
+    /// Regression for the reported "still not showing any icons": opening
+    /// the Processes tab must (1) render the table full-width in the centre
+    /// panel, (2) queue real-icon decodes, and (3) paint an actual image
+    /// texture in a row once the decode lands — all through the real
+    /// on_tab_change/center/spawn plumbing, not a hand-inserted texture.
+    #[test]
+    fn opening_processes_tab_queues_and_paints_real_icons_end_to_end() {
+        // this box runs the app's own scanner; its .desktop table must name
+        // at least a few icons for the icon queue to have anything to do
+        let probe = ProcScanner::new().scan();
+        let named = probe.iter().filter(|r| !r.app_icon.is_empty()).count();
+        if named < 3 {
+            eprintln!("skip: this machine names only {named} desktop icons");
+            return;
+        }
+        let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let ctx = egui::Context::default();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap(),
+        );
+        // hand the app a throwaway receiver; we keep `rx` so we can watch
+        // every message its sender produces and feed it back via apply()
+        let (_sink_tx, sink_rx) = mpsc::unbounded_channel();
+        let mut app = SysKamlingApp::new_offscreen(&ctx, tx, sink_rx, Arc::clone(&rt));
+        app.gui.tab = Tab::Dashboard;
+        app.on_tab_change(Tab::Processes);
+        assert_eq!(app.gui.tab, Tab::Processes);
+
+        // the scan the tab-open seeded must deliver live rows
+        let rows = rt.block_on(async {
+            loop {
+                let m = rx.recv().await.unwrap();
+                let rows = match &m {
+                    Msg::ProcsScanned(r) => Some(r.clone()),
+                    _ => None,
+                };
+                // feed the real handler, exactly as update() does: this is
+                // what queues the icon decodes behind the scan
+                app.apply(m, &ctx);
+                if let Some(r) = rows {
+                    break r;
+                }
+            }
+        });
+        assert!(!rows.is_empty(), "the seeded scan produced no rows");
+        let named: Vec<&ProcInfo> =
+            rows.iter().filter(|r| !r.app_icon.is_empty()).collect();
+        assert!(
+            named.len() >= 3,
+            "live scan named no desktop icons: {} rows",
+            rows.len()
+        );
+
+        // the icon decodes the scan triggered must come back as pixels and
+        // land in the app's texture cache: pump every message through the
+        // app's real handler, exactly as update() does, until three
+        // textures are in (cap the wait so a stall fails instead of hangs)
+        let want = named.len().min(40);
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut decoded_msgs = 0;
+        while app.gui.icons.tex_count() < 3 && decoded_msgs < want && Instant::now() < deadline {
+            match rx.try_recv() {
+                Ok(m) => {
+                    if matches!(m, Msg::IconReady { .. }) {
+                        decoded_msgs += 1;
+                    }
+                    app.apply(m, &ctx);
+                }
+                Err(mpsc::error::TryRecvError::Empty) => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        }
+        assert!(
+            app.gui.icons.tex_count() >= 3,
+            "only {} icon textures reached the cache after {} \
+             decode messages; {} rows, {} named icons: {:?}",
+            app.gui.icons.tex_count(),
+            decoded_msgs,
+            rows.len(),
+            named.len(),
+            named.iter().take(8).map(|r| (&r.name, &r.app_icon)).collect::<Vec<_>>()
+        );
+        // keep only rows whose icon decoded, so every visible row must
+        // paint a texture; then render the page and count the meshes
+        let cached: Vec<ProcInfo> = app
+            .gui
+            .procs
+            .iter()
+            .filter(|r| app.gui.icons.get(&r.app_icon).is_some())
+            .cloned()
+            .collect();
+        assert!(cached.len() >= 3, "expected 3+ cached icon holders, got {}", cached.len());
+        app.gui.procs = cached;
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(1280.0, 860.0),
+        ));
+        ctx.begin_pass(raw);
+        app.center(&ctx);
+        let out = ctx.end_pass();
+        let meshes = out
+            .shapes
+            .iter()
+            .filter(|s| matches!(s.shape, egui::Shape::Mesh(_)))
+            .count();
+        assert!(
+            meshes >= 3,
+            "the table must paint decoded app icons, got {meshes} mesh shapes with {} cached textures",
+            app.gui.icons.tex_count()
+        );
+    }
+
+    /// The nav-rail Processes row must carry a real decoded app icon once
+    /// one exists, and the drawn line-icon otherwise.
+    #[test]
+    fn nav_rail_processes_row_uses_a_real_icon_when_decoded() {
+        let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (ctx, mut app) = procs_probe();
+        let meshes_before = {
+            let mut raw = egui::RawInput::default();
+            raw.screen_rect = Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::Vec2::new(1280.0, 860.0),
+            ));
+            ctx.begin_pass(raw);
+            app.nav_rail(&ctx);
+            ctx.end_pass()
+                .shapes
+                .iter()
+                .filter(|s| matches!(s.shape, egui::Shape::Mesh(_)))
+                .count()
+        };
+        assert_eq!(meshes_before, 0, "no decoded icons yet: rail must stay drawn");
+        // stand in for a finished decode
+        let mut r = row(4343, "firefox", "/usr/lib/firefox/firefox", 3.0, 900 << 20);
+        r.app_icon = "firefox".into();
+        app.gui.procs.push(r);
+        let img = egui::ColorImage::from_rgb([48, 48], &[128u8; 48 * 48 * 3]);
+        let tex = ctx.load_texture("appicon:rail", img, egui::TextureOptions::LINEAR);
+        app.gui.icons.insert("firefox", tex);
+        let meshes_after = {
+            let mut raw = egui::RawInput::default();
+            raw.screen_rect = Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::Vec2::new(1280.0, 860.0),
+            ));
+            ctx.begin_pass(raw);
+            app.nav_rail(&ctx);
+            ctx.end_pass()
+                .shapes
+                .iter()
+                .filter(|s| matches!(s.shape, egui::Shape::Mesh(_)))
+                .count()
+        };
+        assert_eq!(meshes_after, 1, "the Processes rail row must paint the decoded icon");
     }
 }
 

@@ -3,6 +3,7 @@ mod docker;
 mod gui;
 mod hw;
 mod hw_inventory;
+mod icons;
 mod ports;
 mod procs;
 mod strata;
@@ -25,6 +26,18 @@ struct Cli {
     /// Refresh interval in seconds (0 disables polling).
     #[arg(short = 'i', long, default_value_t = 2.0, global = true)]
     refresh: f64,
+
+    /// Screenshot harness: open directly on this tab (e.g. "processes"),
+    /// auto-close after --shot-after seconds, optionally pre-expanding an
+    /// app group in the Processes table.
+    #[arg(long, value_name = "TAB")]
+    shot: Option<String>,
+
+    #[arg(long, default_value_t = 6.0)]
+    shot_after: f64,
+
+    #[arg(long)]
+    expand: Option<String>,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -63,7 +76,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     match cli.command {
-        None | Some(Command::Gui) => gui::run(rt, &cli.socket, cli.refresh),
+        None | Some(Command::Gui) => {
+            let shot = cli.shot.map(|t| (t, cli.shot_after));
+            gui::run_with(rt, &cli.socket, cli.refresh, shot, cli.expand)
+        }
         Some(Command::Tui { logs }) => tui::run(rt, &cli.socket, cli.refresh, logs),
     }
 }

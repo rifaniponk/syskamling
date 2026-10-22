@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 /// One process row.
@@ -23,7 +24,9 @@ pub struct ProcInfo {
     pub threads: u32,
     /// epoch seconds the process started
     pub started: i64,
-    /// process owner uid
+    /// process owner uid; read from /proc stat and used for the root-user
+    /// highlight in the table
+    #[allow(dead_code)]
     pub uid: u32,
     /// virtual memory size, bytes
     pub vsize_bytes: u64,
@@ -34,8 +37,12 @@ pub struct ProcInfo {
     pub cwd: String,
     /// owner name from /etc/passwd (or the uid as text)
     pub user: String,
-    /// resolved application icon, e.g. "firefox" or "terminal"
+    /// fallback glyph family drawn when no real icon resolves:
+    /// "browser", "terminal", "service", … or "app"
     pub icon: &'static str,
+    /// real application icon name from the freedesktop icon theme
+    /// (e.g. "firefox", "org.gimp.GIMP"); empty when the app ships none
+    pub app_icon: String,
 }
 
 /// Incremental scanner: call `scan()` once per refresh; the second and every
@@ -147,6 +154,13 @@ impl ProcScanner {
                 .ok()
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            // the real executable: snap/flatpak/AppImage wrappers all
+            // resolve to the app's own binary, which is what desktop
+            // entries point at
+            let exe = fs::read_link(format!("/proc/{pid}/exe"))
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
             let (io_read, io_write) = fs::read_to_string(format!("/proc/{pid}/io"))
                 .ok()
                 .map(|s| {
@@ -164,6 +178,15 @@ impl ProcScanner {
                 .unwrap_or((0, 0));
 
             let icon = icon_for(&name, &cmdline_str);
+            let app_icon = if exe.is_empty() {
+                String::new()
+            } else {
+                DESKTOP_ICONS
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .icon_for(&exe)
+                    .unwrap_or_default()
+            };
             rows.push(ProcInfo {
                 pid,
                 ppid,
@@ -185,6 +208,7 @@ impl ProcScanner {
                     .cloned()
                     .unwrap_or_else(|| uid.to_string()),
                 icon,
+                app_icon,
             });
         }
 
@@ -311,6 +335,199 @@ pub fn icon_for(comm: &str, cmdline: &str) -> &'static str {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Real application icons: map a process executable to the icon name its
+// .desktop entry declares, using the freedesktop search paths. The table is
+// parsed once per process (desktop files change rarely) and consulted under
+// a mutex from the scan thread.
+// ---------------------------------------------------------------------------
+
+static DESKTOP_ICONS: LazyLock<Mutex<DesktopIcons>> =
+    LazyLock::new(|| Mutex::new(DesktopIcons::load()));
+
+/// How many mtime checks trigger a full rescan of the .desktop files.
+const DESKTOP_RESCAN_AFTER: usize = 24;
+
+struct DesktopEntry {
+    /// Exec= basename, e.g. "firefox", "idea.sh"
+    exec: String,
+    /// Icon= value, e.g. "firefox", "org.gimp.GIMP"
+    icon: String,
+    /// Icon= was an absolute path: use that file directly, themes don't
+    /// know about snap/AppImage icons
+    icon_path: Option<String>,
+    /// true when TryExec/Exec points at an existing executable
+    alive: bool,
+}
+
+pub struct DesktopIcons {
+    entries: Vec<DesktopEntry>,
+    /// exe path -> resolved icon name ("" = known to have none)
+    cache: HashMap<String, String>,
+    scans: usize,
+}
+
+impl DesktopIcons {
+    fn load() -> DesktopIcons {
+        let mut entries = Vec::new();
+        for dir in desktop_dirs() {
+            let Ok(rd) = fs::read_dir(dir) else { continue };
+            for f in rd.flatten() {
+                let path = f.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("desktop") {
+                    continue;
+                }
+                if let Some(e) = parse_desktop(&path) {
+                    entries.push(e);
+                }
+            }
+        }
+        DesktopIcons { entries, cache: HashMap::new(), scans: 0 }
+    }
+
+    /// Icon for an executable path — a theme icon name, or an absolute
+    /// file path when the entry declared one — or None when nothing matches.
+    fn icon_for(&mut self, exe: &str) -> Option<String> {
+        if let Some(hit) = self.cache.get(exe) {
+            return (!hit.is_empty()).then(|| hit.clone());
+        }
+        self.scans += 1;
+        if self.scans > DESKTOP_RESCAN_AFTER {
+            self.scans = 0;
+            self.cache.clear();
+            self.entries = DesktopIcons::load().entries;
+        }
+        let base = exe.rsplit('/').next().unwrap_or(exe).to_lowercase();
+        // snap/flatpak/AppImage exes live under versioned dirs; the app id
+        // is the wrapper dir name, and AppImage mounts use the app name
+        let mut candidates: Vec<String> = vec![base.clone()];
+        if let Some(rest) = exe.strip_prefix("/snap/") {
+            if let Some(app) = rest.split('/').next() {
+                candidates.push(app.to_lowercase());
+            }
+        }
+        if exe.contains("/app/") && exe.contains(".appimage") {
+            candidates.push(base.replace(".appimage", ""));
+        }
+        let mut best: Option<(u8, String)> = None;
+        for c in &candidates {
+            // substring matches are noisy ("cat" inside "catalog"): they
+            // only count when the process name is long enough to be unique
+            let loose = c.len() >= 4;
+            for e in self.entries.iter() {
+                if !e.alive || e.icon.is_empty() {
+                    continue;
+                }
+                let ex = &e.exec;
+                let hit = if ex == c {
+                    2
+                } else if ex.len() >= 3 && (ex.starts_with(c.as_str()) || c.starts_with(ex.as_str())) {
+                    1
+                } else if loose && (ex.contains(c.as_str()) || c.contains(ex.as_str())) {
+                    0
+                } else {
+                    continue;
+                };
+                if best.as_ref().map_or(true, |(h, _)| hit > *h) {
+                    let icon = match &e.icon_path {
+                        // absolute entry path wins only when it exists
+                        Some(p) if std::path::Path::new(p).exists() => p.clone(),
+                        _ => e.icon.clone(),
+                    };
+                    best = Some((hit, icon));
+                }
+                if best.as_ref().map_or(false, |(h, _)| *h == 2) {
+                    break;
+                }
+            }
+            if best.as_ref().map_or(false, |(h, _)| *h == 2) {
+                break;
+            }
+        }
+        let best = best.map(|(_, icon)| icon);
+        self.cache.insert(exe.to_string(), best.clone().unwrap_or_default());
+        best
+    }
+}
+
+/// Standard .desktop locations, user dir last so system entries win.
+fn desktop_dirs() -> Vec<std::path::PathBuf> {
+    let mut v = vec![
+        std::path::PathBuf::from("/usr/share/applications"),
+        std::path::PathBuf::from("/usr/local/share/applications"),
+        std::path::PathBuf::from("/var/lib/flatpak/exports/share/applications"),
+        // snap apps live here, not in the regular dirs
+        std::path::PathBuf::from("/var/lib/snapd/desktop/applications"),
+    ];
+    if let Some(d) = std::env::var_os("XDG_DATA_DIRS") {
+        v.extend(std::env::split_paths(&d).map(|p| p.join("applications")));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = std::path::PathBuf::from(home);
+        v.push(home.join(".local/share/flatpak/exports/share/applications"));
+        v.push(home.join(".local/share/applications"));
+    }
+    v
+}
+
+/// Pull Exec/TryExec/Icon out of one .desktop file and keep the entry only
+/// if its executable actually exists (a stale entry must not steal a match).
+/// Absolute Icon= paths are reduced to the icon name — the theme lookup
+/// finds the same file and can pick a better size bucket.
+fn parse_desktop(path: &std::path::Path) -> Option<DesktopEntry> {
+    let text = fs::read_to_string(path).ok()?;
+    let (mut exec, mut try_exec, mut icon) = (String::new(), String::new(), String::new());
+    for line in text.lines() {
+        match line.split_once('=') {
+            Some(("Exec", v)) if exec.is_empty() => exec = v.trim().to_string(),
+            Some(("TryExec", v)) => try_exec = v.trim().to_string(),
+            Some(("Icon", v)) if icon.is_empty() => icon = v.trim().to_string(),
+            _ => {}
+        }
+    }
+    if exec.is_empty() && icon.is_empty() {
+        return None;
+    }
+    // absolute Icon= paths (snaps, AppImages, .deb postinst pixmaps) point
+    // straight at the file; keep it, but also keep a name for the theme
+    let icon_path = if icon.starts_with('/') { Some(icon.clone()) } else { None };
+    if let Some(p) = &icon_path {
+        let base = p.rsplit('/').next().unwrap_or("");
+        icon = base
+            .trim_end_matches(".svgz")
+            .trim_end_matches(".svg")
+            .trim_end_matches(".png")
+            .to_string();
+    }
+    // strip a leading wrapper (env, flatpak run, snap run …) then take the
+    // first token that looks like the real command
+    let pick = |s: &str| -> Option<String> {
+        s.split_whitespace()
+            .find(|t| t.contains('/') || !t.contains('-'))
+            .map(|t| t.to_string())
+    };
+    let candidate = pick(&try_exec).or_else(|| pick(&exec))?;
+    // resolve to an absolute path when possible; bare names are assumed alive
+    let alive = if candidate.contains('/') {
+        std::path::Path::new(&candidate).exists()
+    } else {
+        which_exists(&candidate)
+    };
+    let exec_base = candidate.rsplit('/').next().unwrap_or(&candidate).to_lowercase();
+    Some(DesktopEntry { exec: exec_base, icon, icon_path, alive })
+}
+
+fn which_exists(name: &str) -> bool {
+    if let Some(p) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&p) {
+            if dir.join(name).exists() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Sort rows by the given column; secondary sort is always pid so the order
 /// is stable and deterministic.
 pub fn sort_rows(rows: &mut [ProcInfo], col: SortCol, desc: bool) {
@@ -335,16 +552,132 @@ pub enum SortCol {
     Mem,
 }
 
+/// Shared "app grouping": processes whose desktop icon name resolves
+/// collapse into one row per application; everything else (kernel threads,
+/// daemons, bare binaries) stays as its own row. The GUI table and the TUI
+/// both render this, so the grouping lives here once.
+#[derive(Clone)]
+pub struct AppGroup {
+    /// desktop icon name of the app; empty for a standalone process row
+    pub icon: String,
+    /// icon family used for the drawn fallback glyph
+    pub kind: &'static str,
+    /// display title: most common member name, or the process name
+    pub title: String,
+    /// "N processes" when the group has more than one member
+    pub sub: String,
+    /// most common owner among members
+    pub user: String,
+    /// summed CPU% across members
+    pub cpu: f64,
+    /// summed RSS across members
+    pub mem: u64,
+    /// PID column text: the pid, or "N pids" for a multi-member group
+    pub pid_label: String,
+    pub members: Vec<ProcInfo>,
+}
+
+/// Group `rows` (already filtered) into app rows + standalone rows, ordered
+/// by `col`/`desc` using each row's aggregate values.
+pub fn group_rows(rows: &[ProcInfo], col: SortCol, desc: bool) -> Vec<AppGroup> {
+    let mut groups: Vec<(String, Vec<ProcInfo>)> = Vec::new();
+    let mut rest: Vec<ProcInfo> = Vec::new();
+    for r in rows {
+        if r.app_icon.is_empty() {
+            rest.push(r.clone());
+            continue;
+        }
+        match groups.iter_mut().find(|(n, _)| *n == r.app_icon) {
+            Some((_, members)) => members.push(r.clone()),
+            None => groups.push((r.app_icon.clone(), vec![r.clone()])),
+        }
+    }
+    let stat = |ms: &[ProcInfo]| -> (f64, u64) {
+        ms.iter().fold((0.0_f64, 0_u64), |a, r| (a.0 + r.cpu_pct, a.1 + r.rss_bytes as u64))
+    };
+    let gkey = |g: &(String, Vec<ProcInfo>)| -> (f64, u64, String) {
+        let (c, m) = stat(&g.1);
+        let title = g
+            .1
+            .iter()
+            .map(|r| r.name.to_lowercase())
+            .max_by_key(|nm| {
+                g.1.iter()
+                    .filter(|r| r.name.to_lowercase() == *nm)
+                    .count()
+            })
+            .unwrap_or_default();
+        match col {
+            SortCol::Name => (0.0, 0, title),
+            SortCol::Pid => (0.0, g.1.iter().map(|r| r.pid as u64).min().unwrap_or(0), String::new()),
+            SortCol::Cpu => (c, 0, String::new()),
+            SortCol::Mem => (0.0, m, String::new()),
+        }
+    };
+    groups.sort_by(|a, b| gkey(a).partial_cmp(&gkey(b)).unwrap_or(std::cmp::Ordering::Equal));
+    if desc {
+        groups.reverse();
+    }
+    sort_rows(&mut rest, col, desc);
+    let mut out: Vec<AppGroup> = Vec::new();
+    for (icon, members) in groups {
+        let (c, m) = stat(&members);
+        let n = members.len();
+        let title = members
+            .iter()
+            .map(|r| r.name.clone())
+            .max_by_key(|nm| members.iter().filter(|r| &r.name == nm).count())
+            .unwrap_or_else(|| icon.clone());
+        out.push(AppGroup {
+            icon,
+            kind: members[0].icon,
+            title,
+            sub: if n > 1 { format!("{n} processes") } else { String::new() },
+            user: members
+                .iter()
+                .map(|r| r.user.clone())
+                .max_by_key(|u| members.iter().filter(|r| &r.user == u).count())
+                .unwrap_or_else(|| "?".into()),
+            cpu: c,
+            mem: m,
+            pid_label: if n == 1 {
+                members[0].pid.to_string()
+            } else {
+                format!("{n} pids")
+            },
+            members,
+        });
+    }
+    for r in rest {
+        out.push(AppGroup {
+            icon: String::new(),
+            kind: r.icon,
+            title: r.name.clone(),
+            sub: String::new(),
+            user: r.user.clone(),
+            cpu: r.cpu_pct,
+            mem: r.rss_bytes as u64,
+            pid_label: r.pid.to_string(),
+            members: vec![r],
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn row(pid: u32, name: &str, cpu: f64, mem: u64) -> ProcInfo {
+        row_named(pid, name, "", cpu, mem)
+    }
+
+    fn row_named(pid: u32, name: &str, cmd: &str, cpu: f64, mem: u64) -> ProcInfo {
         ProcInfo {
             pid,
             ppid: 0,
             name: name.into(),
-            cmdline: String::new(),
+            cmdline: cmd.into(),
             state: 'S',
             cpu_pct: cpu,
             rss_bytes: mem,
@@ -356,8 +689,41 @@ mod tests {
             io_write: 0,
             cwd: String::new(),
             user: "rifan".into(),
-            icon: crate::procs::icon_for(name, ""),
+            icon: crate::procs::icon_for(name, cmd),
+            app_icon: String::new(),
         }
+    }
+
+    /// The app-grouping contract both front-ends render: processes whose
+    /// desktop icon resolves collapse into one row per app (summed CPU/RSS,
+    /// "N processes" note, pids counted), standalone rows stay standalone,
+    /// and the group order follows the sort column.
+    #[test]
+    fn group_rows_collapses_apps_and_keeps_the_rest_standalone() {
+        let mut a = row_named(100, "chrome", "/opt/google/chrome/chrome", 20.0, 300 << 20);
+        a.app_icon = "google-chrome".into();
+        let mut b = row_named(101, "chrome_crashpad", "/opt/google/chrome/chrome", 1.0, 20 << 20);
+        b.app_icon = "google-chrome".into();
+        let mut c = row_named(102, "chrome", "/opt/google/chrome/chrome --type=zygote", 5.0, 50 << 20);
+        c.app_icon = "google-chrome".into();
+        let k = row(2, "kthreadd", 0.0, 0);
+        let rows = vec![a, b, c, k];
+        let groups = group_rows(&rows, SortCol::Mem, true);
+        assert_eq!(groups.len(), 2, "chrome collapses, kthreadd stays standalone");
+        let chrome = &groups[0];
+        assert_eq!(chrome.icon, "google-chrome");
+        assert_eq!(chrome.title, "chrome", "most common member name wins");
+        assert_eq!(chrome.members.len(), 3);
+        assert!((chrome.cpu - 26.0).abs() < 1e-9, "cpu sums: {}", chrome.cpu);
+        assert_eq!(chrome.mem, 370 << 20, "rss sums");
+        assert_eq!(chrome.pid_label, "3 pids");
+        assert_eq!(chrome.sub, "3 processes");
+        assert_eq!(groups[1].icon, "", "standalone row has no app icon");
+        assert_eq!(groups[1].pid_label, "2");
+        // name sort: chrome first (c < k), and the group's own title decides
+        let by_name = group_rows(&rows, SortCol::Name, false);
+        assert_eq!(by_name[0].title, "chrome");
+        assert_eq!(by_name[1].title, "kthreadd");
     }
 
     #[test]
@@ -416,6 +782,46 @@ mod tests {
         // pid 1 is root-owned and a service
         let init = rows.iter().find(|r| r.pid == 1).unwrap();
         assert_eq!(init.user, "root");
+    }
+
+    /// On a desktop box, running GUI apps must resolve to the icon name
+    /// their .desktop entry declares (firefox -> "firefox", …).
+    #[test]
+    fn live_scan_names_real_desktop_icons() {
+        let mut s = ProcScanner::new();
+        let rows = s.scan();
+        let named: Vec<(String, String)> = rows
+            .iter()
+            .filter(|r| !r.app_icon.is_empty())
+            .map(|r| (r.name.clone(), r.app_icon.clone()))
+            .collect();
+        // this dev box runs firefox, plasmashell, konsole and friends —
+        // the scan must name at least a handful of them
+        assert!(
+            named.len() >= 5,
+            "only {}/{rows} processes resolved an icon: {named:?}",
+            named.len(),
+            rows = rows.len()
+        );
+        for (name, icon) in &named {
+            assert!(!icon.is_empty(), "{name} resolved to an empty icon");
+            // icon names are basenames; absolute paths only ever come from
+            // an entry that declared one (snap/AppImage), and then the file
+            // must actually exist
+            if icon.starts_with('/') {
+                assert!(std::path::Path::new(icon).is_file(), "{name}: dead icon path {icon}");
+            } else {
+                assert!(!icon.contains('/'), "{name}: icon {icon} looks like a path");
+            }
+        }
+        // the apps this box is definitely running right now; snap entries
+        // may name the icon file absolutely, so match name or file stem
+        for want in ["plasmashell", "vscode", "google-chrome", "org.kde.dolphin"] {
+            let hit = named.iter().any(|(_, i)| {
+                i == want || i.rsplit('/').next().unwrap_or("").trim_end_matches(".png") == want
+            });
+            assert!(hit, "{want} did not resolve an icon: {named:?}");
+        }
     }
 
     #[test]

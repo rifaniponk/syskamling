@@ -2600,6 +2600,7 @@ dependencies = [
  "crossterm",
  "eframe",
  "egui",
+ "flate2",
  "http",
  "http-body",
  "http-body-util",
