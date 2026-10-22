@@ -4,6 +4,7 @@ mod gui;
 mod hw;
 mod hw_inventory;
 mod ports;
+mod strata;
 mod tui;
 
 use clap::{Parser, Subcommand};

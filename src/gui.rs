@@ -23,6 +23,7 @@ use crate::hw::{HwSample, Sampler};
 use crate::hw_inventory as hwinv;
 use crate::hw_inventory::{gpu_stats, gpu_stats_hwmon_only, GpuStat};
 use crate::ports::{self as portsmod, PortEntry};
+use crate::strata;
 
 /// One page of container logs held by the UI.
 const LOG_CAP: usize = 5_000;
@@ -42,6 +43,7 @@ enum Tab {
     Agents,
     Hardware,
     Ports,
+    Strata,
     Logs,
 }
 
@@ -88,6 +90,8 @@ enum Msg {
     AgentsScanned(Vec<AgentSession>),
     PortsScanned(Vec<PortEntry>),
     GpusScanned(Vec<GpuStat>),
+    StrataHealth(Result<strata::Health, String>),
+    StrataMetrics(Result<Box<strata::Metrics>, String>),
 }
 
 struct RefreshData {
@@ -206,6 +210,17 @@ struct Gui {
     port_filter: String,
     /// only sockets with a discoverable owning process
     ports_owned_only: bool,
+    // --- strata tab ---
+    strata_cfg: strata::StrataConfig,
+    /// endpoint text being typed; applied on Enter / focus loss
+    strata_endpoint_edit: String,
+    strata_key_edit: String,
+    strata_key_masked: bool,
+    strata_health: Option<strata::Health>,
+    strata_metrics: Option<Box<strata::Metrics>>,
+    strata_error: Option<String>,
+    /// recent request table: the last 12, or every one the server kept
+    strata_show_all: bool,
 }
 
 impl Gui {
@@ -263,6 +278,14 @@ impl Gui {
             selected_port: None,
             port_filter: String::new(),
             ports_owned_only: false,
+            strata_cfg: strata::StrataConfig::default(),
+            strata_endpoint_edit: String::new(),
+            strata_key_edit: String::new(),
+            strata_key_masked: true,
+            strata_health: None,
+            strata_metrics: None,
+            strata_error: None,
+            strata_show_all: false,
         }
     }
 
@@ -450,6 +473,11 @@ struct SysKamlingApp {
     port_scan_busy: Arc<Mutex<bool>>,
     last_gpu_stats: Instant,
     gpu_scan_busy: Arc<Mutex<bool>>,
+    // --- strata tab ---
+    /// HTTP client rebuilt whenever the endpoint/key change
+    strata_client: Arc<strata::HttpClient>,
+    last_strata_poll: Instant,
+    strata_poll_busy: Arc<Mutex<bool>>,
 }
 
 impl SysKamlingApp {
@@ -461,8 +489,13 @@ impl SysKamlingApp {
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         apply_theme(&cc.egui_ctx);
+        let strata_cfg = strata::load();
+        let mut gui = Gui::new();
+        gui.strata_cfg = strata_cfg.clone();
+        gui.strata_endpoint_edit = strata_cfg.endpoint.clone();
+        gui.strata_key_edit = strata_cfg.api_key.clone();
         let app = Self {
-            gui: Gui::new(),
+            gui,
             docker: Arc::new(Docker::new(socket)),
             tx,
             rx,
@@ -492,6 +525,9 @@ impl SysKamlingApp {
             port_scan_busy: Arc::new(Mutex::new(false)),
             last_gpu_stats: Instant::now() - Duration::from_secs(999),
             gpu_scan_busy: Arc::new(Mutex::new(false)),
+            strata_client: Arc::new(strata::HttpClient::new(&strata_cfg)),
+            last_strata_poll: Instant::now() - Duration::from_secs(999),
+            strata_poll_busy: Arc::new(Mutex::new(false)),
         };
         app
     }
@@ -520,6 +556,7 @@ const AMBER: Color32 = Color32::from_rgb(245, 183, 64);
 const RED: Color32 = Color32::from_rgb(244, 112, 112);
 const VIOLET: Color32 = Color32::from_rgb(167, 139, 250);
 const CYAN: Color32 = Color32::from_rgb(56, 205, 230);
+const ORANGE: Color32 = Color32::from_rgb(244, 140, 90);
 
 /// Heading face (a real bold font, not egui's color-only "strong").
 fn bold(size: f32) -> FontId {
@@ -678,6 +715,7 @@ impl eframe::App for SysKamlingApp {
             self.spawn_agent_scan();
             self.sample_hardware();
             self.spawn_port_scan();
+            self.spawn_strata_poll();
             // nvidia-smi (~50 ms) runs off the UI thread only when the
             // Hardware tab is visible; the result lands via the channel.
             if self.gui.tab == Tab::Hardware && self.last_gpu_stats.elapsed() >= Duration::from_secs_f64(self.refresh.max(1.0)) {
@@ -783,6 +821,33 @@ impl SysKamlingApp {
             let entries = portsmod::scan();
             *busy.lock().unwrap() = false;
             let _ = tx.send(Msg::PortsScanned(entries));
+        });
+    }
+
+    /// Strata monitor poll: one /health + /metrics round-trip per refresh,
+    /// only while the Strata tab is open, on the blocking pool so a slow or
+    /// unreachable server never touches the UI thread.
+    fn spawn_strata_poll(&mut self) {
+        if self.gui.tab != Tab::Strata || self.refresh <= 0.0 {
+            return;
+        }
+        if self.last_strata_poll.elapsed() < Duration::from_secs_f64(self.refresh.max(1.0)) {
+            return;
+        }
+        if *self.strata_poll_busy.lock().unwrap() {
+            return;
+        }
+        self.last_strata_poll = Instant::now();
+        *self.strata_poll_busy.lock().unwrap() = true;
+        let busy = Arc::clone(&self.strata_poll_busy);
+        let tx = self.tx.clone();
+        let client = Arc::clone(&self.strata_client);
+        self.rt.spawn(async move {
+            let h = client.health().await;
+            let _ = tx.send(Msg::StrataHealth(h));
+            let m = client.metrics().await;
+            *busy.lock().unwrap() = false;
+            let _ = tx.send(Msg::StrataMetrics(m.map(Box::new)));
         });
     }
 
@@ -1090,6 +1155,20 @@ impl SysKamlingApp {
                 // touching the sampler histories
                 g.gpus = gs;
             }
+            Msg::StrataHealth(res) => match res {
+                Ok(h) => {
+                    g.strata_health = Some(h);
+                    g.strata_error = None;
+                }
+                Err(e) => {
+                    g.strata_health = None;
+                    g.strata_error = Some(e);
+                }
+            },
+            Msg::StrataMetrics(res) => match res {
+                Ok(m) => g.strata_metrics = Some(m),
+                Err(e) => g.strata_error = Some(e),
+            },
         }
     }
 
@@ -1107,6 +1186,7 @@ impl SysKamlingApp {
             (Tab::Agents, "Agents", g.agents.len().to_string()),
             (Tab::Hardware, "Hardware", String::new()),
             (Tab::Ports, "Ports", g.ports.len().to_string()),
+            (Tab::Strata, "Strata", String::new()),
             (Tab::Logs, "Logs", String::new()),
         ];
         let version = g.info.as_ref().map(|i| i.server_version.clone()).unwrap_or_default();
@@ -1740,6 +1820,7 @@ impl SysKamlingApp {
                     Tab::Agents => self.agent_detail(ui),
                     Tab::Hardware => self.hardware_view(ui),
                     Tab::Ports => self.port_detail(ui),
+                    Tab::Strata => self.strata_view(ui),
                 }
             });
     }
@@ -3268,6 +3349,595 @@ impl SysKamlingApp {
         });
     }
 
+    // ------------------------------------------------------------------
+    // Strata: a remote Strata inference server's monitor, statistics only
+    // ------------------------------------------------------------------
+
+    fn strata_view(&mut self, ui: &mut Ui) {
+        // ---- settings: endpoint + API key, persisted on change ----
+        let mut save = false;
+        card(ui, |ui| {
+            card_title(ui, "Strata server", "endpoint and key are kept in ~/.config/syskamling/config.json");
+            ui.columns(2, |cols| {
+                let ep_changed = cols[0]
+                    .add(
+                        egui::TextEdit::singleline(&mut self.gui.strata_endpoint_edit)
+                            .hint_text("http://127.0.0.1:9191")
+                            .desired_width(cols[0].available_width() - 8.0),
+                    )
+                    .lost_focus()
+                        || cols[0].input(|i| i.key_pressed(egui::Key::Enter));
+                let mut key = std::mem::take(&mut self.gui.strata_key_edit);
+                let kr = cols[1].add(
+                    egui::TextEdit::singleline(&mut key)
+                        .hint_text("API key")
+                        .password(self.gui.strata_key_masked)
+                        .desired_width(cols[1].available_width() - 44.0),
+                );
+                let key_changed = kr.lost_focus() || cols[1].input(|i| i.key_pressed(egui::Key::Enter));
+                cols[1].with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .button(RichText::new(if self.gui.strata_key_masked { "show" } else { "hide" }).size(11.5).color(MUTED))
+                        .clicked()
+                    {
+                        self.gui.strata_key_masked = !self.gui.strata_key_masked;
+                    }
+                });
+                self.gui.strata_key_edit = key;
+                if ep_changed && !self.gui.strata_endpoint_edit.trim().is_empty() {
+                    self.gui.strata_cfg.endpoint = self.gui.strata_endpoint_edit.trim().to_string();
+                    save = true;
+                }
+                if key_changed {
+                    self.gui.strata_cfg.api_key = self.gui.strata_key_edit.trim().to_string();
+                    save = true;
+                }
+            });
+            ui.horizontal(|ui| {
+                if ui
+                    .button(RichText::new("⟳ Test & save").font(bold(12.5)).color(ACCENT))
+                    .clicked()
+                {
+                    self.gui.strata_cfg.endpoint = self.gui.strata_endpoint_edit.trim().to_string();
+                    self.gui.strata_cfg.api_key = self.gui.strata_key_edit.trim().to_string();
+                    save = true;
+                    self.last_strata_poll = Instant::now() - Duration::from_secs(999);
+                }
+                if let Some(h) = &self.gui.strata_health {
+                    let svc = if h.service.is_empty() { "strata" } else { h.service.as_str() };
+                    let model = if h.model.is_empty() { "no model" } else { &h.model };
+                    ui.label(
+                        RichText::new(format!(
+                            "● {svc} · {} · {} ctx · {} · {} · images {} · key {}",
+                            h.status,
+                            h.max_context,
+                            model,
+                            if h.loaded { "loaded" } else { "not loaded" },
+                            if h.images { "on" } else { "off" },
+                            if h.api_key { "set" } else { "none" }
+                        ))
+                        .size(12.0)
+                        .color(GREEN),
+                    );
+                } else if let Some(e) = &self.gui.strata_error {
+                    ui.label(RichText::new(format!("● {e}")).size(12.0).color(RED));
+                } else {
+                    ui.label(RichText::new("● connecting…").size(12.0).color(FAINT));
+                }
+            });
+        });
+        if save {
+            match strata::save(&self.gui.strata_cfg) {
+                Ok(()) => {
+                    self.strata_client = Arc::new(strata::HttpClient::new(&self.gui.strata_cfg));
+                    self.last_strata_poll = Instant::now() - Duration::from_secs(999);
+                    self.gui.status = "strata settings saved".into();
+                }
+                Err(e) => self.gui.strata_error = Some(format!("could not save settings: {e}")),
+            }
+        }
+        ui.add_space(12.0);
+
+        // ---- the statistics themselves ----
+        let Some(m) = self.gui.strata_metrics.clone() else {
+            if let Some(e) = &self.gui.strata_error {
+                empty_state(ui, "Server not reachable", e);
+            } else {
+                empty_state(ui, "Collecting…", "The first /metrics pull lands in a moment.");
+            }
+            return;
+        };
+        ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| self.strata_stats(ui, &m));
+    }
+
+    fn strata_stats(&mut self, ui: &mut Ui, m: &strata::Metrics) {
+        let last = m.requests.first();
+        // header: model state, like the web monitor's pill + progress bar
+        let (state, state_color, detail, frac) = match m.state.as_str() {
+            "reading" => {
+                let pct = match (m.prompt_read, m.prompt_total) {
+                    (Some(r), Some(t)) if t > 0 => format!(" · {}%", (100 * r) / t),
+                    _ => String::new(),
+                };
+                (
+                    format!("Reading prompt{pct}"),
+                    ACCENT,
+                    fmt_tokens(m.prompt_read.unwrap_or(0))
+                        + &m.prompt_total.map(|t| format!(" / {} tokens read", fmt_tokens(t))).unwrap_or_default(),
+                    m.prompt_total.filter(|t| *t > 0).and_then(|t| m.prompt_read.map(|r| r as f32 / t as f32)).unwrap_or(0.0),
+                )
+            }
+            "generating" => {
+                let phase = m.phase.clone().unwrap_or_else(|| "Generating".into());
+                (
+                    capitalize(&phase),
+                    GREEN,
+                    format!(
+                        "{} tokens · {} tok/s",
+                        fmt_tokens(m.generated.unwrap_or(0)),
+                        m.tok_s.map(|v| format!("{v:.1}")).unwrap_or_else(|| "–".into())
+                    ),
+                    m.max_tokens.filter(|t| *t > 0).and_then(|t| m.generated.map(|g| (g as f32 / t as f32).min(1.0))).unwrap_or(0.0),
+                )
+            }
+            _ => (
+                "Idle".into(),
+                FAINT,
+                last.map(|r| {
+                    format!(
+                        "last: {} tokens{}",
+                        fmt_tokens(r.output_tokens.unwrap_or(0)),
+                        r.decode_tok_s.map(|d| format!(" at {d:.1} tok/s")).unwrap_or_default()
+                    )
+                })
+                .unwrap_or_else(|| "Waiting for a request".into()),
+                0.0,
+            ),
+        };
+        let queued = if m.queued > 0 {
+            format!(" · {} queued", m.queued)
+        } else {
+            String::new()
+        };
+        page_header(ui, "Strata", "");
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("MODEL STATE").size(11.0).color(FAINT));
+            chip(ui, &format!("{state}{queued}"), state_color);
+            ui.label(RichText::new(detail).size(12.5).color(MUTED));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(
+                    RichText::new(format!(
+                        "{} · {} tok/s",
+                        if m.model.is_empty() { "strata" } else { &m.model },
+                        m.hist
+                            .get("tok_s")
+                            .and_then(|h| h.last())
+                            .map(|v| format!("{v:.1}"))
+                            .unwrap_or_else(|| "–".into())
+                    ))
+                    .size(12.5)
+                    .color(MUTED),
+                );
+            });
+        });
+        let (r, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 5.0), Sense::hover());
+        progress(ui.painter(), r, frac, state_color);
+        ui.add_space(14.0);
+
+        // ---- the eight tiles ----
+        let hist = |k: &str| -> Vec<f64> { m.hist.get(k).cloned().unwrap_or_default() };
+        let speed = strata::decode_now(m, last);
+        let prefill = strata::prefill_now(m, last);
+        let multi_gpu = m.gpu_name.as_deref().map(|n| n.contains(" + ")).unwrap_or(false);
+        let gpu_sub = if multi_gpu {
+            m.gpu_name.clone().unwrap_or_default()
+        } else {
+            m.gpu_name.clone().or_else(|| m.gpu_note.clone()).unwrap_or_default()
+        };
+        let gen = m.gpu_pcie_gen_max.or(m.gpu_pcie_gen);
+        let ttft = &m.ttft;
+        let kpis = vec![
+            Kpi {
+                label: "GPU SPEED",
+                value: speed.map(|v| format!("{v:.1}")).unwrap_or_else(|| "–".into()),
+                sub: if m.state == "generating" { "tok/s · decode now".into() } else { "tok/s · decode last request".into() },
+                color: ACCENT,
+                viz: Viz::Spark(hist("tok_s")),
+            },
+            Kpi {
+                label: "GPU PREFILL",
+                value: prefill.map(fmt_tokens_f).unwrap_or_else(|| "–".into()),
+                sub: if m.state == "idle" { "t/s · prefill last request".into() } else { "t/s · prefill this request".into() },
+                color: CYAN,
+                viz: Viz::Spark(hist("prefill_tok_s_mean")),
+            },
+            Kpi {
+                label: "GPU LOAD",
+                value: m.gpu_util.map(|v| format!("{v:.0}")).unwrap_or_else(|| "–".into()),
+                sub: format!("% · {}", gpu_sub),
+                color: GREEN,
+                viz: Viz::Spark(hist("gpu_util")),
+            },
+            Kpi {
+                label: "GPU VRAM",
+                value: m.gpu_mem_used.map(|v| format!("{:.1}", v / 1e9)).unwrap_or_else(|| "–".into()),
+                sub: m
+                    .gpu_mem_total
+                    .map(|t| format!("of {:.0} GB · {}", t / 1e9, fmt_tokens(m.expert_slots.unwrap_or(0))))
+                    .unwrap_or_else(|| "GB".into()),
+                color: VIOLET,
+                viz: Viz::Spark(hist("gpu_mem_used")),
+            },
+            Kpi {
+                label: "GPU TEMP",
+                value: m.gpu_temp.map(|v| format!("{v:.0}")).unwrap_or_else(|| "–".into()),
+                sub: "°C".into(),
+                color: temp_color(m.gpu_temp.unwrap_or(0.0), 85.0),
+                viz: Viz::Spark(hist("gpu_temp")),
+            },
+            Kpi {
+                label: "GPU POWER",
+                value: m.gpu_power.map(|v| format!("{v:.0}")).unwrap_or_else(|| "–".into()),
+                sub: m
+                    .gpu_power_limit
+                    .map(|l| format!("W · of {:.0} W limit", l))
+                    .unwrap_or_else(|| "W".into()),
+                color: AMBER,
+                viz: Viz::Spark(hist("gpu_power")),
+            },
+            Kpi {
+                label: "GPU PCIe",
+                value: gen.map(|g| format!("Gen{g}")).unwrap_or_else(|| "–".into()),
+                sub: format!(
+                    "{} · to GPU {}",
+                    m.gpu_pcie_width.map(|w| format!("x{w}")).unwrap_or_else(|| "x?".into()),
+                    m.gpu_pcie_rx_mb.map(|v| format!("{v:.1} MB/s")).unwrap_or_else(|| "–".into())
+                ),
+                color: ORANGE,
+                viz: Viz::Spark(hist("gpu_pcie_rx_mb")),
+            },
+            Kpi {
+                label: "CPU",
+                value: m.cpu.map(|v| format!("{v:.0}")).unwrap_or_else(|| "–".into()),
+                sub: format!(
+                    "% · {}",
+                    match (m.cores, m.threads) {
+                        (Some(c), Some(t)) => format!("{} cores · {} threads", c, t),
+                        (None, Some(t)) => format!("{t} threads"),
+                        _ => m.cpu_name.clone().unwrap_or_default(),
+                    }
+                ),
+                color: ACCENT,
+                viz: Viz::Spark(hist("cpu")),
+            },
+            Kpi {
+                label: "DISK READ",
+                value: m.disk_read_mb.map(|v| if v >= 1000.0 { format!("{:.2}", v / 1024.0) } else { format!("{v:.1}") }).unwrap_or_else(|| "–".into()),
+                sub: m
+                    .disk_write_mb
+                    .map(|w| format!("{} · write {:.1} MB/s", if m.disk_read_mb.unwrap_or(0.0) >= 1000.0 { "GB/s" } else { "MB/s" }, w))
+                    .unwrap_or_else(|| "MB/s".into()),
+                color: GREEN,
+                viz: Viz::Spark(hist("disk_read_mb")),
+            },
+            Kpi {
+                label: "FIRST TOKEN",
+                value: ttft.p50.map(|v| format!("{v:.2}")).unwrap_or_else(|| "–".into()),
+                sub: if ttft.count > 0 {
+                    format!(
+                        "s · p90 {:.2} s · {} requests{}",
+                        ttft.p90.unwrap_or(0.0),
+                        ttft.count,
+                        m.itl.p50.map(|v| format!(" · {:.0} ms between tokens", v * 1000.0)).unwrap_or_default()
+                    )
+                } else {
+                    "s · waiting for a request".into()
+                },
+                color: VIOLET,
+                viz: Viz::Spark(m.requests.iter().rev().filter_map(|r| r.hit_rate.map(|h| h * 100.0)).collect()),
+            },
+            Kpi {
+                label: "BATCH SLOTS",
+                value: if m.parallel > 0 {
+                    let busy = if m.running > 0 { m.running } else if m.state != "idle" { 1 } else { 0 };
+                    format!("{busy}")
+                } else {
+                    (if m.queued > 0 { m.queued } else if m.state != "idle" { 1 } else { 0 }).to_string()
+                },
+                sub: if m.parallel > 0 {
+                    let mut parts = vec![format!("/ {} slots", m.parallel)];
+                    if m.waiting > 0 {
+                        parts.push(format!("{} waiting", m.waiting));
+                    }
+                    if m.queued > 0 {
+                        parts.push(format!("{} queued", m.queued));
+                    }
+                    if m.batch_groups > 1 {
+                        parts.push(format!("{} groups", m.batch_groups));
+                    }
+                    parts.join(" · ")
+                } else {
+                    "running · single slot · --batch runs more".into()
+                },
+                color: CYAN,
+                viz: Viz::None,
+            },
+        ];
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.x = 14.0;
+            for (n, row) in kpis.chunks(4).enumerate() {
+                if n > 0 {
+                    ui.add_space(6.0);
+                }
+                ui.columns(4, |cols| {
+                    for (col, k) in cols.iter_mut().zip(row) {
+                        kpi_card(col, k);
+                    }
+                });
+            }
+        });
+        ui.add_space(14.0);
+
+        // ---- context fill + engine facts ----
+        let used = strata::context_used(m, last);
+        let frac_ctx = if m.max_context > 0 {
+            ((used as f64 / m.max_context as f64).min(1.0)) as f32
+        } else {
+            0.0
+        };
+        ui.columns(2, |cols| {
+            card(&mut cols[0], |ui| {
+                card_title(ui, "Context fill", "");
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(Vec2::splat(72.0), Sense::hover());
+                    ring(ui.painter(), r, frac_ctx, ACCENT);
+                    ui.label(RichText::new(format!("{}%", (frac_ctx * 100.0).round())).font(bold(20.0)).color(TEXT));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new(format!("{} / {}", fmt_tokens(used), fmt_tokens(m.max_context)))
+                                .size(12.5)
+                                .color(MUTED),
+                        );
+                    });
+                });
+                ui.add_space(4.0);
+                let cache_bytes = m.expert_cache_mib.unwrap_or(0) * 1_048_576;
+                fact_row(ui, "Experts in VRAM", &match (m.expert_slots, m.gpu_mem_total) {
+                    (Some(s), Some(_)) => format!(
+                        "{} · {}",
+                        fmt_tokens(s),
+                        human_size(cache_bytes)
+                    ),
+                    (Some(s), None) => fmt_tokens(s),
+                    _ => "–".into(),
+                }, cache_bytes as f64 / m.gpu_mem_total.unwrap_or(0.0).max(1.0));
+                fact_row(ui, "System RAM", &match (m.ram_used, m.ram_total) {
+                    (Some(u), Some(t)) => format!("{} / {:.0} GB", format!("{:.1}", u / 1e9), t / 1e9),
+                    _ => "–".into(),
+                }, m.ram_used.unwrap_or(0.0) / m.ram_total.unwrap_or(1.0).max(1.0));
+                fact_row(ui, "GPU temperature", &m.gpu_temp.map(|t| format!("{t:.0} °C")).unwrap_or_else(|| "–".into()), m.gpu_temp.unwrap_or(0.0) / 100.0);
+            });
+            card(&mut cols[1], |ui| {
+                card_title(ui, "Engine", "");
+                let kv = [
+                    ("Model", m.model.clone()),
+                    ("Context", fmt_tokens(m.max_context)),
+                    ("Images", if m.images { "on" } else { "off" }.into()),
+                    (
+                        "CPU",
+                        m.cpu_name.clone().unwrap_or_else(|| match (m.cores, m.threads) {
+                            (Some(c), Some(t)) => format!("{c} cores · {t} threads"),
+                            _ => String::new(),
+                        }),
+                    ),
+                    ("GPU", m.gpu_name.clone().unwrap_or_else(|| "–".into())),
+                ];
+                for (k, v) in kv {
+                    if !v.is_empty() {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(k).size(12.5).color(MUTED));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(RichText::new(v).size(12.5).color(TEXT));
+                            });
+                        });
+                    }
+                }
+            });
+        });
+        ui.add_space(14.0);
+
+        // ---- recent requests ----
+        let show_all = self.gui.strata_show_all;
+        card(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Recent requests").font(bold(14.5)).color(TEXT));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if m.requests_kept > 12 {
+                        if ui
+                            .button(RichText::new(if show_all { "show fewer".to_string() } else { format!("show all ({})", m.requests_kept) }).size(11.5).color(ACCENT))
+                            .clicked()
+                        {
+                            self.gui.strata_show_all = !show_all;
+                        }
+                    }
+                });
+            });
+            ui.add_space(4.0);
+            if m.requests.is_empty() {
+                ui.label(RichText::new("No requests yet").size(12.5).color(FAINT));
+            } else {
+                let cols: [(&str, f32, bool); 9] = [
+                    ("TIME", 74.0, false),
+                    ("STATUS", 88.0, false),
+                    ("PROMPT", 64.0, true),
+                    ("REUSED", 64.0, true),
+                    ("OUTPUT", 64.0, true),
+                    ("PREFILL t/s", 84.0, true),
+                    ("DECODE t/s", 84.0, true),
+                    ("HIT RATE", 96.0, true),
+                    ("DURATION", 70.0, true),
+                ];
+                let rows: Vec<&strata::RequestRow> = if show_all {
+                    m.requests.iter().collect()
+                } else {
+                    m.requests.iter().take(12).collect()
+                };
+                let line = |ui: &mut Ui, cells: Vec<(String, Color32, bool)>| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        for ((_, w, right), (text, color, mono)) in cols.iter().zip(cells) {
+                            let cell = Rect::from_min_size(ui.cursor().min, Vec2::new(*w, 18.0));
+                            ui.allocate_exact_size(Vec2::new(*w, 18.0), Sense::hover());
+                            let align = if *right { egui::Align2::RIGHT_CENTER } else { egui::Align2::LEFT_CENTER };
+                            let font = if mono { FontId::monospace(11.5) } else { FontId::proportional(11.5) };
+                            ui.painter().text(
+                                Pos2::new(if *right { cell.right() - 6.0 } else { cell.left() }, cell.center().y),
+                                align,
+                                text,
+                                font,
+                                color,
+                            );
+                        }
+                    });
+                };
+                line(ui, cols.iter().map(|(h, _, _)| (h.to_string(), FAINT, false)).collect());
+                ui.painter().line_segment(
+                    [
+                        Pos2::new(ui.cursor().min.x, ui.cursor().min.y),
+                        Pos2::new(ui.max_rect().right() - 18.0, ui.cursor().min.y),
+                    ],
+                    Stroke::new(1.0_f32, BORDER),
+                );
+                for r in rows {
+                    let t = epoch_of(r.time);
+                    let (h, mnt, s) = ((t / 3600) % 24, (t / 60) % 60, t % 60);
+                    let pre = strata::prefill_rate(r);
+                    let hit = r
+                        .hit_rate
+                        .map(|h| format!("{:.1}%", h * 100.0) + &r.pcie_share.map(|p| format!(" +{:.1}% PCIe", p * 100.0)).unwrap_or_default())
+                        .unwrap_or_else(|| "–".into());
+                    line(
+                        ui,
+                        vec![
+                            (format!("{h:02}:{mnt:02}:{s:02}"), MUTED, true),
+                            (finish_label(&r.finish), finish_color(&r.finish), false),
+                            (r.prompt_tokens.map(fmt_tokens).unwrap_or_else(|| "–".into()), TEXT, true),
+                            (r.reused.map(fmt_tokens).unwrap_or_else(|| "0".into()), MUTED, true),
+                            (r.output_tokens.map(fmt_tokens).unwrap_or_else(|| "–".into()), TEXT, true),
+                            (pre.map(|v| fmt_tokens_f(v)).unwrap_or_else(|| "–".into()), MUTED, true),
+                            (r.decode_tok_s.map(|v| format!("{v:.1}")).unwrap_or_else(|| "–".into()), MUTED, true),
+                            (hit, MUTED, true),
+                            (r.duration_s.map(|v| format!("{v:.1} s")).unwrap_or_else(|| "–".into()), MUTED, true),
+                        ],
+                    );
+                }
+            }
+            if m.tot_requests > 0 {
+                let read = m.tot_prompt_tokens - m.tot_reused;
+                let p_speed = if m.tot_prompt_ms > 0.0 && read > 0 {
+                    format!(" at {} tok/s", fmt_tokens_f(read as f64 / (m.tot_prompt_ms / 1000.0)))
+                } else {
+                    String::new()
+                };
+                let o_speed = if m.tot_decode_ms > 0.0 && m.tot_output_tokens > 0 {
+                    format!(
+                        " at {:.1} tok/s",
+                        m.tot_output_tokens as f64 / (m.tot_decode_ms / 1000.0)
+                    )
+                } else {
+                    String::new()
+                };
+                let since = m
+                    .totals_since
+                    .map(|t| {
+                        let t = epoch_of(t);
+                        let (h, mnt, _s) = ((t / 3600) % 24, (t / 60) % 60, t % 60);
+                        format!("{h:02}:{mnt:02}")
+                    })
+                    .unwrap_or_else(|| "start".into());
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(format!(
+                        "Since {since}: {} requests · {} prompt tokens read{p_speed} ({} reused) · {} written{o_speed}",
+                        fmt_tokens(m.tot_requests),
+                        fmt_tokens(read),
+                        fmt_tokens(m.tot_reused),
+                        fmt_tokens(m.tot_output_tokens),
+                    ))
+                    .size(12.0)
+                    .color(FAINT),
+                );
+            }
+        });
+        ui.add_space(14.0);
+
+        // ---- conversation cache ----
+        if let Some(c) = &m.conv {
+            card(ui, |ui| {
+                card_title(
+                    ui,
+                    "Conversation cache",
+                    &format!(
+                        "{} of {} requests reused part of their prompt",
+                        fmt_tokens(c.requests_reused),
+                        fmt_tokens(c.requests)
+                    ),
+                );
+                if c.enabled {
+                    bar_row(
+                        ui,
+                        "Slots",
+                        c.parked.unwrap_or(0) as u64,
+                        c.slots.unwrap_or(0) as u64,
+                        ACCENT,
+                    );
+                    if let (Some(b), Some(bud)) = (c.bytes, c.budget_mib.map(|mib| mib * 1_048_576)) {
+                        bar_row(ui, "Memory", b as u64, bud as u64, CYAN);
+                    }
+                    let switches = format!(
+                        "{} parked · {} restored{}",
+                        fmt_tokens(c.parks.unwrap_or(0)),
+                        fmt_tokens(c.restores.unwrap_or(0)),
+                        c.evictions.filter(|e| *e > 0).map(|e| format!(" · {} evicted", fmt_tokens(e))).unwrap_or_default()
+                    );
+                    ui.label(RichText::new(switches).size(12.0).color(MUTED));
+                }
+                if c.last_prompt.is_some() {
+                    ui.label(
+                        RichText::new(format!(
+                            "Last request: {} of {} prompt tokens reused",
+                            fmt_tokens(c.last_reused.unwrap_or(0)),
+                            fmt_tokens(c.last_prompt.unwrap_or(0))
+                        ))
+                        .size(12.0)
+                        .color(MUTED),
+                    );
+                }
+                let share = if c.prompt_tokens > 0 {
+                    format!(" ({:.1}% of all prompt tokens)", 100.0 * c.reused_tokens as f64 / c.prompt_tokens as f64)
+                } else {
+                    String::new()
+                };
+                ui.label(
+                    RichText::new(format!("Reused since start: {} tokens{share}", fmt_tokens(c.reused_tokens)))
+                        .size(12.0)
+                        .color(MUTED),
+                );
+                ui.label(
+                    RichText::new(if c.enabled {
+                        "A request that continues a parked conversation gets its state back instead of reading it again; the oldest goes when the slots or the memory are full."
+                    } else {
+                        "The engine keeps the last conversation's state, so a follow-up reads only what is new. To keep several conversations, add \"--conversation-cache-mib\" to the run config's args."
+                    })
+                    .size(11.5)
+                    .color(FAINT),
+                );
+            });
+        }
+    }
+
     fn volume_detail(&mut self, ui: &mut Ui) {
         let Some(name) = self.gui.selected_volume.clone() else {
             empty_state(ui, "No volume selected", "Pick a volume on the left to see its details.");
@@ -3566,6 +4236,97 @@ impl SysKamlingApp {
 // ---------------------------------------------------------------------------
 // Small widgets
 // ---------------------------------------------------------------------------
+
+/// Circular gauge ring (the Strata context-fill dial).
+fn ring(p: &egui::Painter, r: Rect, frac: f32, color: Color32) {
+    let stroke = Stroke::new(6.0_f32, SURFACE_HI);
+    p.circle(r.center(), r.width() / 2.0 - 3.0, Color32::TRANSPARENT, stroke);
+    if frac > 0.001 {
+        let frac = frac.clamp(0.0, 1.0);
+        let mut pts = Vec::new();
+        let steps = (64.0 * frac).max(2.0) as usize;
+        let rad = r.width() / 2.0 - 3.0;
+        for i in 0..=steps {
+            let a = std::f32::consts::TAU * (i as f32 / steps as f32) - std::f32::consts::FRAC_PI_2;
+            pts.push(Pos2::new(r.center().x + rad * a.cos(), r.center().y + rad * a.sin()));
+        }
+        p.add(egui::Shape::line(pts, Stroke::new(6.0_f32, color)));
+    }
+}
+
+/// A "label …… value" row with a thin progress bar under it.
+fn fact_row(ui: &mut Ui, label: &str, value: &str, frac: f64) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(label).size(12.5).color(MUTED));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(RichText::new(value).size(12.5).color(TEXT));
+        });
+    });
+    let (r, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 4.0), Sense::hover());
+    progress(ui.painter(), r, frac as f32, ACCENT);
+}
+
+/// Thousands-grouped integer, like the web monitor's kfmt.
+fn fmt_tokens(n: i64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Thousands-grouped rate, e.g. 117,7 t/s stays "117.7" but 1177 -> "1,177".
+fn fmt_tokens_f(v: f64) -> String {
+    if v >= 100.0 {
+        fmt_tokens(v.round() as i64)
+    } else {
+        format!("{v:.1}")
+    }
+}
+
+/// Epoch seconds to local-ish wall clock (same shift as now_string).
+fn epoch_of(t: f64) -> i64 {
+    t as i64
+}
+
+fn finish_label(finish: &str) -> String {
+    match finish {
+        "stop" => "Done",
+        "length" => "Max tokens",
+        "cancel" => "Stopped",
+        "disconnect" => "Closed",
+        "error" => "Error",
+        "" => "–",
+        other => other,
+    }
+    .to_string()
+}
+
+fn finish_color(finish: &str) -> Color32 {
+    match finish {
+        "stop" => GREEN,
+        "length" => ACCENT,
+        "cancel" | "disconnect" => AMBER,
+        "error" => RED,
+        _ => FAINT,
+    }
+}
+
+/// Warm color for a temperature: green under 60% of `hot`, amber to 85%,
+/// red beyond.
+fn temp_color(t: f64, hot: f64) -> Color32 {
+    if t >= hot {
+        RED
+    } else if t >= hot * 0.7 {
+        AMBER
+    } else {
+        GREEN
+    }
+}
 
 /// Dashboard / detail metric tile.
 struct Kpi {
@@ -3877,6 +4638,18 @@ fn nav_icon(p: &egui::Painter, tab: Tab, r: Rect, c: Color32) {
                 p.line_segment([Pos2::new(x, b.top()), Pos2::new(x, r.top() + 1.0)], s);
             }
             p.line_segment([Pos2::new(b.center().x, b.bottom()), Pos2::new(b.center().x, r.bottom() + 1.5)], s);
+        }
+        Tab::Strata => {
+            // a chip mark: outline square, filled core, pins like the brand icon
+            let b = r.shrink2(Vec2::new(3.0, 3.0));
+            p.rect_stroke(b, 3.5, s, inside);
+            let core = b.shrink2(Vec2::new(b.width() * 0.28, b.height() * 0.28));
+            p.rect_filled(core, 2.0, c);
+            let pin = 2.0_f32;
+            p.line_segment([Pos2::new(b.center().x, b.top()), Pos2::new(b.center().x, b.top() - pin)], s);
+            p.line_segment([Pos2::new(b.center().x, b.bottom()), Pos2::new(b.center().x, b.bottom() + pin)], s);
+            p.line_segment([Pos2::new(b.left(), b.center().y), Pos2::new(b.left() - pin, b.center().y)], s);
+            p.line_segment([Pos2::new(b.right(), b.center().y), Pos2::new(b.right() + pin, b.center().y)], s);
         }
     }
 }

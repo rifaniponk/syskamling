@@ -22,6 +22,7 @@ use crate::docker::{ContainerSummary, Docker, DockerError, LogLine, StreamKind};
 use crate::hw::{HwSample, Sampler};
 use crate::hw_inventory::{self as hw_inventory, GpuStat};
 use crate::ports::{self as portsmod, PortEntry};
+use crate::strata::{self, Metrics};
 
 pub fn run(
     rt: tokio::runtime::Runtime,
@@ -51,6 +52,7 @@ enum Tab {
     Agents,
     Hardware,
     Ports,
+    Strata,
     Logs,
 }
 
@@ -62,7 +64,8 @@ impl Tab {
             Tab::Volumes => Tab::Agents,
             Tab::Agents => Tab::Hardware,
             Tab::Hardware => Tab::Ports,
-            Tab::Ports => Tab::Logs,
+            Tab::Ports => Tab::Strata,
+            Tab::Strata => Tab::Logs,
             Tab::Logs => Tab::Containers,
         }
     }
@@ -74,7 +77,8 @@ impl Tab {
             Tab::Agents => Tab::Volumes,
             Tab::Hardware => Tab::Agents,
             Tab::Ports => Tab::Hardware,
-            Tab::Logs => Tab::Ports,
+            Tab::Strata => Tab::Ports,
+            Tab::Logs => Tab::Strata,
         }
     }
     fn label(self) -> &'static str {
@@ -85,6 +89,7 @@ impl Tab {
             Tab::Agents => " Agents ",
             Tab::Hardware => " Hardware ",
             Tab::Ports => " Ports ",
+            Tab::Strata => " Strata ",
             Tab::Logs => " Logs ",
         }
     }
@@ -123,6 +128,8 @@ enum Msg {
     ActionDone(Result<(&'static str, String), String>),
     AgentsScanned(Vec<AgentSession>),
     PortsScanned(Vec<PortEntry>),
+    StrataHealth(Result<strata::Health, String>),
+    StrataMetrics(Result<Box<Metrics>, String>),
 }
 
 struct RefreshData {
@@ -148,6 +155,13 @@ struct App {
     gpus: Vec<GpuStat>,
     ports: Vec<PortEntry>,
     ports_state: ListState,
+    // strata screen: settings live in the shared config file; the TUI is
+    // read-only and points at it when the server is not configured
+    strata_cfg: strata::StrataConfig,
+    strata_health: Option<strata::Health>,
+    strata_metrics: Option<Box<Metrics>>,
+    strata_error: Option<String>,
+    strata_show_all: bool,
     logs: Vec<LogLine>,
     logs_follow: bool,
     logs_scroll: usize,
@@ -185,6 +199,11 @@ impl App {
             gpus: Vec::new(),
             ports: Vec::new(),
             ports_state: ListState::default(),
+            strata_cfg: strata::StrataConfig::default(),
+            strata_health: None,
+            strata_metrics: None,
+            strata_error: None,
+            strata_show_all: false,
             logs: Vec::new(),
             logs_follow: true,
             logs_scroll: 0,
@@ -341,6 +360,11 @@ async fn run_async(
     let mut last_agent_scan = Instant::now() - Duration::from_secs(999);
     let mut last_port_scan = Instant::now() - Duration::from_secs(999);
     let mut last_hw_sample = Instant::now() - Duration::from_secs(999);
+    let strata_cfg = strata::load();
+    app.strata_cfg = strata_cfg.clone();
+    let strata_client = Arc::new(strata::HttpClient::new(&strata_cfg));
+    let mut last_strata_poll = Instant::now() - Duration::from_secs(999);
+    let strata_busy = Arc::new(std::sync::Mutex::new(false));
     let mut sampler = Sampler::default();
     let mut tick = tokio::time::interval(Duration::from_millis(300));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -420,6 +444,27 @@ async fn run_async(
                 app.gpus = hw_inventory::gpu_stats_hwmon_only();
             }
             app.hw = Some(s);
+        }
+
+        // Strata monitor: /health + /metrics once per refresh, only while
+        // the Strata tab is on screen; the async task never blocks the loop.
+        if refresh > 0.0
+            && app.tab == Tab::Strata
+            && last_strata_poll.elapsed() >= Duration::from_secs_f64(refresh.max(1.0))
+            && !*strata_busy.lock().unwrap()
+        {
+            last_strata_poll = Instant::now();
+            *strata_busy.lock().unwrap() = true;
+            let busy = Arc::clone(&strata_busy);
+            let client = Arc::clone(&strata_client);
+            let tx4 = tx.clone();
+            rt.spawn(async move {
+                let h = client.health().await;
+                let _ = tx4.send(Msg::StrataHealth(h));
+                let m = client.metrics().await;
+                *busy.lock().unwrap() = false;
+                let _ = tx4.send(Msg::StrataMetrics(m.map(Box::new)));
+            });
         }
 
         // Wait for either a key or a tick/message.
@@ -541,6 +586,20 @@ fn apply_msg(app: &mut App, m: Msg) {
                 app.ports_state.select(Some(0));
             }
         }
+        Msg::StrataHealth(res) => match res {
+            Ok(h) => {
+                app.strata_health = Some(h);
+                app.strata_error = None;
+            }
+            Err(e) => {
+                app.strata_health = None;
+                app.strata_error = Some(e);
+            }
+        },
+        Msg::StrataMetrics(res) => match res {
+            Ok(m) => app.strata_metrics = Some(m),
+            Err(e) => app.strata_error = Some(e),
+        },
     }
 }
 
@@ -807,7 +866,9 @@ fn handle_key(
         KeyCode::Char('4') => app.tab = Tab::Agents,
         KeyCode::Char('5') => app.tab = Tab::Hardware,
         KeyCode::Char('6') => app.tab = Tab::Ports,
-        KeyCode::Char('7') => app.tab = Tab::Logs,
+        KeyCode::Char('7') => app.tab = Tab::Strata,
+        KeyCode::Char('8') => app.tab = Tab::Logs,
+        KeyCode::Char('a') if app.tab == Tab::Strata => app.strata_show_all = !app.strata_show_all,
         KeyCode::Char('/') => {
             app.filtering = true;
             app.filter.clear();
@@ -822,7 +883,7 @@ fn handle_key(
             Tab::Volumes => app.move_volumes(1),
             Tab::Agents => app.move_agents(1),
             Tab::Ports => app.move_ports(1),
-            Tab::Hardware => {}
+            Tab::Hardware | Tab::Strata => {}
             Tab::Logs => {
                 app.logs_follow = false;
                 app.logs_scroll = (app.logs_scroll + 1).min(app.logs.len());
@@ -834,7 +895,7 @@ fn handle_key(
             Tab::Volumes => app.move_volumes(-1),
             Tab::Agents => app.move_agents(-1),
             Tab::Ports => app.move_ports(-1),
-            Tab::Hardware => {}
+            Tab::Hardware | Tab::Strata => {}
             Tab::Logs => {
                 app.logs_follow = false;
                 app.logs_scroll = app.logs_scroll.saturating_sub(1);
@@ -850,7 +911,7 @@ fn handle_key(
             Tab::Volumes => app.move_volumes(20),
             Tab::Agents => app.move_agents(20),
             Tab::Ports => app.move_ports(20),
-            Tab::Hardware => {}
+            Tab::Hardware | Tab::Strata => {}
         },
         KeyCode::PageUp => match app.tab {
             Tab::Logs => {
@@ -862,7 +923,7 @@ fn handle_key(
             Tab::Volumes => app.move_volumes(-20),
             Tab::Agents => app.move_agents(-20),
             Tab::Ports => app.move_ports(-20),
-            Tab::Hardware => {}
+            Tab::Hardware | Tab::Strata => {}
         },
         KeyCode::Char('g') if app.tab == Tab::Logs => {
             app.logs_follow = false;
@@ -950,6 +1011,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         Tab::Agents,
         Tab::Hardware,
         Tab::Ports,
+        Tab::Strata,
         Tab::Logs,
     ]
     .iter()
@@ -1004,6 +1066,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         Tab::Agents => render_agents(f, app, chunks[1]),
         Tab::Hardware => render_hardware(f, app, chunks[1]),
         Tab::Ports => render_ports(f, app, chunks[1]),
+        Tab::Strata => render_strata(f, app, chunks[1]),
         Tab::Logs => render_logs(f, app, chunks[1]),
     }
 }
@@ -1446,6 +1509,315 @@ fn render_logs(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
 
     let para = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title));
     f.render_widget(para, area);
+}
+
+fn render_strata(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
+    if app.strata_cfg.api_key.trim().is_empty() && app.strata_health.is_none() && app.strata_error.is_none() {
+        let msg = format!(
+            "Strata is not configured yet.\n\n\
+             Point SysKamling at a Strata inference server:\n\
+             1. open the Strata tab in the GUI and fill in base URL + API key, or\n\
+             2. write ~/.config/syskamling/config.json by hand:\n\n\
+             {{\n  \"strata\": {{\n    \"endpoint\": \"http://127.0.0.1:9191\",\n    \"api_key\": \"sk-...\"\n  }}\n}}\n\n\
+             endpoint in use: {} — press r to retry.",
+            app.strata_cfg.base()
+        );
+        f.render_widget(
+            Paragraph::new(msg).block(Block::default().borders(Borders::ALL).title(" Strata ")),
+            area,
+        );
+        return;
+    }
+    // the poller only runs on this screen, so nudge it right away instead of
+    // waiting out the refresh interval after every tab switch
+    if app.strata_metrics.is_none() && app.strata_error.is_none() {
+        let body = format!("contacting {}…", app.strata_cfg.base());
+        f.render_widget(
+            Paragraph::new(body).block(Block::default().borders(Borders::ALL).title(" Strata ")),
+            area,
+        );
+        return;
+    }
+
+    let top = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(11), Constraint::Min(4)])
+        .split(area);
+
+    let m = app.strata_metrics.as_ref().unwrap();
+    let last = m.requests.first();
+
+    // model state line, mirroring the web monitor's pill
+    let (state, state_color, detail) = match m.state.as_str() {
+        "reading" => (
+            format!(
+                "Reading prompt{}",
+                match (m.prompt_read, m.prompt_total) {
+                    (Some(r), Some(t)) if t > 0 => format!(" · {}%", (100 * r) / t),
+                    _ => String::new(),
+                }
+            ),
+            Color::Cyan,
+            format!(
+                "{} read · {} tok/s prefill",
+                fmt_tokens_tui_i(m.prompt_read.unwrap_or(0)),
+                strata::prefill_now(m, last).map(|v| format!("{v:.0}")).unwrap_or_else(|| "—".into())
+            ),
+        ),
+        "generating" => (
+            m.phase.clone().unwrap_or_else(|| "Generating".into()),
+            Color::Green,
+            format!(
+                "{} tokens · {} tok/s",
+                fmt_tokens_tui_i(m.generated.unwrap_or(0)),
+                m.tok_s.map(|v| format!("{v:.1}")).unwrap_or_else(|| "—".into())
+            ),
+        ),
+        _ => (
+            "Idle".into(),
+            Color::DarkGray,
+            last.map(|r| {
+                format!(
+                    "last: {} tokens{}",
+                    fmt_tokens_tui_i(r.output_tokens.unwrap_or(0)),
+                    r.decode_tok_s.map(|d| format!(" at {d:.1} tok/s")).unwrap_or_default()
+                )
+            })
+            .unwrap_or_else(|| "waiting for a request".into()),
+        ),
+    };
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled("● ", Style::default().fg(state_color).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("{state}{}", if m.queued > 0 { format!(" · {} queued", m.queued) } else { String::new() }),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!("  {detail}")),
+    ]));
+
+    let hist = |k: &str| -> Vec<f64> { m.hist.get(k).cloned().unwrap_or_default() };
+    let kpi = |label: &str, val: String, sub: String, series: &[f64]| -> Vec<Span> {
+        vec![
+            Span::styled(format!("{label:<13}"), Style::default().fg(Color::DarkGray)),
+            Span::styled(val, Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(format!(" {sub:<24}"), Style::default().fg(Color::DarkGray)),
+            Span::raw(sparkline(series, 12)),
+        ]
+    };
+    lines.push(Line::from({ let mut v = kpi(
+            "GPU speed",
+            strata::decode_now(m, last).map(|v| format!("{v:.1} tok/s")).unwrap_or_else(|| "—".into()),
+            "decode".into(),
+            &hist("tok_s"),
+        );
+        let kpi2 = kpi(
+            "GPU prefill",
+            strata::prefill_now(m, last).map(|v| format!("{:.0} t/s", v)).unwrap_or_else(|| "—".into()),
+            format!("{} slots", m.parallel),
+            &hist("prefill_tok_s_mean"),
+        );
+        v.extend(kpi2);
+        v
+    }));
+    lines.push(Line::from({ let mut v = kpi(
+            "GPU load",
+            m.gpu_util.map(|v| format!("{v:.0}%")).unwrap_or_else(|| "—".into()),
+            m.gpu_name.clone().unwrap_or_default(),
+            &hist("gpu_util"),
+        );
+        let kpi2 = kpi(
+            "VRAM",
+            m.gpu_mem_used.map(|v| format!("{:.1} GB", v / 1e9)).unwrap_or_else(|| "—".into()),
+            m.gpu_mem_total
+                .map(|t| format!("of {:.0} GB", t / 1e9))
+                .unwrap_or_else(|| "of ?".into()),
+            &hist("gpu_mem_used"),
+        );
+        v.extend(kpi2);
+        v
+    }));
+    lines.push(Line::from({ let mut v = kpi(
+            "GPU temp",
+            m.gpu_temp.map(|v| format!("{v:.0} °C")).unwrap_or_else(|| "—".into()),
+            m.gpu_power
+                .map(|p| format!("{} W of {:.0} W", p, m.gpu_power_limit.unwrap_or(0.0)))
+                .unwrap_or_else(|| "power ?".into()),
+            &hist("gpu_temp"),
+        );
+        let kpi2 = kpi(
+            "PCIe",
+            m.gpu_pcie_gen_max.or(m.gpu_pcie_gen).map(|g| format!("Gen{g}")).unwrap_or_else(|| "—".into()),
+            format!(
+                "x{} · {}",
+                m.gpu_pcie_width.unwrap_or(0),
+                m.gpu_pcie_rx_mb.map(|v| format!("{v:.1} MB/s")).unwrap_or_else(|| "—".into())
+            ),
+            &hist("gpu_pcie_rx_mb"),
+        );
+        v.extend(kpi2);
+        v
+    }));
+    lines.push(Line::from({ let mut v = kpi(
+            "Host",
+            m.cpu.map(|v| format!("CPU {:.0}%", v)).unwrap_or_else(|| "—".into()),
+            format!(
+                "disk read {}",
+                m.disk_read_mb.map(|v| format!("{v:.1} MB/s")).unwrap_or_else(|| "—".into())
+            ),
+            &hist("cpu"),
+        );
+        let kpi2 = kpi(
+            "First token",
+            m.ttft.p50.map(|v| format!("{v:.2} s")).unwrap_or_else(|| "—".into()),
+            format!(
+                "p90 {} · {} reqs{}",
+                m.ttft.p90.map(|v| format!("{v:.2} s")).unwrap_or_else(|| "—".into()),
+                m.ttft.count,
+                m.itl.p50.map(|v| format!(" · {:.0} ms/token", v * 1000.0)).unwrap_or_default()
+            ),
+            &hist("ttft"),
+        );
+        v.extend(kpi2);
+        v
+    }));
+    let used = strata::context_used(m, last);
+    let ctx_pct = if m.max_context > 0 { (100.0 * used as f64 / m.max_context as f64).min(100.0) as usize } else { 0 };
+    lines.push(Line::from(vec![
+        Span::styled(format!("{:<13}", "Context"), Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{} / {} · {ctx_pct}%", fmt_tokens_tui_i(used), fmt_tokens_tui_i(m.max_context)),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                "  since start: {} reqs · {} tok in · {} tok out",
+                fmt_tokens_tui_i(m.tot_requests),
+                fmt_tokens_tui_i(m.tot_prompt_tokens),
+                fmt_tokens_tui_i(m.tot_output_tokens)
+            ),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
+    if let Some(c) = &m.conv {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<13}", "Conv cache"), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!(
+                    "{}/{} requests reused",
+                    fmt_tokens_tui_i(c.requests_reused),
+                    fmt_tokens_tui_i(c.requests)
+                ),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    "  {} parked/{} slots · {} tok reused · {} parked, {} restored",
+                    c.parked.unwrap_or(0),
+                    c.slots.unwrap_or(0),
+                    fmt_tokens_tui_i(c.reused_tokens),
+                    c.parks.unwrap_or(0),
+                    c.restores.unwrap_or(0)
+                ),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" Strata · {} · {} ", app.strata_cfg.base(), if m.model.is_empty() { "strata" } else { &m.model })),
+        ),
+        top[0],
+    );
+
+    let show_n = if app.strata_show_all { m.requests.len().min(100) } else { m.requests.len().min(10) };
+    let rows: Vec<Row> = m
+        .requests
+        .iter()
+        .take(show_n)
+        .map(|r| {
+            let (fl, fc) = finish_style_tui(Some(&r.finish));
+            Row::new(vec![
+                clock_label_tui(r.time),
+                Span::styled(fl, Style::default().fg(fc)).to_string(),
+                r.prompt_tokens.map(fmt_tokens_tui_i).unwrap_or_else(|| "—".into()),
+                r.reused.map(fmt_tokens_tui_i).unwrap_or_else(|| "0".into()),
+                r.output_tokens.map(fmt_tokens_tui_i).unwrap_or_else(|| "—".into()),
+                strata::prefill_rate(r).map(|v| format!("{:.0}", v)).unwrap_or_else(|| "—".into()),
+                r.decode_tok_s.map(|v| format!("{v:.1}")).unwrap_or_else(|| "—".into()),
+                r.hit_rate.map(|h| format!("{:.1}%", h * 100.0)).unwrap_or_else(|| "—".into()),
+                r.duration_s.map(|v| format!("{v:.1} s")).unwrap_or_else(|| "—".into()),
+            ])
+        })
+        .collect();
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(9),
+            Constraint::Length(12),
+            Constraint::Length(7),
+            Constraint::Length(7),
+            Constraint::Length(7),
+            Constraint::Length(8),
+            Constraint::Length(8),
+            Constraint::Length(8),
+            Constraint::Min(9),
+        ],
+    )
+    .header(
+        Row::new(vec!["TIME", "FINISH", "PROMPT", "REUSED", "OUTPUT", "PRE t/s", "DEC t/s", "HIT", "DUR"])
+            .style(Style::default().fg(Color::Cyan)),
+    )
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" Recent requests · {} kept · a: show all ", m.requests_kept)),
+    )
+    .column_spacing(2);
+    f.render_widget(table, top[1]);
+}
+
+fn fmt_tokens_tui(v: f64) -> String {
+    if v >= 1e9 {
+        format!("{:.1}B", v / 1e9)
+    } else if v >= 1e6 {
+        format!("{:.1}M", v / 1e6)
+    } else if v >= 1e3 {
+        format!("{:.1}k", v / 1e3)
+    } else {
+        format!("{v:.0}")
+    }
+}
+
+fn fmt_tokens_tui_i(v: i64) -> String {
+    fmt_tokens_tui(v as f64)
+}
+
+/// Seconds-since-epoch → HH:MM:SS local-ish (UTC is fine for a monitor).
+fn clock_label_tui(secs: f64) -> String {
+    let t = secs as i64;
+    format!("{:02}:{:02}:{:02}", (t / 3600) % 24, (t / 60) % 60, t % 60)
+}
+
+fn finish_style_tui(f: Option<&str>) -> (String, Color) {
+    let label = match f.unwrap_or("none") {
+        "eos" => "eos",
+        "stop" => "stop",
+        "length" => "length",
+        "user_cancel" => "cancelled",
+        "context_limit" => "ctx limit",
+        other => other,
+    };
+    let color = match f.unwrap_or("none") {
+        "eos" | "stop" => Color::Green,
+        "length" => Color::Blue,
+        "user_cancel" => Color::Yellow,
+        "context_limit" => Color::Red,
+        _ => Color::DarkGray,
+    };
+    (label.into(), color)
 }
 
 fn human_bytes(b: i64) -> String {

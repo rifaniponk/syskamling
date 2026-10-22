@@ -11,7 +11,7 @@ egui/eframe window, ~10–20 MB resident.
 ## Features
 
 - Desktop GUI (default): Containers / Images / Volumes / Agents / Hardware /
-  Ports / Logs tabs,
+  Ports / Strata / Logs tabs,
   dark theme, status-dot pulse, action spinners, log fade-in
 - Container actions from the detail panel: start/stop, restart, logs,
   remove (with confirmation dialog)
@@ -29,6 +29,12 @@ egui/eframe window, ~10–20 MB resident.
   machine inventory: CPU, motherboard, GPUs, RAM, SSDs, NICs
 - Ports tab — every listening port on the machine, the process behind
   it, and which container (if any) publishes it
+- Strata tab — live statistics from a Strata inference server (its `/health`
+  and `/metrics` API): model state, decode/prefill speed, GPU load/VRAM/temp/
+  power/PCIe, host CPU & disk, time-to-first-token, context fill, conversation
+  cache, and the recent-request table. Endpoint + API key are configured once
+  in the GUI settings card (stored in `~/.config/syskamling/config.json`) and
+  shared with the TUI
 - Dashboard leads with the machine: host CPU/memory/swap/GPU KPIs, system
   vitals charts, CPU/GPU/SSD temperatures, and the hardware identity line —
   with Docker as one section below
@@ -63,8 +69,9 @@ syskamling -s /path/to/docker.sock
 
 | Key | Action |
 |---|---|
-| `1`–`6` / `Tab` `←` `→` | Switch screen (1 Containers … 4 Agents, 5 Hardware, 6 Ports) |
+| `1`–`8` / `Tab` `←` `→` | Switch screen (1 Containers … 4 Agents, 5 Hardware, 6 Ports, 7 Strata, 8 Logs) |
 | `j` `k` / `↑` `↓` | Move selection |
+| `a` (Strata screen) | Show all kept requests |
 | `Enter` | Open logs for selected container |
 | `s` | Start (if stopped) / stop (if running) |
 | `t` | Stop container |
