@@ -10,7 +10,8 @@ egui/eframe window, ~10–20 MB resident.
 
 ## Features
 
-- Desktop GUI (default): Containers / Images / Volumes / Agents / Logs tabs,
+- Desktop GUI (default): Containers / Images / Volumes / Agents / Hardware /
+  Ports / Logs tabs,
   dark theme, status-dot pulse, action spinners, log fade-in
 - Container actions from the detail panel: start/stop, restart, logs,
   remove (with confirmation dialog)
@@ -21,14 +22,17 @@ egui/eframe window, ~10–20 MB resident.
   Cursor, Windsurf, Gemini CLI, OpenCode, Aider, Goose, Amp, omp, Hermes,
   JetBrains AI, Zed AI, MCP servers, ollama/vLLM/llama.cpp — grouped into
   sessions with project dir, CPU, memory, uptime, and full process list
-- Terminal UI (`syskamling tui`) for keyboard-driven, mouse-free use over SSH
-
-### Roadmap
-
-- **Hardware monitor tab** — Task-Manager-style live charts: CPU (per-core),
-  memory, swap, disk I/O, network throughput, sensors
-- **Ports tab** — every listening port on the machine, the process behind
+- Hardware tab: Task-Manager-style live charts — CPU (per-core) with package
+  temperature, memory **and swap**, GPU utilization/VRAM/temperature/power
+  (AMD via sysfs, NVIDIA via nvidia-smi), per-disk read/write rates, lifetime
+  bytes, active time, queue depth and NVMe drive temperature, plus a named
+  machine inventory: CPU, motherboard, GPUs, RAM, SSDs, NICs
+- Ports tab — every listening port on the machine, the process behind
   it, and which container (if any) publishes it
+- Dashboard leads with the machine: host CPU/memory/swap/GPU KPIs, system
+  vitals charts, CPU/GPU/SSD temperatures, and the hardware identity line —
+  with Docker as one section below
+- Terminal UI (`syskamling tui`) for keyboard-driven, mouse-free use over SSH
 
 ## Install
 
@@ -59,7 +63,7 @@ syskamling -s /path/to/docker.sock
 
 | Key | Action |
 |---|---|
-| `1`–`5` / `Tab` `←` `→` | Switch screen |
+| `1`–`6` / `Tab` `←` `→` | Switch screen (1 Containers … 4 Agents, 5 Hardware, 6 Ports) |
 | `j` `k` / `↑` `↓` | Move selection |
 | `Enter` | Open logs for selected container |
 | `s` | Start (if stopped) / stop (if running) |

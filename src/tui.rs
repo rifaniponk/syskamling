@@ -20,6 +20,7 @@ use tokio::sync::mpsc;
 use crate::agents::{AgentScanner, AgentSession};
 use crate::docker::{ContainerSummary, Docker, DockerError, LogLine, StreamKind};
 use crate::hw::{HwSample, Sampler};
+use crate::hw_inventory::{self as hw_inventory, GpuStat};
 use crate::ports::{self as portsmod, PortEntry};
 
 pub fn run(
@@ -143,6 +144,8 @@ struct App {
     hw: Option<HwSample>,
     /// rolling CPU history for the Hardware trend line
     hw_cpu_hist: Vec<f64>,
+    /// live per-GPU stats, refreshed on the Hardware tab
+    gpus: Vec<GpuStat>,
     ports: Vec<PortEntry>,
     ports_state: ListState,
     logs: Vec<LogLine>,
@@ -179,6 +182,7 @@ impl App {
             agents_state: ListState::default(),
             hw: None,
             hw_cpu_hist: Vec::new(),
+            gpus: Vec::new(),
             ports: Vec::new(),
             ports_state: ListState::default(),
             logs: Vec::new(),
@@ -400,7 +404,8 @@ async fn run_async(
         }
 
         // Host vitals: rates need consecutive samples, so the sampler lives
-        // here and is read inline (/proc reads are microseconds).
+        // here and is read inline (/proc reads are microseconds). GPU stats
+        // only run on the Hardware screen: nvidia-smi costs ~50 ms.
         if refresh > 0.0 && last_hw_sample.elapsed() >= Duration::from_secs_f64(refresh.max(1.0)) {
             last_hw_sample = Instant::now();
             let s = sampler.sample();
@@ -408,6 +413,11 @@ async fn run_async(
             if app.hw_cpu_hist.len() > 240 {
                 let excess = app.hw_cpu_hist.len() - 240;
                 app.hw_cpu_hist.drain(..excess);
+            }
+            if app.tab == Tab::Hardware {
+                app.gpus = hw_inventory::gpu_stats();
+            } else if app.gpus.is_empty() {
+                app.gpus = hw_inventory::gpu_stats_hwmon_only();
             }
             app.hw = Some(s);
         }
@@ -1202,11 +1212,13 @@ fn render_hardware(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     };
     let top = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(8), Constraint::Min(4)])
+        .constraints([Constraint::Length(13), Constraint::Min(4)])
         .split(area);
 
     let mem_used = s.mem_total.saturating_sub(s.mem_avail);
+    let swap_used = s.swap_total.saturating_sub(s.swap_free);
     let mem_frac = mem_used as f64 / s.mem_total.max(1) as f64;
+    let swap_frac = swap_used as f64 / s.swap_total.max(1) as f64;
     let gauge = |label: &str, frac: f64| -> Line {
         let filled = (frac * 30.0).round() as usize;
         let color = if frac > 0.9 {
@@ -1225,21 +1237,29 @@ fn render_hardware(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
             Span::raw(format!(" {:>4.0}%", frac * 100.0)),
         ])
     };
-    let vitals = Paragraph::new(vec![
+    let inv = &hw_inventory::INVENTORY.cpu;
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(inv, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::raw(format!(
+                "   {} cores   up {}",
+                s.ncpu,
+                ago(s.uptime as i64)
+            )),
+        ]),
         Line::from(vec![
             Span::styled(
                 format!("CPU {:>5.1}%", s.cpu_pct),
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             ),
-            Span::raw(format!(
-                "   load {} {} {}   {} cores",
-                s.load1, s.load5, s.load15, s.ncpu
-            )),
-            s.temp_c
-                .map(|t| Span::raw(format!("   {t:.0}°C")))
+            Span::raw(format!("   load {} {} {}", s.load1, s.load5, s.load15)),
+            s.cpu_temp_c
+                .or(s.temp_c)
+                .map(|t| Span::raw(format!("   cpu {}°C", t as f64)))
                 .unwrap_or_default(),
         ]),
         gauge("memory", mem_frac),
+        gauge("swap", swap_frac),
         Line::from(vec![
             Span::styled(format!("disk  {} ", human_rate(s.disk_read_bps)), Style::default().fg(Color::Gray)),
             Span::raw(format!("read   {} write/s", human_rate(s.disk_write_bps))),
@@ -1255,12 +1275,34 @@ fn render_hardware(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
                 Style::default().fg(Color::Cyan),
             ),
         ]),
-        Line::from(vec![
-            Span::styled("uptime  ", Style::default().fg(Color::Gray)),
-            Span::raw(ago(s.uptime as i64)),
-        ]),
-    ])
-    .block(Block::default().borders(Borders::ALL).title(" Hardware "));
+    ];
+    // one line per GPU, one per disk
+    for g in &app.gpus {
+        let busy = g.busy_pct.map(|b| format!("{b:.0}% busy")).unwrap_or_else(|| "busy n/a".into());
+        let temp = g.temp_c.map(|t| format!("{t:.0}°C")).unwrap_or_else(|| "n/a".into());
+        let vram = if g.vram_total > 0 {
+            format!(" {} of {} VRAM", human_bytes(g.vram_used as i64), human_bytes(g.vram_total as i64))
+        } else {
+            String::new()
+        };
+        lines.push(Line::from(vec![
+            Span::styled("gpu     ", Style::default().fg(Color::Gray)),
+            Span::styled(g.name.clone(), Style::default().fg(Color::Magenta)),
+            Span::raw(format!("  {busy}  {temp}{vram}")),
+        ]));
+    }
+    for d in &s.disks {
+        let temp = d.temp_c.map(|t| format!("{t:.0}°C")).unwrap_or_else(|| "n/a".into());
+        lines.push(Line::from(vec![
+            Span::styled("ssd     ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{}  {} read  {} write  {temp}", d.name, human_rate(d.read_bps), human_rate(d.write_bps)),
+                Style::default().fg(Color::White),
+            ),
+        ]));
+    }
+    let vitals = Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL).title(" Hardware "));
     f.render_widget(vitals, top[0]);
 
     // per-core bars, two cores per line

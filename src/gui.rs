@@ -20,6 +20,8 @@ use crate::docker::{
     LogLine, StatsSample, StreamKind, SystemInfo,
 };
 use crate::hw::{HwSample, Sampler};
+use crate::hw_inventory as hwinv;
+use crate::hw_inventory::{gpu_stats, gpu_stats_hwmon_only, GpuStat};
 use crate::ports::{self as portsmod, PortEntry};
 
 /// One page of container logs held by the UI.
@@ -85,6 +87,7 @@ enum Msg {
     AllLogs(Vec<LogLine>),
     AgentsScanned(Vec<AgentSession>),
     PortsScanned(Vec<PortEntry>),
+    GpusScanned(Vec<GpuStat>),
 }
 
 struct RefreshData {
@@ -184,10 +187,18 @@ struct Gui {
     hw: Option<HwSample>,
     hw_cpu_hist: VecDeque<f64>,
     hw_mem_hist: VecDeque<f64>,
+    hw_swap_hist: VecDeque<f64>,
     hw_disk_r_hist: VecDeque<f64>,
     hw_disk_w_hist: VecDeque<f64>,
     hw_net_rx_hist: VecDeque<f64>,
     hw_net_tx_hist: VecDeque<f64>,
+    hw_gpu_busy_hist: VecDeque<f64>,
+    hw_gpu_vram_hist: VecDeque<f64>,
+    hw_cpu_temp_hist: VecDeque<f64>,
+    hw_gpu_temp_hist: VecDeque<f64>,
+    hw_disk_temp_hist: VecDeque<f64>,
+    /// live per-GPU stats (busy, VRAM, temp, power)
+    gpus: Vec<GpuStat>,
     // --- ports tab ---
     ports: Vec<PortEntry>,
     /// (proto, addr, port) of the selected socket
@@ -237,10 +248,17 @@ impl Gui {
             hw: None,
             hw_cpu_hist: VecDeque::new(),
             hw_mem_hist: VecDeque::new(),
+            hw_swap_hist: VecDeque::new(),
             hw_disk_r_hist: VecDeque::new(),
             hw_disk_w_hist: VecDeque::new(),
             hw_net_rx_hist: VecDeque::new(),
             hw_net_tx_hist: VecDeque::new(),
+            hw_gpu_busy_hist: VecDeque::new(),
+            hw_gpu_vram_hist: VecDeque::new(),
+            hw_cpu_temp_hist: VecDeque::new(),
+            hw_gpu_temp_hist: VecDeque::new(),
+            hw_disk_temp_hist: VecDeque::new(),
+            gpus: Vec::new(),
             ports: Vec::new(),
             selected_port: None,
             port_filter: String::new(),
@@ -324,19 +342,39 @@ impl Gui {
             .collect()
     }
 
-    fn push_hw(&mut self, s: HwSample) {
+    fn push_hw(&mut self, s: HwSample, gpus: Vec<GpuStat>) {
         let push = |q: &mut VecDeque<f64>, v: f64| {
             q.push_back(v);
             while q.len() > HIST {
                 q.pop_front();
             }
         };
+        let push_opt = |q: &mut VecDeque<f64>, v: Option<f64>| {
+            if let Some(v) = v {
+                push(q, v);
+            }
+        };
         push(&mut self.hw_cpu_hist, s.cpu_pct);
         push(&mut self.hw_mem_hist, (s.mem_total - s.mem_avail) as f64);
+        push(&mut self.hw_swap_hist, s.swap_total.saturating_sub(s.swap_free) as f64);
         push(&mut self.hw_disk_r_hist, s.disk_read_bps);
         push(&mut self.hw_disk_w_hist, s.disk_write_bps);
         push(&mut self.hw_net_rx_hist, s.net_rx_bps);
         push(&mut self.hw_net_tx_hist, s.net_tx_bps);
+        push_opt(&mut self.hw_cpu_temp_hist, s.cpu_temp_c);
+        // GPU aggregates: busiest GPU busy%, most-used VRAM across GPUs,
+        // hottest GPU/SSD sensor — one row each regardless of GPU count.
+        let busy = gpus.iter().filter_map(|g| g.busy_pct).fold(None::<f64>, |a, b| Some(a.map_or(b, |a| a.max(b))));
+        let vram = gpus.iter().map(|g| g.vram_used as f64).fold(0.0_f64, f64::max);
+        let gpu_temp = gpus.iter().filter_map(|g| g.temp_c).fold(None::<f64>, |a, b| Some(a.map_or(b, |a| a.max(b))));
+        let disk_temp = s.disks.iter().filter_map(|d| d.temp_c).fold(None::<f64>, |a, b| Some(a.map_or(b, |a| a.max(b))));
+        push_opt(&mut self.hw_gpu_busy_hist, busy);
+        if vram > 0.0 {
+            push(&mut self.hw_gpu_vram_hist, vram);
+        }
+        push_opt(&mut self.hw_gpu_temp_hist, gpu_temp);
+        push_opt(&mut self.hw_disk_temp_hist, disk_temp);
+        self.gpus = gpus;
         self.hw = Some(s);
     }
 
@@ -410,6 +448,8 @@ struct SysKamlingApp {
     // --- ports tab ---
     last_port_scan: Instant,
     port_scan_busy: Arc<Mutex<bool>>,
+    last_gpu_stats: Instant,
+    gpu_scan_busy: Arc<Mutex<bool>>,
 }
 
 impl SysKamlingApp {
@@ -450,6 +490,8 @@ impl SysKamlingApp {
             last_hw_sample: Instant::now() - Duration::from_secs(999),
             last_port_scan: Instant::now() - Duration::from_secs(999),
             port_scan_busy: Arc::new(Mutex::new(false)),
+            last_gpu_stats: Instant::now() - Duration::from_secs(999),
+            gpu_scan_busy: Arc::new(Mutex::new(false)),
         };
         app
     }
@@ -636,6 +678,21 @@ impl eframe::App for SysKamlingApp {
             self.spawn_agent_scan();
             self.sample_hardware();
             self.spawn_port_scan();
+            // nvidia-smi (~50 ms) runs off the UI thread only when the
+            // Hardware tab is visible; the result lands via the channel.
+            if self.gui.tab == Tab::Hardware && self.last_gpu_stats.elapsed() >= Duration::from_secs_f64(self.refresh.max(1.0)) {
+                self.last_gpu_stats = Instant::now();
+                if !*self.gpu_scan_busy.lock().unwrap() {
+                    *self.gpu_scan_busy.lock().unwrap() = true;
+                    let busy = Arc::clone(&self.gpu_scan_busy);
+                    let tx = self.tx.clone();
+                    self.rt.spawn_blocking(move || {
+                        let g = gpu_stats();
+                        *busy.lock().unwrap() = false;
+                        let _ = tx.send(Msg::GpusScanned(g));
+                    });
+                }
+            }
             ctx.request_repaint();
         }
 
@@ -691,14 +748,22 @@ impl SysKamlingApp {
 
     /// Hardware vitals need back-to-back samples for rates, so the sampler
     /// lives on the UI side and is read directly at the refresh cadence.
-    /// /proc reads are cheap (microseconds); no thread needed.
+    /// /proc reads are cheap (microseconds); no thread needed. GPU numbers
+    /// come from hwmon here; the expensive nvidia-smi pass runs separately
+    /// on the blocking pool when the Hardware tab is visible.
     fn sample_hardware(&mut self) {
         if self.last_hw_sample.elapsed() < Duration::from_secs_f64(self.refresh.max(1.0)) {
             return;
         }
         self.last_hw_sample = Instant::now();
         let s = self.sampler.sample();
-        self.gui.push_hw(s);
+        // keep whatever richer nvidia numbers the async scan last produced;
+        // hwmon-only fills in everything else instantly
+        let nvidia = self.gui.gpus.iter().filter(|g| g.driver == "nvidia").cloned().collect::<Vec<_>>();
+        let mut gpus = gpu_stats_hwmon_only();
+        gpus.retain(|g| g.driver != "nvidia");
+        gpus.extend(nvidia);
+        self.gui.push_hw(s, gpus);
     }
 
     /// Listening-socket scan: /proc/net tables plus an fd walk, so it goes
@@ -1019,6 +1084,11 @@ impl SysKamlingApp {
                         .find(|p| (p.proto, p.addr.as_str(), p.port) == (key.0.as_str(), key.1.as_str(), key.2))
                         .map(|p| (p.proto.to_string(), p.addr.clone(), p.port));
                 }
+            }
+            Msg::GpusScanned(gs) => {
+                // async nvidia-smi pass: merge over the hwmon rows without
+                // touching the sampler histories
+                g.gpus = gs;
             }
         }
     }
@@ -1854,15 +1924,21 @@ impl SysKamlingApp {
             .unwrap_or((0, 0));
         let cpu_hist: Vec<f64> = g.hw_cpu_hist.iter().copied().collect();
         let mem_hist: Vec<f64> = g.hw_mem_hist.iter().copied().collect();
+        let swap_hist: Vec<f64> = g.hw_swap_hist.iter().copied().collect();
+        let gpu_busy_hist: Vec<f64> = g.hw_gpu_busy_hist.iter().copied().collect();
 
-        let kpis = match &g.hw {
+        let mut kpis = match &g.hw {
             Some(h) => {
                 let mem_used = h.mem_total - h.mem_avail;
-                [
+                let swap_used = h.swap_total.saturating_sub(h.swap_free);
+                vec![
                     Kpi {
                         label: "CPU",
                         value: format!("{:.1}%", h.cpu_pct),
-                        sub: format!("{} cores · load {}", h.ncpu, h.load1),
+                        sub: match h.cpu_temp_c {
+                            Some(t) => format!("{} °C · {} cores", temp_str(t), h.ncpu),
+                            None => format!("{} cores · load {}", h.ncpu, h.load1),
+                        },
                         color: ACCENT,
                         viz: Viz::Spark(cpu_hist),
                     },
@@ -1876,6 +1952,17 @@ impl SysKamlingApp {
                         ),
                         color: VIOLET,
                         viz: Viz::Spark(mem_hist),
+                    },
+                    Kpi {
+                        label: "Swap",
+                        value: human_size(swap_used as i64),
+                        sub: if h.swap_total > 0 {
+                            format!("of {} ({:.0}%)", human_size(h.swap_total as i64), swap_used as f64 / h.swap_total as f64 * 100.0)
+                        } else {
+                            "not configured".into()
+                        },
+                        color: AMBER,
+                        viz: Viz::Spark(swap_hist),
                     },
                     Kpi {
                         label: "Ports",
@@ -1897,7 +1984,7 @@ impl SysKamlingApp {
                     },
                 ]
             }
-            None => [
+            None => vec![
                 Kpi {
                     label: "CPU",
                     value: "—".into(),
@@ -1911,6 +1998,13 @@ impl SysKamlingApp {
                     sub: "collecting host vitals…".into(),
                     color: VIOLET,
                     viz: Viz::Spark(mem_hist),
+                },
+                Kpi {
+                    label: "Swap",
+                    value: "—".into(),
+                    sub: "collecting host vitals…".into(),
+                    color: AMBER,
+                    viz: Viz::Spark(swap_hist),
                 },
                 Kpi {
                     label: "Ports",
@@ -1928,6 +2022,23 @@ impl SysKamlingApp {
                 },
             ],
         };
+        // GPU KPI when a display adapter reports numbers
+        if let Some(gp) = g.gpus.iter().max_by(|a, b| {
+            a.busy_pct.unwrap_or(0.0).partial_cmp(&b.busy_pct.unwrap_or(0.0)).unwrap_or(std::cmp::Ordering::Equal)
+        }) {
+            if gp.busy_pct.is_some() || gp.temp_c.is_some() {
+                kpis.insert(2, Kpi {
+                    label: "GPU",
+                    value: gp.busy_pct.map(|b| format!("{b:.0}%")).unwrap_or_else(|| "—".into()),
+                    sub: match gp.temp_c {
+                        Some(t) => format!("{} · {} °C", gp.name, temp_str(t)),
+                        None => gp.name.clone(),
+                    },
+                    color: CYAN,
+                    viz: Viz::Spark(gpu_busy_hist),
+                });
+            }
+        }
         let per_row = if ui.available_width() > 860.0 { 4 } else { 2 };
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.x = 14.0;
@@ -1944,11 +2055,14 @@ impl SysKamlingApp {
         });
     }
 
-    /// Host-wide charts fed by the /proc sampler: CPU, memory, network.
+    /// Host-wide charts fed by the /proc sampler: CPU, memory, swap, GPU,
+    /// network.
     fn system_charts(&mut self, ui: &mut Ui) {
         let g = &self.gui;
         let cpu: Vec<f64> = g.hw_cpu_hist.iter().copied().collect();
         let mem: Vec<f64> = g.hw_mem_hist.iter().copied().collect();
+        let swap: Vec<f64> = g.hw_swap_hist.iter().copied().collect();
+        let gpu: Vec<f64> = g.hw_gpu_busy_hist.iter().copied().collect();
         let net: Vec<f64> = g
             .hw_net_rx_hist
             .iter()
@@ -1973,14 +2087,18 @@ impl SysKamlingApp {
                 return;
             }
             let last = |s: &[f64]| s.last().copied().unwrap_or(0.0);
-            let charts: [(&str, String, Vec<f64>, Color32, fn(f64) -> String); 3] = [
+            let mut charts: Vec<(&str, String, Vec<f64>, Color32, fn(f64) -> String)> = vec![
                 ("CPU", format!("{:.1}%", last(&cpu)), cpu, ACCENT, |v| format!("{v:.1}%")),
                 ("Memory", human_size(last(&mem) as i64), mem, VIOLET, |v| human_size(v as i64)),
-                ("Network", format!("{}/s", human_size(last(&net) as i64)), net, CYAN, |v| {
-                    format!("{}/s", human_size(v as i64))
-                }),
+                ("Swap", human_size(last(&swap) as i64), swap, AMBER, |v| human_size(v as i64)),
             ];
-            let per_row = if ui.available_width() > 720.0 { 3 } else { 1 };
+            if g.gpus.iter().any(|x| x.busy_pct.is_some()) {
+                charts.push(("GPU", format!("{:.0}%", last(&gpu)), gpu, CYAN, |v| format!("{v:.0}%")));
+            }
+            charts.push(("Network", format!("{}/s", human_size(last(&net) as i64)), net, GREEN, |v| {
+                format!("{}/s", human_size(v as i64))
+            }));
+            let per_row = if ui.available_width() > 1000.0 { 3 } else if ui.available_width() > 640.0 { 2 } else { 1 };
             ui.scope(|ui| {
                 ui.spacing_mut().item_spacing.x = 20.0;
                 for row in charts.chunks(per_row) {
@@ -1996,25 +2114,35 @@ impl SysKamlingApp {
                             area_chart(col, series, *color, Vec2::new(w, 110.0), *fmt);
                         }
                     });
+                    ui.add_space(4.0);
                 }
             });
         });
     }
 
-    /// One-line host summary: uptime, load, temperature, ports, agents,
+    /// One-line host summary: uptime, load, CPU/GPU temps, ports, agents,
     /// disk throughput — the "system at a glance" strip.
     fn system_summary(&mut self, ui: &mut Ui) {
         let g = &self.gui;
         let Some(h) = &g.hw else { return };
         let n_listen = g.ports.iter().filter(|p| p.state == "LISTEN").count();
         let n_agents = g.agents.len();
-        let temp = h
-            .temp_c
-            .map(|t| {
-                let c = if t > 85.0 { RED } else if t > 70.0 { AMBER } else { GREEN };
-                (format!("{t:.0} °C"), c)
-            })
-            .unwrap_or_else(|| ("n/a".to_string(), FAINT));
+        let temp_cell = |t: Option<f64>, warn: f64, hot: f64| -> (String, Color32) {
+            match t {
+                Some(t) => {
+                    let c = if t > hot { RED } else if t > warn { AMBER } else { GREEN };
+                    (format!("{} °C", temp_str(t)), c)
+                }
+                None => ("n/a".to_string(), FAINT),
+            }
+        };
+        let cpu_t = temp_cell(h.cpu_temp_c.or(h.temp_c), 70.0, 85.0);
+        let gpu_t = temp_cell(
+            h.gpu_temp_c.or_else(|| g.gpus.iter().filter_map(|x| x.temp_c).max_by(|a, b| a.partial_cmp(b).unwrap())),
+            75.0,
+            88.0,
+        );
+        let ssd_t = temp_cell(h.disks.iter().filter_map(|d| d.temp_c).max_by(|a, b| a.partial_cmp(b).unwrap()), 60.0, 70.0);
         let cells: Vec<(&str, String, Color32)> = vec![
             ("Uptime", uptime_str(h.uptime as i64), TEXT),
             (
@@ -2022,7 +2150,9 @@ impl SysKamlingApp {
                 format!("{} · {} · {}", h.load1, h.load5, h.load15),
                 TEXT,
             ),
-            ("Temp", temp.0, temp.1),
+            ("CPU temp", cpu_t.0, cpu_t.1),
+            ("GPU temp", gpu_t.0, gpu_t.1),
+            ("SSD temp", ssd_t.0, ssd_t.1),
             ("Listening", format!("{n_listen} ports"), CYAN),
             (
                 "Agents",
@@ -2036,7 +2166,19 @@ impl SysKamlingApp {
             ),
         ];
         card(ui, |ui| {
-            let per_row = if ui.available_width() > 980.0 { 6 } else if ui.available_width() > 640.0 { 3 } else { 2 };
+            // the machine's identity, one line above the numbers
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(&hwinv::INVENTORY.cpu).font(bold(13.0)).color(TEXT));
+                let gpu_names: Vec<&str> = g.gpus.iter().map(|x| x.name.as_str()).collect();
+                if !gpu_names.is_empty() {
+                    ui.label(RichText::new(gpu_names.join(" + ")).size(12.5).color(CYAN));
+                }
+                if let Some(d) = hwinv::INVENTORY.devices.iter().find(|d| d.kind == "disk") {
+                    ui.label(RichText::new(format!("{} ({})", d.name, d.detail)).size(12.0).color(FAINT));
+                }
+            });
+            ui.add_space(6.0);
+            let per_row = if ui.available_width() > 980.0 { 4 } else if ui.available_width() > 640.0 { 3 } else { 2 };
             ui.scope(|ui| {
                 ui.spacing_mut().item_spacing.x = 14.0;
                 for (n, row) in cells.chunks(per_row).enumerate() {
@@ -2714,7 +2856,8 @@ impl SysKamlingApp {
             ui,
             "Hardware",
             &format!(
-                "{} cores · {} RAM · up {}",
+                "{} · {} cores · {} RAM · up {}",
+                hwinv::INVENTORY.cpu,
                 s.ncpu,
                 human_size(s.mem_total as i64),
                 ago(s.uptime as i64)
@@ -2725,16 +2868,21 @@ impl SysKamlingApp {
         let mem_used = s.mem_total - s.mem_avail;
         let swap_used = s.swap_total.saturating_sub(s.swap_free);
         let cpu_hist: Vec<f64> = self.gui.hw_cpu_hist.iter().copied().collect();
+        let gpu_busy_hist: Vec<f64> = self.gui.hw_gpu_busy_hist.iter().copied().collect();
         let dr_hist: Vec<f64> = self.gui.hw_disk_r_hist.iter().copied().collect();
         let dw_hist: Vec<f64> = self.gui.hw_disk_w_hist.iter().copied().collect();
         let rx_hist: Vec<f64> = self.gui.hw_net_rx_hist.iter().copied().collect();
         let tx_hist: Vec<f64> = self.gui.hw_net_tx_hist.iter().copied().collect();
+        let gpus = self.gui.gpus.clone();
 
-        let kpis = [
+        let mut kpis = vec![
             Kpi {
                 label: "CPU",
                 value: format!("{:.1}%", s.cpu_pct),
-                sub: format!("load {} · {} · {}", s.load1, s.load5, s.load15),
+                sub: match s.cpu_temp_c {
+                    Some(t) => format!("{} °C · load {}", temp_str(t), s.load1),
+                    None => format!("load {} · {} · {}", s.load1, s.load5, s.load15),
+                },
                 color: ACCENT,
                 viz: Viz::Spark(cpu_hist),
             },
@@ -2760,21 +2908,73 @@ impl SysKamlingApp {
                 viz: Viz::Spark(rx_hist.into_iter().zip(tx_hist).map(|(r, t)| r + t).collect()),
             },
         ];
+        if let Some(g) = gpus.iter().max_by(|a, b| a.busy_pct.unwrap_or(0.0).partial_cmp(&b.busy_pct.unwrap_or(0.0)).unwrap_or(std::cmp::Ordering::Equal)) {
+            kpis.push(Kpi {
+                label: "GPU",
+                value: g.busy_pct.map(|b| format!("{b:.0}%")).unwrap_or_else(|| "—".into()),
+                sub: match (g.temp_c, g.power_mw) {
+                    (Some(t), Some(p)) => format!("{} · {} °C · {:.0} W", g.name, temp_str(t), p as f64 / 1000.0),
+                    (Some(t), None) => format!("{} · {} °C", g.name, temp_str(t)),
+                    _ => g.name.clone(),
+                },
+                color: CYAN,
+                viz: Viz::Spark(gpu_busy_hist.clone()),
+            });
+        }
+        if let Some(t) = s.disks.iter().filter_map(|d| d.temp_c).max_by(|a, b| a.partial_cmp(b).unwrap()) {
+            kpis.push(Kpi {
+                label: "SSD",
+                value: format!("{} °C", temp_str(t)),
+                sub: "drive temperature".into(),
+                color: if t > 70.0 { RED } else if t > 60.0 { AMBER } else { GREEN },
+                viz: Viz::Spark(self.gui.hw_disk_temp_hist.iter().copied().collect()),
+            });
+        }
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.x = 14.0;
-            ui.columns(4, |cols| {
-                for (col, k) in cols.iter_mut().zip(&kpis) {
-                    kpi_card(col, k);
+            let per_row = if kpis.len() >= 6 { 3 } else { 4 };
+            for (n, row) in kpis.chunks(per_row).enumerate() {
+                if n > 0 {
+                    ui.add_space(6.0);
                 }
-            });
+                ui.columns(per_row, |cols| {
+                    for (col, k) in cols.iter_mut().zip(row) {
+                        kpi_card(col, k);
+                    }
+                });
+            }
         });
         ui.add_space(14.0);
+
+        // ---- hardware inventory: every named device on the box ----
+        card(ui, |ui| {
+            card_title(ui, "Machine", &hwinv::INVENTORY.board);
+            let icons: &[(&str, &str)] = &[
+                ("cpu", "⬢"),
+                ("board", "▦"),
+                ("gpu", "◈"),
+                ("memory", "▤"),
+                ("disk", "⛁"),
+                ("nic", "⇄"),
+            ];
+            for d in &hwinv::INVENTORY.devices {
+                let icon = icons.iter().find(|(k, _)| *k == d.kind).map(|(_, i)| *i).unwrap_or("•");
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(icon).size(13.0).color(ACCENT));
+                    ui.label(RichText::new(&d.name).font(bold(13.0)).color(TEXT));
+                    if !d.detail.is_empty() {
+                        ui.label(RichText::new(&d.detail).size(12.0).color(FAINT));
+                    }
+                });
+            }
+        });
+        ui.add_space(10.0);
 
         card(ui, |ui| {
             card_title(
                 ui,
                 &format!("Per-core load ({})", s.per_core.len()),
-                &s.temp_c.map(|t| format!("{t:.0} °C")).unwrap_or_default(),
+                &s.cpu_temp_c.map(|t| format!("{} °C", temp_str(t))).unwrap_or_default(),
             );
             if s.per_core.is_empty() {
                 ui.label(RichText::new("per-core stats unavailable").color(FAINT));
@@ -2821,6 +3021,8 @@ impl SysKamlingApp {
         });
         ui.add_space(10.0);
 
+        let mem_hist: Vec<f64> = self.gui.hw_mem_hist.iter().copied().collect();
+        let swap_hist: Vec<f64> = self.gui.hw_swap_hist.iter().copied().collect();
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.x = 14.0;
             ui.columns(2, |cols| {
@@ -2828,9 +3030,28 @@ impl SysKamlingApp {
                     card_title(ui, "Memory & swap", "");
                     bar_row(ui, "Used", mem_used, s.mem_total, VIOLET);
                     bar_row(ui, "Swap", swap_used, s.swap_total, AMBER);
+                    let w = ui.available_width();
+                    area_chart(ui, &mem_hist, VIOLET, Vec2::new(w, 54.0), |v| human_size(v as i64));
+                    let w = ui.available_width();
+                    area_chart(ui, &swap_hist, AMBER, Vec2::new(w, 54.0), |v| human_size(v as i64));
                 });
                 card(&mut cols[1], |ui| {
-                    card_title(ui, "Throughput", "");
+                    card_title(ui, "Sensors", "");
+                    if s.sensors.is_empty() {
+                        ui.label(RichText::new("no hwmon temperature sensors found").color(FAINT));
+                    } else {
+                        for x in &s.sensors {
+                            let c = if x.c > 85.0 { RED } else if x.c > 70.0 { AMBER } else { GREEN };
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(x.group).size(11.5).color(FAINT));
+                                ui.label(RichText::new(&x.label).size(12.5).color(MUTED));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.label(RichText::new(format!("{} °C", temp_str(x.c))).font(FontId::monospace(12.5)).color(c));
+                                });
+                            });
+                        }
+                    }
+                    ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("Disk").size(12.5).color(MUTED).weak());
                         ui.label(RichText::new(format!("↓ {}", human_rate(s.disk_read_bps))).font(FontId::monospace(12.5)).color(TEXT));
@@ -2841,17 +3062,101 @@ impl SysKamlingApp {
                         ui.label(RichText::new(format!("↓ {}", human_rate(s.net_rx_bps))).font(FontId::monospace(12.5)).color(TEXT));
                         ui.label(RichText::new(format!("↑ {}", human_rate(s.net_tx_bps))).font(FontId::monospace(12.5)).color(TEXT));
                     });
-                    if let Some(t) = s.temp_c {
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("Temp ").size(12.5).color(MUTED).weak());
-                            let c = if t > 85.0 { RED } else if t > 70.0 { AMBER } else { GREEN };
-                            ui.label(RichText::new(format!("{t:.0} °C")).font(FontId::monospace(12.5)).color(c));
-                            ui.label(RichText::new("hottest sensor").size(11.5).color(FAINT));
-                        });
-                    }
                 });
             });
         });
+
+        // ---- GPUs: one card per display adapter ----
+        if !gpus.is_empty() {
+            ui.add_space(14.0);
+            section_heading(ui, "Graphics");
+            ui.add_space(6.0);
+            for g in &gpus {
+                let busy = g.busy_pct.unwrap_or(0.0);
+                let color = if busy > 85.0 { RED } else if busy > 60.0 { AMBER } else { CYAN };
+                card(ui, |ui| {
+                    card_title(
+                        ui,
+                        &g.name,
+                        &match (g.temp_c, g.power_mw) {
+                            (Some(t), Some(p)) => format!("{} °C · {:.0} W", temp_str(t), p as f64 / 1000.0),
+                            (Some(t), None) => format!("{} °C", temp_str(t)),
+                            (None, Some(p)) => format!("{:.0} W", p as f64 / 1000.0),
+                            (None, None) => String::new(),
+                        },
+                    );
+                    if g.busy_pct.is_some() {
+                        bar_row(ui, "Busy", busy as u64, 100, color);
+                    } else {
+                        ui.label(
+                            RichText::new("utilization not exposed by this driver")
+                                .size(12.0)
+                                .color(FAINT),
+                        );
+                    }
+                    if g.vram_total > 0 {
+                        bar_row(ui, "VRAM", g.vram_used, g.vram_total, VIOLET);
+                    }
+                    let w = ui.available_width();
+                    area_chart(ui, &gpu_busy_hist, color, Vec2::new(w, 60.0), |v| format!("{v:.0}%"));
+                });
+                ui.add_space(8.0);
+            }
+        }
+
+        // ---- Disks: per-device stats, Task-Manager style ----
+        if !s.disks.is_empty() {
+            ui.add_space(6.0);
+            section_heading(ui, "Storage");
+            ui.add_space(6.0);
+            let models: std::collections::HashMap<String, hwinv::HwDevice> = hwinv::INVENTORY
+                .devices
+                .iter()
+                .filter(|d| d.kind == "disk")
+                .map(|d| (d.name.clone(), d.clone()))
+                .collect();
+            // match by kernel name order; the inventory keeps the same sort
+            let inv_disks: Vec<&hwinv::HwDevice> = hwinv::INVENTORY.devices.iter().filter(|d| d.kind == "disk").collect();
+            for (i, d) in s.disks.iter().enumerate() {
+                let inv = models.get(&d.name).or_else(|| {
+                    // diskstats names (nvme0n1, sda) vs inventory names: fall
+                    // back to positional matching, both lists are sorted
+                    inv_disks.get(i).map(|v| &**v)
+                });
+                let title = inv.map(|x| x.name.as_str()).unwrap_or(&d.name);
+                let temp = d.temp_c.map(|t| format!("{} °C", temp_str(t))).unwrap_or_default();
+                card(ui, |ui| {
+                    card_title(ui, title, &temp);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Rate").size(12.5).color(MUTED).weak());
+                        ui.label(RichText::new(format!("↓ {}", human_rate(d.read_bps))).font(FontId::monospace(12.5)).color(TEXT));
+                        ui.label(RichText::new(format!("↑ {}", human_rate(d.write_bps))).font(FontId::monospace(12.5)).color(TEXT));
+                        if let Some(inv) = inv {
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(RichText::new(&inv.detail).size(11.5).color(FAINT));
+                            });
+                        }
+                    });
+                    // active time since boot = utilization, averaged over uptime
+                    let util = if d.uptime > 0.0 { (d.ms_busy as f64 / (d.uptime * 1000.0) * 100.0).min(100.0) } else { 0.0 };
+                    bar_row(ui, "Active", (util * 10.0) as u64, 1000, GREEN);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Lifetime").size(12.5).color(MUTED).weak());
+                        ui.label(RichText::new(format!("{} read", human_size(d.total_read as i64))).font(FontId::monospace(12.0)).color(MUTED));
+                        ui.label(RichText::new(format!("{} written", human_size(d.total_write as i64))).font(FontId::monospace(12.0)).color(MUTED));
+                        ui.label(RichText::new(format!("{} reads · {} writes", d.reads, d.writes)).size(11.5).color(FAINT));
+                        // average queue depth = weighted busy ms / elapsed ms
+                        let queue = if d.uptime > 0.0 { d.ms_weighted as f64 / (d.uptime * 1000.0) } else { 0.0 };
+                        ui.label(RichText::new(format!("avg queue {queue:.2}")).size(11.5).color(FAINT));
+                    });
+                    if let Some(t) = d.temp_c {
+                        let c = if t > 70.0 { RED } else if t > 60.0 { AMBER } else { GREEN };
+                        ui.label(RichText::new(format!("drive temperature {} °C", temp_str(t))).size(11.5).color(c));
+                    }
+                });
+                ui.add_space(8.0);
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -3399,6 +3704,11 @@ fn uptime_str(secs: i64) -> String {
     } else {
         format!("{m}m")
     }
+}
+
+/// Temperature with one decimal dropped: "72 °C" reads better than "72.4".
+fn temp_str(c: f64) -> String {
+    format!("{c:.0}")
 }
 
 /// Short OS label for the dashboard header: prefers the kernel name from

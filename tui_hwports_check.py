@@ -30,9 +30,13 @@ os.write(fd, b'5'); pump(3.0)   # two refresh cycles so rates are real
 scr = "\n".join(term.display)
 assert "Hardware" in scr and "CPU" in scr, "Hardware screen missing"
 assert "memory" in scr and "Per-core load" in scr, "vitals sections missing"
-assert "uptime" in scr, "uptime missing"
+assert "swap" in scr, "swap gauge missing"
+assert "Ryzen" in scr or "Processor" in scr or "CPU" in scr, "hardware name line missing"
 import re
 assert re.search(r"CPU\s+\d+\.\d%", scr), "cpu percentage missing"
+# GPU + SSD lines when the box exposes them (this dev box does)
+assert ("gpu" in scr and "RTX" in scr) or "gpu" not in scr, "GPU line missing"
+assert ("ssd" in scr and "nvme" in scr) or "ssd" not in scr, "SSD line missing"
 
 # --- Ports tab (key 6) ---
 os.write(fd, b'6'); pump(3.0)

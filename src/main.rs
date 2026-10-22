@@ -2,6 +2,7 @@ mod agents;
 mod docker;
 mod gui;
 mod hw;
+mod hw_inventory;
 mod ports;
 mod tui;
 
