@@ -23,6 +23,7 @@ use crate::hw::{HwSample, Sampler};
 use crate::hw_inventory as hwinv;
 use crate::hw_inventory::{gpu_stats, gpu_stats_hwmon_only, GpuStat};
 use crate::ports::{self as portsmod, PortEntry};
+use crate::procs::{self as procsmod, ProcInfo, ProcScanner, SortCol};
 use crate::strata;
 
 /// One page of container logs held by the UI.
@@ -42,6 +43,7 @@ pub enum Tab {
     Volumes,
     Agents,
     Hardware,
+    Processes,
     Ports,
     Strata,
     Logs,
@@ -93,6 +95,7 @@ enum Msg {
     AllLogs(Vec<LogLine>),
     AgentsScanned(Vec<AgentSession>),
     PortsScanned(Vec<PortEntry>),
+    ProcsScanned(Vec<crate::procs::ProcInfo>),
     GpusScanned(Vec<GpuStat>),
     StrataHealth(Result<strata::Health, String>),
     StrataMetrics(Result<Box<strata::Metrics>, String>),
@@ -215,6 +218,13 @@ struct Gui {
     port_filter: String,
     /// only sockets with a discoverable owning process
     ports_owned_only: bool,
+    // --- processes tab ---
+    procs: Vec<ProcInfo>,
+    proc_filter: String,
+    proc_sort: SortCol,
+    proc_sort_desc: bool,
+    /// pid of the selected process row (None = none)
+    selected_proc: Option<u32>,
     // --- strata tab ---
     strata_cfg: strata::StrataConfig,
     /// endpoint text being typed; applied on Enter / focus loss. Shared by
@@ -293,6 +303,11 @@ impl Gui {
             selected_port: None,
             port_filter: String::new(),
             ports_owned_only: false,
+            procs: Vec::new(),
+            proc_filter: String::new(),
+            proc_sort: SortCol::Mem,
+            proc_sort_desc: true,
+            selected_proc: None,
             strata_cfg: strata::StrataConfig::default(),
             strata_endpoint_edit: String::new(),
             strata_key_edit: String::new(),
@@ -494,6 +509,11 @@ struct SysKamlingApp {
     // --- ports tab ---
     last_port_scan: Instant,
     port_scan_busy: Arc<Mutex<bool>>,
+    /// scanner lives behind a mutex so consecutive blocking scans keep
+    /// their tick counters and CPU% stays a real delta
+    proc_holder: Arc<Mutex<ProcScanner>>,
+    last_proc_scan: Instant,
+    proc_scan_busy: Arc<Mutex<bool>>,
     last_gpu_stats: Instant,
     gpu_scan_busy: Arc<Mutex<bool>>,
     // --- strata tab ---
@@ -556,6 +576,9 @@ impl SysKamlingApp {
             last_hw_sample: Instant::now() - Duration::from_secs(999),
             last_port_scan: Instant::now() - Duration::from_secs(999),
             port_scan_busy: Arc::new(Mutex::new(false)),
+            proc_holder: Arc::new(Mutex::new(ProcScanner::new())),
+            last_proc_scan: Instant::now() - Duration::from_secs(999),
+            proc_scan_busy: Arc::new(Mutex::new(false)),
             last_gpu_stats: Instant::now() - Duration::from_secs(999),
             gpu_scan_busy: Arc::new(Mutex::new(false)),
             strata_client: Arc::new(strata::HttpClient::new(&strata_cfg)),
@@ -606,6 +629,9 @@ impl SysKamlingApp {
             last_hw_sample: Instant::now() - Duration::from_secs(999),
             last_port_scan: Instant::now() - Duration::from_secs(999),
             port_scan_busy: Arc::new(Mutex::new(false)),
+            proc_holder: Arc::new(Mutex::new(ProcScanner::new())),
+            last_proc_scan: Instant::now() - Duration::from_secs(999),
+            proc_scan_busy: Arc::new(Mutex::new(false)),
             last_gpu_stats: Instant::now() - Duration::from_secs(999),
             gpu_scan_busy: Arc::new(Mutex::new(false)),
             strata_client: Arc::new(strata::HttpClient::new(&strata::StrataConfig::default())),
@@ -841,6 +867,7 @@ impl eframe::App for SysKamlingApp {
             self.spawn_agent_scan();
             self.sample_hardware();
             self.spawn_port_scan();
+            self.spawn_proc_scan();
             self.spawn_strata_poll();
             // nvidia-smi (~50 ms) runs off the UI thread only when the
             // Hardware tab is visible; the result lands via the channel.
@@ -950,6 +977,34 @@ impl SysKamlingApp {
             let entries = portsmod::scan();
             *busy.lock().unwrap() = false;
             let _ = tx.send(Msg::PortsScanned(entries));
+        });
+    }
+
+    /// Process scan: one /proc walk per refresh while the Processes tab is
+    /// open, on the blocking pool — the walk touches hundreds of pids. The
+    /// scanner keeps tick counters between scans so CPU% is a real delta.
+    fn spawn_proc_scan(&mut self) {
+        if self.gui.tab != Tab::Processes || self.refresh <= 0.0 {
+            return;
+        }
+        if self.last_proc_scan.elapsed() < Duration::from_secs_f64(self.refresh.max(1.0)) {
+            return;
+        }
+        if *self.proc_scan_busy.lock().unwrap() {
+            return;
+        }
+        self.last_proc_scan = Instant::now();
+        *self.proc_scan_busy.lock().unwrap() = true;
+        let busy = Arc::clone(&self.proc_scan_busy);
+        let tx = self.tx.clone();
+        let holder = Arc::clone(&self.proc_holder);
+        self.rt.spawn_blocking(move || {
+            let rows = {
+                let mut sc = holder.lock().unwrap();
+                sc.scan()
+            };
+            *busy.lock().unwrap() = false;
+            let _ = tx.send(Msg::ProcsScanned(rows));
         });
     }
 
@@ -1291,6 +1346,15 @@ impl SysKamlingApp {
                         .map(|p| (p.proto.to_string(), p.addr.clone(), p.port));
                 }
             }
+            Msg::ProcsScanned(rows) => {
+                g.procs = rows;
+                // keep the selection pointing at the same process
+                if let Some(pid) = g.selected_proc {
+                    if !g.procs.iter().any(|r| r.pid == pid) {
+                        g.selected_proc = None;
+                    }
+                }
+            }
             Msg::GpusScanned(gs) => {
                 // async nvidia-smi pass: merge over the hwmon rows without
                 // touching the sampler histories
@@ -1329,6 +1393,7 @@ impl SysKamlingApp {
             (Tab::Volumes, "Volumes", g.volumes.len().to_string()),
             (Tab::Agents, "Agents", g.agents.len().to_string()),
             (Tab::Hardware, "Hardware", String::new()),
+            (Tab::Processes, "Processes", g.procs.len().to_string()),
             (Tab::Ports, "Ports", g.ports.len().to_string()),
             (Tab::Strata, "Strata", String::new()),
             (Tab::Logs, "Logs", String::new()),
@@ -1445,6 +1510,12 @@ impl SysKamlingApp {
             Tab::Dashboard => {
                 self.spawn_dashboard_pulls();
             }
+            // same never-blank rule as Strata: seed a scan the moment the
+            // Processes tab opens instead of waiting a full refresh tick
+            Tab::Processes => {
+                self.last_proc_scan = Instant::now() - Duration::from_secs(999);
+                self.spawn_proc_scan();
+            }
             _ => {}
         }
     }
@@ -1506,6 +1577,7 @@ impl SysKamlingApp {
                     Tab::Images => ("Images", self.gui.images.len(), "Search tags"),
                     Tab::Agents => ("Agents", self.gui.agents.len(), "Search agent or project"),
                     Tab::Ports => ("Ports", self.gui.ports.len(), "Search port, process or address"),
+                    Tab::Processes => ("Processes", self.gui.procs.len(), "Search name, command or pid"),
                     _ => ("Volumes", self.gui.volumes.len(), "Search volumes"),
                 };
                 ui.horizontal(|ui| {
@@ -1516,6 +1588,7 @@ impl SysKamlingApp {
                 match tab {
                     Tab::Agents => search_box(ui, &mut self.gui.agent_filter, hint),
                     Tab::Ports => search_box(ui, &mut self.gui.port_filter, hint),
+                    Tab::Processes => search_box(ui, &mut self.gui.proc_filter, hint),
                     _ => search_box(ui, &mut self.gui.filter, hint),
                 }
                 if tab == Tab::Containers {
@@ -1553,6 +1626,7 @@ impl SysKamlingApp {
                     Tab::Images => self.image_list(ui),
                     Tab::Agents => self.agent_list(ui),
                     Tab::Ports => self.port_list(ui),
+                    Tab::Processes => self.proc_list(ui),
                     _ => self.volume_list(ui),
                 }
             });
@@ -1905,6 +1979,242 @@ impl SysKamlingApp {
         }
     }
 
+    /// Process list: Task-Manager style sortable table. Clicking a column
+    /// header sorts by it; clicking again flips the direction.
+    fn proc_list(&mut self, ui: &mut Ui) {
+        if self.gui.procs.is_empty() {
+            empty_state(
+                ui,
+                "Scanning processes…",
+                "The first /proc walk lands within a refresh tick.",
+            );
+            return;
+        }
+        // fixed column layout: name flexes, the rest are right-aligned numbers
+        let w = ui.available_width();
+        let pid_w = 64.0;
+        let cpu_w = 74.0;
+        let mem_w = 92.0;
+        let name_w = (w - pid_w - cpu_w - mem_w - 24.0).max(80.0);
+
+        // ---- header ----
+        let (hr, _) = ui.allocate_exact_size(Vec2::new(w, 24.0), Sense::hover());
+        let p = ui.painter().clone();
+        p.line_segment([hr.left_bottom(), hr.right_bottom()], Stroke::new(1.0_f32, BORDER));
+        let mut new_sort: Option<SortCol> = None;
+        // left x of every header cell, captured for the offscreen tests
+        #[cfg(test)]
+        PROC_HEADER_CELLS.lock().unwrap().clear();
+        #[cfg(test)]
+        let header_cells = &*PROC_HEADER_CELLS;
+        let mut header = |ui: &mut Ui, label: &str, col: SortCol, x: f32, align: egui::Align2| {
+            let p = ui.painter();
+            // RIGHT-aligned labels sit at the cell's right edge; the Name
+            // cell starts at x. Cells never overlap, so a click can only
+            // ever hit one header.
+            let (cx, cw) = match col {
+                SortCol::Name => (x, name_w + 12.0),
+                SortCol::Pid => (x - pid_w - 6.0, pid_w + 12.0),
+                SortCol::Cpu => (x - cpu_w - 6.0, cpu_w + 12.0),
+                SortCol::Mem => (x - mem_w - 6.0, mem_w + 12.0),
+            };
+            let cell = Rect::from_min_size(Pos2::new(cx, hr.top()), Vec2::new(cw, 22.0));
+            #[cfg(test)]
+            header_cells.lock().unwrap().push((col, cell));
+            let resp = ui.interact(cell, ui.id().with(("proc-sort", col as u8)), Sense::click());
+            if resp.clicked() {
+                new_sort = Some(col);
+            }
+            if resp.hovered() {
+                p.rect_filled(cell, 4.0, SURFACE_HI);
+            }
+            let active = self.gui.proc_sort == col;
+            let arrow = if active {
+                if self.gui.proc_sort_desc { " ▼" } else { " ▲" }
+            } else {
+                ""
+            };
+            p.text(
+                Pos2::new(x, hr.center().y),
+                align,
+                format!("{label}{arrow}"),
+                FontId::proportional(12.0),
+                if active { ACCENT } else if resp.hovered() { TEXT } else { FAINT },
+            );
+        };
+        header(ui, "Name", SortCol::Name, hr.left() + 6.0, egui::Align2::LEFT_CENTER);
+        header(ui, "PID", SortCol::Pid, hr.left() + name_w + pid_w - 6.0, egui::Align2::RIGHT_CENTER);
+        header(ui, "CPU", SortCol::Cpu, hr.left() + name_w + pid_w + cpu_w - 6.0, egui::Align2::RIGHT_CENTER);
+        header(ui, "Memory", SortCol::Mem, hr.right() - 6.0, egui::Align2::RIGHT_CENTER);
+        if let Some(col) = new_sort {
+            if self.gui.proc_sort == col {
+                self.gui.proc_sort_desc = !self.gui.proc_sort_desc;
+            } else {
+                self.gui.proc_sort = col;
+                // text columns read best ascending, numbers descending
+                self.gui.proc_sort_desc = !matches!(col, SortCol::Name | SortCol::Pid);
+            }
+        }
+
+
+        // ---- rows ----
+        let f = self.gui.proc_filter.to_lowercase();
+        let mut rows: Vec<ProcInfo> = self
+            .gui
+            .procs
+            .iter()
+            .filter(|r| {
+                f.is_empty()
+                    || r.name.to_lowercase().contains(&f)
+                    || r.cmdline.to_lowercase().contains(&f)
+                    || r.pid.to_string() == f
+            })
+            .cloned()
+            .collect();
+        procsmod::sort_rows(&mut rows, self.gui.proc_sort, self.gui.proc_sort_desc);
+        if rows.is_empty() {
+            empty_state(ui, "No process matches", "Try another search.");
+            return;
+        }
+        let sel = self.gui.selected_proc;
+        let mut new_sel: Option<Option<u32>> = None;
+        ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for r in &rows {
+                    let rect = ui.allocate_exact_size(Vec2::new(w, 26.0), Sense::click()).0;
+                    let is_sel = sel == Some(r.pid);
+                    if ui.interact(rect, ui.id().with(("proc-row", r.pid)), Sense::click()).clicked() {
+                        new_sel = Some(if is_sel { None } else { Some(r.pid) });
+                    }
+                    if !ui.is_rect_visible(rect) {
+                        continue;
+                    }
+                    let p = ui.painter();
+                    row_bg(p, rect, is_sel, false);
+                    let x_name = rect.left() + 6.0;
+                    let color = if r.cpu_pct > 80.0 {
+                        RED
+                    } else if r.cpu_pct > 30.0 {
+                        AMBER
+                    } else if r.state == 'Z' {
+                        FAINT
+                    } else {
+                        TEXT
+                    };
+                    let name = elide(p, r.name.clone(), FontId::proportional(13.0), color, name_w - 12.0);
+                    p.galley(Pos2::new(x_name, rect.center().y - name.size().y / 2.0), name, color);
+                    p.text(
+                        Pos2::new(rect.left() + name_w + pid_w - 6.0, rect.center().y),
+                        egui::Align2::RIGHT_CENTER,
+                        r.pid.to_string(),
+                        FontId::monospace(12.0),
+                        MUTED,
+                    );
+                    p.text(
+                        Pos2::new(rect.left() + name_w + pid_w + cpu_w - 6.0, rect.center().y),
+                        egui::Align2::RIGHT_CENTER,
+                        format!("{:.1}", r.cpu_pct),
+                        FontId::monospace(12.0),
+                        color,
+                    );
+                    p.text(
+                        Pos2::new(rect.right() - 6.0, rect.center().y),
+                        egui::Align2::RIGHT_CENTER,
+                        human_size(r.rss_bytes as i64),
+                        FontId::monospace(12.0),
+                        MUTED,
+                    );
+                }
+            });
+        if let Some(s) = new_sel {
+            self.gui.selected_proc = s;
+        }
+    }
+
+    fn proc_detail(&mut self, ui: &mut Ui) {
+        let Some(pid) = self.gui.selected_proc else {
+            empty_state(
+                ui,
+                "No process selected",
+                "Pick a process on the left to inspect it.",
+            );
+            return;
+        };
+        let Some(r) = self.gui.procs.iter().find(|r| r.pid == pid).cloned() else {
+            empty_state(ui, "Process exited", "That pid is gone; pick another row.");
+            return;
+        };
+        let now = epoch();
+        let up = (now - r.started).max(0);
+        page_header(ui, &r.name, &format!("pid {} · {} threads · up {}", r.pid, r.threads, uptime_str(up as i64)));
+        ui.add_space(12.0);
+        card(ui, |ui| {
+            card_title(ui, "Vitals", "");
+            let cpu_color = if r.cpu_pct > 80.0 { RED } else if r.cpu_pct > 30.0 { AMBER } else { ACCENT };
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{:.1}%", r.cpu_pct)).font(bold(24.0)).color(cpu_color));
+                ui.label(RichText::new("CPU, of one core").size(12.5).color(MUTED));
+                ui.add_space(24.0);
+                ui.label(RichText::new(human_size(r.rss_bytes as i64)).font(bold(24.0)).color(VIOLET));
+                ui.label(RichText::new("resident memory").size(12.5).color(MUTED));
+                ui.add_space(24.0);
+                let st: (&str, Color32) = match r.state {
+                    'R' => ("running", GREEN),
+                    'S' | 'I' => ("sleeping", MUTED),
+                    'D' => ("uninterruptible", AMBER),
+                    'Z' => ("zombie", RED),
+                    'T' => ("stopped", AMBER),
+                    _ => ("other", FAINT),
+                };
+                chip(ui, st.0, st.1);
+            });
+            meta_line(ui, &format!("owner uid {} · started {}", r.uid, fmt_epoch(r.started)));
+        });
+        ui.add_space(10.0);
+        card(ui, |ui| {
+            card_title(ui, "Command line", "");
+            ui.add(egui::Label::new(RichText::new(if r.cmdline.is_empty() { "(kernel thread)" } else { &r.cmdline }).font(FontId::monospace(12.0)).color(MUTED)).wrap());
+        });
+        ui.add_space(10.0);
+        card(ui, |ui| {
+            card_title(ui, "Process tree", "");
+            // ancestors up to init, then direct children
+            let mut chain = Vec::new();
+            let mut cur = r.ppid;
+            let mut guard = 0;
+            while guard < 12 {
+                match self.gui.procs.iter().find(|x| x.pid == cur) {
+                    Some(a) => {
+                        chain.push(format!("{} (pid {})", a.name, a.pid));
+                        cur = a.ppid;
+                        if cur == 0 || cur == a.pid {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+                guard += 1;
+            }
+            if chain.is_empty() {
+                ui.label(RichText::new("parent not visible").color(FAINT));
+            } else {
+                ui.label(RichText::new(chain.join(" ← ")).size(12.5).color(MUTED));
+            }
+            let kids: Vec<String> = self
+                .gui
+                .procs
+                .iter()
+                .filter(|x| x.ppid == r.pid)
+                .map(|x| format!("{} ({})", x.name, x.pid))
+                .collect();
+            if !kids.is_empty() {
+                ui.add_space(4.0);
+                ui.label(RichText::new(format!("children: {}", kids.join(", "))).size(12.0).color(FAINT));
+            }
+        });
+    }
+
     fn volume_list(&mut self, ui: &mut Ui) {
         let g = &self.gui;
         let f = g.filter.to_lowercase();
@@ -1996,6 +2306,7 @@ impl SysKamlingApp {
                     Tab::Agents => self.agent_detail(ui),
                     Tab::Hardware => self.hardware_view(ui),
                     Tab::Ports => self.port_detail(ui),
+                    Tab::Processes => self.proc_detail(ui),
                     Tab::Strata => self.strata_view(ui),
                     Tab::Settings => self.settings_view(ui),
                 }
@@ -4720,6 +5031,7 @@ fn tab_label(tab: Tab) -> &'static str {
         Tab::Agents => "Agents",
         Tab::Hardware => "Hardware",
         Tab::Ports => "Ports",
+        Tab::Processes => "Processes",
         Tab::Strata => "Strata",
         Tab::Logs => "Logs",
         Tab::Settings => "Settings",
@@ -5318,6 +5630,14 @@ fn nav_icon(p: &egui::Painter, tab: Tab, r: Rect, c: Color32) {
                 p.line_segment([Pos2::new(x, b.top()), Pos2::new(x, r.top() + 1.0)], s);
             }
             p.line_segment([Pos2::new(b.center().x, b.bottom()), Pos2::new(b.center().x, r.bottom() + 1.5)], s);
+        }
+        Tab::Processes => {
+            // stacked window rows with a cursor: a process list mark
+            for (i, f) in [0.9, 0.6, 0.75].iter().enumerate() {
+                let y = r.top() + 2.5 + i as f32 * 4.5;
+                p.line_segment([Pos2::new(r.left(), y), Pos2::new(r.left() + r.width() * f, y)], s);
+            }
+            p.line_segment([Pos2::new(r.left(), r.bottom() - 1.5), Pos2::new(r.left() + r.width() * 0.45, r.bottom() - 1.5)], s);
         }
         Tab::Settings => {
             // a gear: ring, hub, six teeth
@@ -6694,6 +7014,190 @@ mod strata_tab_tests {
                 .count();
         }
         assert!(painted > 15, "settings tab painted only {painted} text shapes — cards missing");
+    }
+}
+
+/// Test hook: the Processes header cells (column → clickable rect) from the
+/// last painted pass, so offscreen tests can click exact centres.
+#[cfg(test)]
+static PROC_HEADER_CELLS: std::sync::LazyLock<std::sync::Mutex<Vec<(SortCol, Rect)>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
+#[cfg(test)]
+fn proc_header_cells() -> Vec<(SortCol, Rect)> {
+    PROC_HEADER_CELLS.lock().unwrap().clone()
+}
+
+#[cfg(test)]
+mod processes_tab_tests {
+    use super::*;
+    use crate::procs::SortCol;
+
+    fn row(pid: u32, name: &str, cmd: &str, cpu: f64, rss: u64) -> ProcInfo {
+        ProcInfo {
+            pid,
+            ppid: 1,
+            name: name.into(),
+            cmdline: cmd.into(),
+            state: 'S',
+            cpu_pct: cpu,
+            rss_bytes: rss,
+            threads: 1,
+            started: 0,
+            uid: 1000,
+        }
+    }
+
+    fn procs_probe() -> (egui::Context, SysKamlingApp) {
+        let ctx = egui::Context::default();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let rt = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
+        let mut app = SysKamlingApp::new_offscreen(&ctx, tx, rx, rt);
+        app.gui.tab = Tab::Processes;
+        app.gui.procs = vec![
+            row(1, "systemd", "/sbin/init", 0.1, 12 << 20),
+            row(900, "hog", "hog --big", 71.0, 9 << 30),
+            row(901, "busy", "busy-loop", 99.0, 100 << 20),
+        ];
+        (ctx, app)
+    }
+
+    /// Click point for a header cell: its exact centre, from the probe sink.
+    fn header_point(ctx: &egui::Context, app: &mut SysKamlingApp, col: SortCol) -> egui::Pos2 {
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect =
+            Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1200.0, 800.0)));
+        ctx.begin_pass(raw);
+        egui::CentralPanel::default().show(ctx, |ui| {
+            if app.gui.tab == Tab::Processes {
+                app.proc_list(ui);
+            }
+        });
+        let _ = ctx.end_pass();
+        let cells = proc_header_cells();
+        cells
+            .iter()
+            .find(|(c, _)| *c == col)
+            .map(|(_, r)| r.center())
+            .expect("header cell")
+    }
+
+    fn click(ctx: &egui::Context, app: &mut SysKamlingApp, at: egui::Pos2) {
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect =
+            Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1200.0, 800.0)));
+        raw.events = vec![
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        ctx.begin_pass(raw);
+        egui::CentralPanel::default().show(ctx, |ui| {
+            if app.gui.tab == Tab::Processes {
+                app.proc_list(ui);
+            }
+        });
+        let _ = ctx.end_pass();
+    }
+
+    fn painted(ctx: &egui::Context, app: &mut SysKamlingApp) -> Vec<String> {
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect =
+            Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1200.0, 800.0)));
+        ctx.begin_pass(raw);
+        egui::CentralPanel::default().show(ctx, |ui| {
+            if app.gui.tab == Tab::Processes {
+                app.proc_list(ui);
+            }
+        });
+        let out = ctx.end_pass();
+        out.shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Clicking the CPU header sorts numerically descending; clicking again
+    /// flips to ascending — the Task-Manager contract.
+    #[test]
+    fn clicking_the_cpu_header_sorts_then_flips() {
+        let (ctx, mut app) = procs_probe();
+        let cpu = header_point(&ctx, &mut app, SortCol::Cpu);
+        click(&ctx, &mut app, cpu);
+        assert_eq!(app.gui.proc_sort, SortCol::Cpu);
+        assert!(app.gui.proc_sort_desc, "numbers sort big-first first");
+        let texts = painted(&ctx, &mut app);
+        let pos = |needle: &str| texts.iter().position(|t| t.trim() == needle).unwrap();
+        assert!(pos("99.0") < pos("71.0"), "desc: busy above hog");
+        click(&ctx, &mut app, cpu);
+        assert!(!app.gui.proc_sort_desc, "second click flips direction");
+        let texts = painted(&ctx, &mut app);
+        let pos = |needle: &str| texts.iter().position(|t| t.trim() == needle).unwrap();
+        assert!(pos("0.1") < pos("99.0"), "asc: systemd first");
+    }
+
+    /// Search filters by name, full command line, or exact pid.
+    #[test]
+    fn search_matches_name_cmdline_and_pid() {
+        let (ctx, mut app) = procs_probe();
+        // rows paint the process name, never the full cmdline (that lives
+        // in the detail panel), so "busy-loop" must match via the name
+        for (needle, keep) in [("hog", "hog"), ("busy-loop", "busy"), ("901", "901")] {
+            app.gui.proc_filter = needle.into();
+            let texts = painted(&ctx, &mut app);
+            assert!(
+                texts.iter().any(|t| t.contains(keep)),
+                "filter {needle:?} should keep a row containing {keep:?}"
+            );
+            assert!(
+                !texts.iter().any(|t| t.trim() == "systemd"),
+                "filter {needle:?} should drop systemd"
+            );
+            app.gui.proc_filter = String::new();
+        }
+    }
+
+    #[test]
+    fn clicking_a_row_selects_it_and_detail_shows_cmdline() {
+        let (ctx, mut app) = procs_probe();
+        // rows are 26 px tall; the first one sits right below the header band
+        let name = header_point(&ctx, &mut app, SortCol::Name);
+        click(&ctx, &mut app, egui::pos2(name.x, 44.0 + 13.0));
+        // probe data is memory-sorted by default: pid 900 (9 GiB) is row one
+        assert_eq!(app.gui.selected_proc, Some(900));
+        // detail panel renders the full command line of the selection
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect =
+            Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(420.0, 800.0)));
+        ctx.begin_pass(raw);
+        egui::CentralPanel::default().show(&ctx, |ui| {
+            app.proc_detail(ui);
+        });
+        let out = ctx.end_pass();
+        let texts: Vec<String> = out
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            texts.iter().any(|t| t.contains("hog --big")),
+            "detail should show the full command line of the selected row"
+        );
     }
 }
 

@@ -4,6 +4,7 @@ mod gui;
 mod hw;
 mod hw_inventory;
 mod ports;
+mod procs;
 mod strata;
 mod tui;
 

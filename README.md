@@ -11,7 +11,7 @@ egui/eframe window, ~10–20 MB resident.
 ## Features
 
 - Desktop GUI (default): Containers / Images / Volumes / Agents / Hardware /
-  Ports / Strata / Logs tabs,
+  Ports / Processes / Strata / Logs / Settings tabs,
   dark theme, status-dot pulse, action spinners, log fade-in
 - Container actions from the detail panel: start/stop, restart, logs,
   remove (with confirmation dialog)
@@ -29,6 +29,10 @@ egui/eframe window, ~10–20 MB resident.
   machine inventory: CPU, motherboard, GPUs, RAM, SSDs, NICs
 - Ports tab — every listening port on the machine, the process behind
   it, and which container (if any) publishes it
+- Processes tab — every process ranked by CPU and memory, Task-Manager style:
+  click a column header (or `c`/`m`/`n`/`p` in the TUI) to sort, search by name,
+  command line or pid, and a detail panel with state, threads, owner, start
+  time, full command line and process tree
 - Strata tab — live statistics from a Strata inference server (its `/health`
   and `/metrics` API): model state, decode/prefill speed, GPU load/VRAM/temp/
   power/PCIe, host CPU & disk, time-to-first-token, context fill, conversation
@@ -73,7 +77,8 @@ syskamling -s /path/to/docker.sock
 
 | Key | Action |
 |---|---|
-| `1`–`8` / `Tab` `←` `→` | Switch screen (1 Containers … 4 Agents, 5 Hardware, 6 Ports, 7 Strata, 8 Logs) |
+| `1`–`9` / `Tab` `←` `→` | Switch screen (1 Containers … 4 Agents, 5 Hardware, 6 Ports, 7 Processes, 8 Strata, 9 Logs) |
+| `c` `m` `n` `p` (Processes) | Sort by CPU / memory / name / pid; press again to flip direction |
 | `j` `k` / `↑` `↓` | Move selection |
 | `a` (Strata screen) | Show all kept requests |
 | `Enter` | Open logs for selected container |

@@ -95,8 +95,15 @@ def main():
     press(['n'], 0.4)
     check('n cancels remove', bool(find('remove cancelled')))
 
+    # Processes screen: key 7, table with live rows, 'c' re-sorts without dying
+    press(['7'], 2.5)
+    procs_ok = all(k in ''.join(term.display) for k in ('Processes', 'PID', 'CPU', 'MEMORY'))
+    press(['c'], 0.6)
+    procs_ok = procs_ok and 'Processes' in ''.join(term.display)
+
     press(['q'], 0.5)
     alive = os.waitpid(pid, os.WNOHANG)[0] == 0
+    check('processes screen renders', procs_ok)
     check('q quits cleanly', not alive)
     if alive:
         os.kill(pid, 9)

@@ -52,6 +52,7 @@ enum Tab {
     Agents,
     Hardware,
     Ports,
+    Processes,
     Strata,
     Logs,
 }
@@ -64,7 +65,8 @@ impl Tab {
             Tab::Volumes => Tab::Agents,
             Tab::Agents => Tab::Hardware,
             Tab::Hardware => Tab::Ports,
-            Tab::Ports => Tab::Strata,
+            Tab::Ports => Tab::Processes,
+            Tab::Processes => Tab::Strata,
             Tab::Strata => Tab::Logs,
             Tab::Logs => Tab::Containers,
         }
@@ -77,7 +79,8 @@ impl Tab {
             Tab::Agents => Tab::Volumes,
             Tab::Hardware => Tab::Agents,
             Tab::Ports => Tab::Hardware,
-            Tab::Strata => Tab::Ports,
+            Tab::Strata => Tab::Processes,
+            Tab::Processes => Tab::Ports,
             Tab::Logs => Tab::Strata,
         }
     }
@@ -89,6 +92,7 @@ impl Tab {
             Tab::Agents => " Agents ",
             Tab::Hardware => " Hardware ",
             Tab::Ports => " Ports ",
+            Tab::Processes => " Processes ",
             Tab::Strata => " Strata ",
             Tab::Logs => " Logs ",
         }
@@ -128,6 +132,7 @@ enum Msg {
     ActionDone(Result<(&'static str, String), String>),
     AgentsScanned(Vec<AgentSession>),
     PortsScanned(Vec<PortEntry>),
+    ProcsScanned(Vec<crate::procs::ProcInfo>),
     StrataHealth(Result<strata::Health, String>),
     StrataMetrics(Result<Box<Metrics>, String>),
 }
@@ -155,6 +160,10 @@ struct App {
     gpus: Vec<GpuStat>,
     ports: Vec<PortEntry>,
     ports_state: ListState,
+    procs: Vec<crate::procs::ProcInfo>,
+    procs_state: ListState,
+    proc_sort: crate::procs::SortCol,
+    proc_sort_desc: bool,
     // strata screen: settings live in the shared config file; the TUI is
     // read-only and points at it when the server is not configured
     strata_cfg: strata::StrataConfig,
@@ -199,6 +208,10 @@ impl App {
             gpus: Vec::new(),
             ports: Vec::new(),
             ports_state: ListState::default(),
+            procs: Vec::new(),
+            procs_state: ListState::default(),
+            proc_sort: crate::procs::SortCol::Mem,
+            proc_sort_desc: true,
             strata_cfg: strata::StrataConfig::default(),
             strata_health: None,
             strata_metrics: None,
@@ -317,6 +330,43 @@ impl App {
             .collect()
     }
 
+    fn sorted_procs(&self) -> Vec<crate::procs::ProcInfo> {
+        let f = self.filter.to_lowercase();
+        let mut rows: Vec<crate::procs::ProcInfo> = self
+            .procs
+            .iter()
+            .filter(|r| {
+                f.is_empty()
+                    || r.name.to_lowercase().contains(&f)
+                    || r.cmdline.to_lowercase().contains(&f)
+                    || r.pid.to_string() == f
+            })
+            .cloned()
+            .collect();
+        crate::procs::sort_rows(&mut rows, self.proc_sort, self.proc_sort_desc);
+        rows
+    }
+
+    fn sort_procs(&mut self, col: crate::procs::SortCol) {
+        if self.proc_sort == col {
+            self.proc_sort_desc = !self.proc_sort_desc;
+        } else {
+            self.proc_sort = col;
+            self.proc_sort_desc = !matches!(col, crate::procs::SortCol::Name | crate::procs::SortCol::Pid);
+        }
+    }
+
+    fn move_procs(&mut self, delta: i32) {
+        let len = self.sorted_procs().len();
+        if len == 0 {
+            self.procs_state.select(None);
+            return;
+        }
+        let cur = self.procs_state.selected().unwrap_or(0) as i32;
+        self.procs_state
+            .select(Some(((cur + delta).clamp(0, len as i32 - 1)) as usize));
+    }
+
     fn move_ports(&mut self, delta: i32) {
         let len = self.filtered_ports().len();
         if len == 0 {
@@ -359,6 +409,7 @@ async fn run_async(
     let mut last_refresh = Instant::now() - Duration::from_secs(999);
     let mut last_agent_scan = Instant::now() - Duration::from_secs(999);
     let mut last_port_scan = Instant::now() - Duration::from_secs(999);
+    let mut last_proc_scan = Instant::now() - Duration::from_secs(999);
     let mut last_hw_sample = Instant::now() - Duration::from_secs(999);
     let strata_cfg = strata::load();
     app.strata_cfg = strata_cfg.clone();
@@ -424,6 +475,19 @@ async fn run_async(
             let tx3 = tx.clone();
             rt.spawn_blocking(move || {
                 let _ = tx3.send(Msg::PortsScanned(portsmod::scan()));
+            });
+        }
+
+        // Process scan: /proc walk per refresh, only while the Processes tab
+        // is open; the scanner keeps tick counters so CPU% is a real delta.
+        if refresh > 0.0 && app.tab == Tab::Processes && last_proc_scan.elapsed() >= Duration::from_secs_f64(refresh.max(1.0)) {
+            last_proc_scan = Instant::now();
+            let tx4 = tx.clone();
+            rt.spawn_blocking(move || {
+                let mut sc = crate::procs::ProcScanner::new();
+                sc.scan(); // seed counters
+                std::thread::sleep(std::time::Duration::from_millis(600));
+                let _ = tx4.send(Msg::ProcsScanned(sc.scan()));
             });
         }
 
@@ -584,6 +648,17 @@ fn apply_msg(app: &mut App, m: Msg) {
                 }
             } else if len > 0 && app.ports_state.selected().is_none() {
                 app.ports_state.select(Some(0));
+            }
+        }
+        Msg::ProcsScanned(rows) => {
+            app.procs = rows;
+            let len = app.sorted_procs().len();
+            if let Some(sel) = app.procs_state.selected() {
+                if sel >= len {
+                    app.procs_state.select(if len == 0 { None } else { Some(len - 1) });
+                }
+            } else if len > 0 && app.procs_state.selected().is_none() {
+                app.procs_state.select(Some(0));
             }
         }
         Msg::StrataHealth(res) => match res {
@@ -866,9 +941,14 @@ fn handle_key(
         KeyCode::Char('4') => app.tab = Tab::Agents,
         KeyCode::Char('5') => app.tab = Tab::Hardware,
         KeyCode::Char('6') => app.tab = Tab::Ports,
-        KeyCode::Char('7') => app.tab = Tab::Strata,
-        KeyCode::Char('8') => app.tab = Tab::Logs,
+        KeyCode::Char('7') => app.tab = Tab::Processes,
+        KeyCode::Char('8') => app.tab = Tab::Strata,
+        KeyCode::Char('9') => app.tab = Tab::Logs,
         KeyCode::Char('a') if app.tab == Tab::Strata => app.strata_show_all = !app.strata_show_all,
+        KeyCode::Char('c') if app.tab == Tab::Processes => app.sort_procs(crate::procs::SortCol::Cpu),
+        KeyCode::Char('m') if app.tab == Tab::Processes => app.sort_procs(crate::procs::SortCol::Mem),
+        KeyCode::Char('n') if app.tab == Tab::Processes => app.sort_procs(crate::procs::SortCol::Name),
+        KeyCode::Char('p') if app.tab == Tab::Processes => app.sort_procs(crate::procs::SortCol::Pid),
         KeyCode::Char('/') => {
             app.filtering = true;
             app.filter.clear();
@@ -883,6 +963,7 @@ fn handle_key(
             Tab::Volumes => app.move_volumes(1),
             Tab::Agents => app.move_agents(1),
             Tab::Ports => app.move_ports(1),
+            Tab::Processes => app.move_procs(1),
             Tab::Hardware | Tab::Strata => {}
             Tab::Logs => {
                 app.logs_follow = false;
@@ -895,6 +976,7 @@ fn handle_key(
             Tab::Volumes => app.move_volumes(-1),
             Tab::Agents => app.move_agents(-1),
             Tab::Ports => app.move_ports(-1),
+            Tab::Processes => app.move_procs(-1),
             Tab::Hardware | Tab::Strata => {}
             Tab::Logs => {
                 app.logs_follow = false;
@@ -911,6 +993,7 @@ fn handle_key(
             Tab::Volumes => app.move_volumes(20),
             Tab::Agents => app.move_agents(20),
             Tab::Ports => app.move_ports(20),
+            Tab::Processes => app.move_procs(20),
             Tab::Hardware | Tab::Strata => {}
         },
         KeyCode::PageUp => match app.tab {
@@ -923,6 +1006,7 @@ fn handle_key(
             Tab::Volumes => app.move_volumes(-20),
             Tab::Agents => app.move_agents(-20),
             Tab::Ports => app.move_ports(-20),
+            Tab::Processes => app.move_procs(-20),
             Tab::Hardware | Tab::Strata => {}
         },
         KeyCode::Char('g') if app.tab == Tab::Logs => {
@@ -1049,7 +1133,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         format!(" {} ", app.status)
     } else {
         format!(
-            " containers: {}  images: {}  volumes: {}  agents: {}  ports: {}  |  q quit  tab switch  / filter  enter logs  s start/stop  t stop  r restart  x remove  R refresh ",
+            " containers: {}  images: {}  volumes: {}  agents: {}  ports: {}  |  q quit  1-9 tab  / filter  enter logs  s start/stop  t stop  r restart  x remove  R refresh ",
             app.containers.len(),
             app.images.len(),
             app.volumes.len(),
@@ -1066,6 +1150,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         Tab::Agents => render_agents(f, app, chunks[1]),
         Tab::Hardware => render_hardware(f, app, chunks[1]),
         Tab::Ports => render_ports(f, app, chunks[1]),
+        Tab::Processes => render_procs(f, app, chunks[1]),
         Tab::Strata => render_strata(f, app, chunks[1]),
         Tab::Logs => render_logs(f, app, chunks[1]),
     }
@@ -1486,6 +1571,91 @@ fn render_ports(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
             Constraint::Length(7),
             Constraint::Length(16),
             Constraint::Min(14),
+        ],
+    )
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .title_bottom(Line::from(format!(" {header} ")).style(Style::default().fg(Color::Cyan))),
+    )
+    .column_spacing(2);
+
+    f.render_widget(table, area);
+}
+
+fn render_procs(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
+    use crate::procs::SortCol;
+    let rows_data = app.sorted_procs();
+    let sel = app.procs_state.selected().unwrap_or(0);
+    let mark = |c: SortCol| {
+        if app.proc_sort != c {
+            String::new()
+        } else if app.proc_sort_desc {
+            "▼".to_string()
+        } else {
+            "▲".to_string()
+        }
+    };
+    let rows: Vec<Row> = rows_data
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let cpu = r.cpu_pct;
+            let cpu_color = if cpu > 80.0 {
+                Color::Red
+            } else if cpu > 30.0 {
+                Color::Yellow
+            } else {
+                Color::White
+            };
+            let row_style = if i == sel {
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            Row::new(vec![
+                r.name.clone(),
+                r.pid.to_string(),
+                Span::styled(format!("{cpu:>5.1}", cpu = cpu), Style::default().fg(cpu_color)).to_string(),
+                human_bytes(r.rss_bytes as i64),
+                r.state.to_string(),
+                r.threads.to_string(),
+                r.cmdline.clone(),
+            ])
+            .style(row_style)
+        })
+        .collect();
+
+    let title = if app.filtering {
+        format!(" Processes (filter: {}) ", app.filter)
+    } else {
+        format!(
+            " Processes: {}  (c sort cpu, m sort mem, n sort name, p sort pid) ",
+            rows_data.len()
+        )
+    };
+
+    let header = format!(
+        "NAME{}  PID{}  CPU{}  MEMORY{}  S  TH  CMDLINE",
+        mark(SortCol::Name),
+        mark(SortCol::Pid),
+        mark(SortCol::Cpu),
+        mark(SortCol::Mem),
+    );
+
+    let table = Table::new(
+        rows,
+        [
+            Constraint::Length(22),
+            Constraint::Length(7),
+            Constraint::Length(6),
+            Constraint::Length(9),
+            Constraint::Length(2),
+            Constraint::Length(3),
+            Constraint::Min(20),
         ],
     )
     .block(
