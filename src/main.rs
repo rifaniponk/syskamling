@@ -6,8 +6,8 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "sdd",
-    about = "Simple Docker Desktop for Linux: containers, images, volumes, logs",
+    name = "syskamling",
+    about = "SysKamling: system watch for Linux - hardware, ports, and Docker containers",
     version,
     subcommand_negates_reqs = false
 )]

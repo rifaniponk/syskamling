@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=SysKamling
+GenericName=System Monitor
+Comment=System monitor for Linux: hardware, ports, and Docker containers
+Exec=syskamling
+Icon=io.syskamling.SysKamling
+Terminal=false
+Categories=System;Monitor;
+Keywords=monitor;hardware;cpu;memory;ports;docker;containers;
+StartupWMClass=io.syskamling.SysKamling

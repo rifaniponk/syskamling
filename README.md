@@ -1,6 +1,8 @@
-# linux-simple-docker-desktop
+# syskamling
 
-A lightweight Docker Desktop-style desktop app for Linux, built in Rust.
+**SysKamling** — a system watch for Linux, built in Rust. Like Windows Task
+Manager, but for your whole machine: live hardware vitals, every listening
+port and who owns it, plus full Docker container management.
 
 Talks directly to the Docker Engine API over the local Unix socket — no
 Docker CLI dependency, no VM, no proxy layer, no Electron. A single native
@@ -9,29 +11,36 @@ egui/eframe window, ~10–20 MB resident.
 ## Features
 
 - Desktop GUI (default): Containers / Images / Volumes / Logs tabs, dark
-  Docker-blue theme, status-dot pulse, action spinners, log fade-in
+  theme, status-dot pulse, action spinners, log fade-in
 - Container actions from the detail panel: start/stop, restart, logs,
   remove (with confirmation dialog)
 - Live discovery with auto-refresh (2 s default) — running and stopped containers
 - Logs viewer: follow mode, scrollback (PageUp/PageDown, g/G), stderr highlighted
 - Filter-as-you-type across containers, images, and volumes
-- Terminal UI (`sdd tui`) for keyboard-driven, mouse-free use over SSH
+- Terminal UI (`syskamling tui`) for keyboard-driven, mouse-free use over SSH
+
+### Roadmap
+
+- **Hardware monitor tab** — Task-Manager-style live charts: CPU (per-core),
+  memory, swap, disk I/O, network throughput, sensors
+- **Ports tab** — every listening port on the machine, the process behind
+  it, and which container (if any) publishes it
 
 ## Install
 
 ```sh
 cargo build --release
-# binary at target/release/sdd
+# binary at target/release/syskamling
 ```
 
 ## Usage
 
 ```sh
-sdd            # desktop window
-sdd gui        # same thing, explicit
-sdd tui        # terminal UI
-sdd -i 5       # refresh every 5 s (0 disables polling)
-sdd -s /path/to/docker.sock
+syskamling            # desktop window
+syskamling gui        # same thing, explicit
+syskamling tui        # terminal UI
+syskamling -i 5       # refresh every 5 s (0 disables polling)
+syskamling -s /path/to/docker.sock
 ```
 
 ### GUI
@@ -62,24 +71,24 @@ sdd -s /path/to/docker.sock
 
 ## Desktop integration (pin to dash)
 
-The app sets its Wayland app id / X11 WM class to `io.sdd.SimpleDockerDesktop`.
+The app sets its Wayland app id / X11 WM class to `io.syskamling.SysKamling`.
 To get a launcher you can pin to the KDE dash:
 
 ```sh
 # 1. launcher entry
-cp io.sdd.SimpleDockerDesktop.desktop ~/.local/share/applications/
-# edit Exec= to point at your absolute target/release/sdd path
+cp io.syskamling.SysKamling.desktop ~/.local/share/applications/
+# edit Exec= to point at your absolute target/release/syskamling path
 
-# 2. icon (the container-stack mark from assets/icon.svg, rendered to PNG)
+# 2. icon (the mark from assets/icon.svg, rendered to PNG)
 for s in 512 256 128 64 48 32; do
   mkdir -p ~/.local/share/icons/hicolor/${s}x${s}/apps
   magick assets/icon.png -resize ${s}x${s} \
-    ~/.local/share/icons/hicolor/${s}x${s}/apps/io.sdd.SimpleDockerDesktop.png
+    ~/.local/share/icons/hicolor/${s}x${s}/apps/io.syskamling.SysKamling.png
 done
 gtk-update-icon-cache -f ~/.local/share/icons/hicolor
 ```
 
-Then search "Simple Docker Desktop" in the application launcher and pick
+Then search "SysKamling" in the application launcher and pick
 *Pin to Task Manager / Add to Dash*. `StartupWMClass` ensures the pinned
 icon matches the running window.
 

@@ -256,7 +256,7 @@ impl Gui {
 }
 
 /// egui application wired to a tokio runtime.
-struct SddApp {
+struct SysKamlingApp {
     gui: Gui,
     docker: Arc<Docker>,
     tx: mpsc::UnboundedSender<Msg>,
@@ -296,7 +296,7 @@ struct SddApp {
     toast: (String, Instant),
 }
 
-impl SddApp {
+impl SysKamlingApp {
     fn new(
         cc: &eframe::CreationContext<'_>,
         rt: Arc<tokio::runtime::Runtime>,
@@ -466,13 +466,13 @@ fn install_fonts(ctx: &egui::Context) {
             .insert(key.to_string(), FontData::from_owned(bytes).into());
         Some(key.to_string())
     };
-    let ui = load("sdd-ui", &["NotoSans-Regular.ttf", "DejaVuSans.ttf"]);
-    let ui_bold = load("sdd-bold", &["NotoSans-Bold.ttf", "DejaVuSans-Bold.ttf"]);
+    let ui = load("syskamling-ui", &["NotoSans-Regular.ttf", "DejaVuSans.ttf"]);
+    let ui_bold = load("syskamling-bold", &["NotoSans-Bold.ttf", "DejaVuSans-Bold.ttf"]);
     let mono = load(
-        "sdd-mono",
+        "syskamling-mono",
         &["Hack-Regular.ttf", "DejaVuSansMono.ttf", "NotoSansMono-Regular.ttf"],
     );
-    let symbols = load("sdd-symbols", &["DejaVuSans.ttf"]);
+    let symbols = load("syskamling-symbols", &["DejaVuSans.ttf"]);
 
     let stock_prop = fonts.families[&FontFamily::Proportional].clone();
     let stock_mono = fonts.families[&FontFamily::Monospace].clone();
@@ -492,7 +492,7 @@ fn install_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-impl eframe::App for SddApp {
+impl eframe::App for SysKamlingApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Drain all pending engine messages.
         while let Ok(m) = self.rx.try_recv() {
@@ -538,7 +538,7 @@ impl eframe::App for SddApp {
     }
 }
 
-impl SddApp {
+impl SysKamlingApp {
     /// Dashboard-only pulls: system info, disk usage, event stream,
     /// per-container stats streams, consolidated log snapshots.
     fn spawn_dashboard_pulls(&mut self) {
@@ -662,7 +662,7 @@ impl SddApp {
     }
 }
 
-impl SddApp {
+impl SysKamlingApp {
     fn apply(&mut self, m: Msg, ctx: &egui::Context) {
         let g = &mut self.gui;
         match m {
@@ -844,8 +844,8 @@ impl SddApp {
                     logo_mark(ui.painter(), r);
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
-                        ui.label(RichText::new("Simple Docker").font(bold(15.0)).color(TEXT));
-                        ui.label(RichText::new("Desktop for Linux").size(11.5).color(FAINT));
+                        ui.label(RichText::new("SysKamling").font(bold(15.0)).color(TEXT));
+                        ui.label(RichText::new("system watch for Linux").size(11.5).color(FAINT));
                     });
                 });
                 ui.add_space(16.0);
@@ -3437,8 +3437,8 @@ pub fn run(rt: tokio::runtime::Runtime, socket: &str, refresh: f64) -> Result<()
     let mut vb = egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 820.0])
         .with_min_inner_size([960.0, 600.0])
-        .with_title("Simple Docker Desktop")
-        .with_app_id("io.sdd.SimpleDockerDesktop");
+        .with_title("SysKamling")
+        .with_app_id("io.syskamling.SysKamling");
     if let Some(icon) = icon {
         vb = vb.with_icon(icon);
     }
@@ -3449,10 +3449,10 @@ pub fn run(rt: tokio::runtime::Runtime, socket: &str, refresh: f64) -> Result<()
     let socket = socket.to_string();
     let rt = Arc::new(rt);
     eframe::run_native(
-        "sdd",
+        "syskamling",
         opts,
         Box::new(move |cc| {
-            let app = SddApp::new(cc, Arc::clone(&rt), &socket, refresh);
+            let app = SysKamlingApp::new(cc, Arc::clone(&rt), &socket, refresh);
             Ok(Box::new(app))
         }),
     )?;

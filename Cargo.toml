@@ -1,12 +1,12 @@
 [package]
-name = "sdd"
+name = "syskamling"
 version = "0.1.0"
 edition = "2021"
-description = "Simple Docker Desktop for Linux"
+description = "SysKamling - system watch for Linux: hardware, ports, and Docker containers"
 license = "MIT"
 
 [[bin]]
-name = "sdd"
+name = "syskamling"
 path = "src/main.rs"
 
 [dependencies]

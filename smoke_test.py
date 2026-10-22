@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Headless smoke test for sdd: drives the TUI via a pty, asserts on the screen.
+"""Headless smoke test for syskamling: drives the TUI via a pty, asserts on the screen.
 
 Run from the repo root after `cargo build --release`. Needs a live Docker
 daemon. Usage: ./smoke_test.py
@@ -34,11 +34,11 @@ def check(label, ok):
 
 
 def main():
-    if not os.path.exists('./target/release/sdd'):
+    if not os.path.exists('./target/release/syskamling'):
         sys.exit('build first: cargo build --release')
     pid, fd = pty.fork()
     if pid == 0:
-        os.execvp('./target/release/sdd', ['./target/release/sdd'])
+        os.execvp('./target/release/syskamling', ['./target/release/syskamling'])
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', ROWS, COLS, 0, 0))
     term = pyte.Screen(COLS, ROWS)
     stream = pyte.ByteStream(term)
