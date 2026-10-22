@@ -6,7 +6,7 @@ mod types;
 pub use client::{DockerError, UnixClient};
 pub use types::{
     ContainerSummary, DiskSummary, EventMessage, ImageSummary, StatsSample, SystemInfo,
-    UsageTotals, VolumeEntry,
+    VolumeEntry,
 };
 
 use std::sync::OnceLock;

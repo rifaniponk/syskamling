@@ -935,7 +935,7 @@ impl SysKamlingApp {
     }
 
     /// Strata monitor poll: one /health + /metrics round-trip per refresh,
-    /// only while the Strata tab is open, on the blocking pool so a slow or
+    /// only while the Strata tab or the dashboard is open, on the blocking pool so a slow or
     /// unreachable server never touches the UI thread.
     fn spawn_strata_poll(&mut self) {
         self.spawn_strata_poll_inner(false)
@@ -944,7 +944,7 @@ impl SysKamlingApp {
     /// `force` bypasses the visible-tab gate (used for the first pull when
     /// the tab opens and right after settings change).
     fn spawn_strata_poll_inner(&mut self, force: bool) {
-        if (!force && self.gui.tab != Tab::Strata) || self.refresh <= 0.0 {
+        if (!force && !matches!(self.gui.tab, Tab::Strata | Tab::Dashboard)) || self.refresh <= 0.0 {
             return;
         }
         if !force && self.last_strata_poll.elapsed() < Duration::from_secs_f64(self.refresh.max(1.0)) {
@@ -1418,8 +1418,8 @@ impl SysKamlingApp {
     fn on_tab_change(&mut self, t: Tab) {
         self.gui.tab = t;
         // the poller gates on the visible tab; a forced pull means the
-        // Strata page is never blank on arrival
-        if t == Tab::Strata {
+        // Strata page (and the dashboard's Strata card) is never blank on arrival
+        if matches!(t, Tab::Strata | Tab::Dashboard) {
             self.last_strata_poll = Instant::now() - Duration::from_secs(999);
             self.spawn_strata_poll_inner(true);
         }
@@ -2038,24 +2038,21 @@ impl SysKamlingApp {
     }
 
     // ------------------------------------------------------------------
-    // Dashboard
+    // Dashboard: one high-level page across every feature. Health first
+    // (only what needs a look), then the machine's vitals, then one card
+    // per workload — containers, agents, ports, Strata — each opening its
+    // tab for the details.
     // ------------------------------------------------------------------
 
     fn dashboard_view(&mut self, ui: &mut Ui) {
-        let g = &self.gui;
-        // The dashboard leads with the machine, not the engine: host vitals
-        // first, Docker as one sub-section below.
-        let sub = match &g.hw {
+        let sub = match &self.gui.hw {
             Some(h) => format!(
-                "{} · {} cores · {} RAM · up {}",
-                host_os_name(),
-                h.ncpu,
-                human_size(h.mem_total as i64),
+                "{} · up {}",
+                hwinv::INVENTORY.cpu.trim_end_matches(" Processor"),
                 uptime_str(h.uptime as i64)
             ),
             None => "Collecting host vitals…".to_string(),
         };
-        let ok = g.daemon_ok;
         ui.horizontal(|ui| {
             ui.vertical(|ui| page_header(ui, "Dashboard", &sub));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2063,214 +2060,219 @@ impl SysKamlingApp {
             });
         });
         ui.add_space(16.0);
+        let mut nav = None;
         ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                self.kpi_cards(ui);
+                nav = self.health_strip(ui);
                 ui.add_space(14.0);
-                self.system_charts(ui);
+                self.vital_tiles(ui);
                 ui.add_space(14.0);
-                self.system_summary(ui);
-                ui.add_space(14.0);
-                section_heading(ui, "Docker");
-                ui.add_space(6.0);
-                self.docker_strip(ui, ok);
-                ui.add_space(14.0);
-                self.docker_charts(ui);
-                ui.add_space(14.0);
-                if ui.available_width() > 860.0 {
-                    ui.scope(|ui| {
-                        ui.spacing_mut().item_spacing.x = 14.0;
-                        ui.columns(2, |cols| {
-                            self.top_containers(&mut cols[0]);
-                            self.event_feed(&mut cols[1]);
-                        });
-                    });
-                } else {
-                    self.top_containers(ui);
-                    ui.add_space(14.0);
-                    self.event_feed(ui);
-                }
-                ui.add_space(14.0);
-                self.disk_section(ui);
+                nav = nav.or(self.workload_cards(ui));
                 ui.add_space(8.0);
             });
-    }
-
-    /// Host-wide series summed over every container with live stats:
-    /// (cpu % of host, memory bytes, net bytes/s in+out).
-    fn host_series(&self) -> (Vec<f64>, Vec<f64>, Vec<f64>, usize) {
-        let g = &self.gui;
-        let ncpu = g.info.as_ref().map(|i| i.ncpu.max(1)).unwrap_or(1) as f64;
-        let mut cpu = vec![0.0; HIST];
-        let mut mem = vec![0.0; HIST];
-        let mut net = vec![0.0; HIST];
-        let mut samples = 0;
-        for (id, h) in &g.hist {
-            if !g.stats.contains_key(id) {
-                continue;
-            }
-            samples = samples.max(h.cpu.len());
-            let off = HIST - h.cpu.len();
-            for (i, v) in h.cpu.iter().enumerate() {
-                cpu[off + i] += v / ncpu;
-            }
-            let off = HIST - h.mem.len();
-            for (i, v) in h.mem.iter().enumerate() {
-                mem[off + i] += *v as f64;
-            }
-            let off = HIST - h.rx.len();
-            for (i, (rx, tx)) in h.rx.iter().zip(h.tx.iter()).enumerate() {
-                net[off + i] += (*rx + *tx) as f64;
-            }
+        if let Some(t) = nav {
+            self.on_tab_change(t);
         }
-        // Only the window that actually has samples, so charts don't start
-        // with a flat run of zeros.
-        let skip = HIST - samples;
-        (
-            cpu[skip..].to_vec(),
-            mem[skip..].to_vec(),
-            net[skip..].to_vec(),
-            samples,
-        )
     }
 
-    fn kpi_cards(&mut self, ui: &mut Ui) {
+    /// Everything that needs a look, worst first, each row opening the tab
+    /// that explains it; a single green line when nothing does.
+    fn health_strip(&self, ui: &mut Ui) -> Option<Tab> {
         let g = &self.gui;
-        let n_run = g.containers.iter().filter(|c| c.state == "running").count();
-        let n_listen = g.ports.iter().filter(|p| p.state == "LISTEN").count();
-        let n_agents = g.agents.len();
-        let (disk_total, disk_reclaim) = g
-            .df
-            .as_ref()
-            .map(|d| {
-                [&d.image_usage, &d.container_usage, &d.volume_usage, &d.build_cache_usage]
-                    .into_iter()
-                    .flatten()
-                    .fold((0, 0), |(t, r), u| (t + u.total_size, r + u.reclaimable))
-            })
-            .unwrap_or((0, 0));
-        let cpu_hist: Vec<f64> = g.hw_cpu_hist.iter().copied().collect();
-        let mem_hist: Vec<f64> = g.hw_mem_hist.iter().copied().collect();
-        let swap_hist: Vec<f64> = g.hw_swap_hist.iter().copied().collect();
-        let gpu_busy_hist: Vec<f64> = g.hw_gpu_busy_hist.iter().copied().collect();
-
-        let mut kpis = match &g.hw {
-            Some(h) => {
-                let mem_used = h.mem_total - h.mem_avail;
-                let swap_used = h.swap_total.saturating_sub(h.swap_free);
-                vec![
-                    Kpi {
-                        label: "CPU",
-                        value: format!("{:.1}%", h.cpu_pct),
-                        sub: match h.cpu_temp_c {
-                            Some(t) => format!("{} °C · {} cores", temp_str(t), h.ncpu),
-                            None => format!("{} cores · load {}", h.ncpu, h.load1),
-                        },
-                        color: ACCENT,
-                        viz: Viz::Spark(cpu_hist),
-                    },
-                    Kpi {
-                        label: "Memory",
-                        value: human_size(mem_used as i64),
-                        sub: format!(
-                            "of {} ({:.0}%)",
-                            human_size(h.mem_total as i64),
-                            mem_used as f64 / h.mem_total.max(1) as f64 * 100.0
-                        ),
-                        color: VIOLET,
-                        viz: Viz::Spark(mem_hist),
-                    },
-                    Kpi {
-                        label: "Swap",
-                        value: human_size(swap_used as i64),
-                        sub: if h.swap_total > 0 {
-                            format!("of {} ({:.0}%)", human_size(h.swap_total as i64), swap_used as f64 / h.swap_total as f64 * 100.0)
-                        } else {
-                            "not configured".into()
-                        },
-                        color: AMBER,
-                        viz: Viz::Spark(swap_hist),
-                    },
-                    Kpi {
-                        label: "Ports",
-                        value: n_listen.to_string(),
-                        sub: format!("listening · {} containers", n_run),
-                        color: CYAN,
-                        viz: Viz::None,
-                    },
-                    Kpi {
-                        label: "Agents",
-                        value: n_agents.to_string(),
-                        sub: if n_agents == 0 {
-                            "no AI sessions running".into()
-                        } else {
-                            "AI coding sessions".into()
-                        },
-                        color: GREEN,
-                        viz: Viz::None,
-                    },
-                ]
+        let level = |v: f64, warn: f64, bad: f64| {
+            if v >= bad {
+                Some(RED)
+            } else if v >= warn {
+                Some(AMBER)
+            } else {
+                None
             }
-            None => vec![
-                Kpi {
-                    label: "CPU",
-                    value: "—".into(),
-                    sub: "collecting host vitals…".into(),
-                    color: ACCENT,
-                    viz: Viz::Spark(cpu_hist),
-                },
-                Kpi {
-                    label: "Memory",
-                    value: "—".into(),
-                    sub: "collecting host vitals…".into(),
-                    color: VIOLET,
-                    viz: Viz::Spark(mem_hist),
-                },
-                Kpi {
-                    label: "Swap",
-                    value: "—".into(),
-                    sub: "collecting host vitals…".into(),
-                    color: AMBER,
-                    viz: Viz::Spark(swap_hist),
-                },
-                Kpi {
-                    label: "Ports",
-                    value: n_listen.to_string(),
-                    sub: format!("listening · {} containers", n_run),
-                    color: CYAN,
-                    viz: Viz::None,
-                },
-                Kpi {
-                    label: "Disk",
-                    value: if g.df.is_some() { human_size(disk_total) } else { "—".into() },
-                    sub: format!("{} reclaimable", human_size(disk_reclaim)),
-                    color: AMBER,
-                    viz: Viz::Ratio(disk_reclaim as f32 / disk_total.max(1) as f32),
-                },
-            ],
         };
-        // GPU KPI when a display adapter reports numbers
-        if let Some(gp) = g.gpus.iter().max_by(|a, b| {
-            a.busy_pct.unwrap_or(0.0).partial_cmp(&b.busy_pct.unwrap_or(0.0)).unwrap_or(std::cmp::Ordering::Equal)
-        }) {
-            if gp.busy_pct.is_some() || gp.temp_c.is_some() {
-                kpis.insert(2, Kpi {
-                    label: "GPU",
-                    value: gp.busy_pct.map(|b| format!("{b:.0}%")).unwrap_or_else(|| "—".into()),
-                    sub: match gp.temp_c {
-                        Some(t) => format!("{} · {} °C", gp.name, temp_str(t)),
-                        None => gp.name.clone(),
-                    },
-                    color: CYAN,
-                    viz: Viz::Spark(gpu_busy_hist),
-                });
+        let hottest = |it: &mut dyn Iterator<Item = f64>| it.fold(None::<f64>, |a, b| Some(a.map_or(b, |a| a.max(b))));
+        let mut issues: Vec<(Color32, String, Tab)> = Vec::new();
+        if let Some(h) = &g.hw {
+            let mem = (h.mem_total - h.mem_avail) as f64 / h.mem_total.max(1) as f64 * 100.0;
+            if let Some(c) = level(mem, 80.0, 92.0) {
+                issues.push((c, format!("Memory {mem:.0}% used · {} free", human_size(h.mem_avail as i64)), Tab::Hardware));
+            }
+            if h.swap_total > 0 {
+                let swap = h.swap_total.saturating_sub(h.swap_free) as f64 / h.swap_total as f64 * 100.0;
+                if let Some(c) = level(swap, 50.0, 85.0) {
+                    issues.push((c, format!("Swap {swap:.0}% used"), Tab::Hardware));
+                }
+            }
+            if h.load5 > h.ncpu as f64 {
+                issues.push((AMBER, format!("Load {:.1} is above {} CPUs", h.load5, h.ncpu), Tab::Hardware));
+            }
+            let gpu_t = h.gpu_temp_c.or_else(|| hottest(&mut g.gpus.iter().filter_map(|x| x.temp_c)));
+            let ssd_t = hottest(&mut h.disks.iter().filter_map(|d| d.temp_c));
+            for (what, t, warn, bad) in [
+                ("CPU", h.cpu_temp_c.or(h.temp_c), 80.0, 90.0),
+                ("GPU", gpu_t, 80.0, 90.0),
+                ("SSD", ssd_t, 60.0, 70.0),
+            ] {
+                if let Some((c, t)) = t.and_then(|t| level(t, warn, bad).map(|c| (c, t))) {
+                    issues.push((c, format!("{what} running hot at {} °C", temp_str(t)), Tab::Hardware));
+                }
             }
         }
+        let restarting = g.containers.iter().filter(|c| c.state == "restarting").count();
+        if restarting > 0 {
+            issues.push((RED, format!("{restarting} container(s) stuck restarting"), Tab::Containers));
+        }
+        // exited non-zero recently ("Exited (1) 3 minutes ago"); old corpses
+        // from last week are not news
+        let crashed = g
+            .containers
+            .iter()
+            .filter(|c| c.state == "exited" && !c.status.contains("(0)"))
+            .filter(|c| c.status.contains("second") || c.status.contains("minute"))
+            .count();
+        if crashed > 0 {
+            issues.push((AMBER, format!("{crashed} container(s) exited with an error in the last hour"), Tab::Containers));
+        }
+        if !g.strata_cfg.api_key.trim().is_empty() && g.strata_error.is_some() {
+            issues.push((AMBER, "Strata server is not responding".into(), Tab::Strata));
+        }
+        if let Some(df) = &g.df {
+            let reclaim: i64 = [&df.image_usage, &df.container_usage, &df.volume_usage, &df.build_cache_usage]
+                .into_iter()
+                .flatten()
+                .map(|u| u.reclaimable)
+                .sum();
+            if reclaim >= 10 << 30 {
+                issues.push((ACCENT, format!("{} of Docker data can be reclaimed", human_size(reclaim)), Tab::Images));
+            }
+        }
+        issues.sort_by_key(|(c, _, _)| [RED, AMBER, ACCENT].iter().position(|x| x == c));
+
+        let mut nav = None;
+        card(ui, |ui| {
+            if issues.is_empty() {
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                    ui.painter().circle_filled(r.center(), 4.0, GREEN);
+                    ui.label(RichText::new("All systems normal").font(bold(13.5)).color(TEXT));
+                    ui.label(RichText::new("memory, temperatures, containers and Strata look healthy").size(12.5).color(FAINT));
+                });
+                return;
+            }
+            card_title(
+                ui,
+                "Needs attention",
+                &format!("{} issue{}", issues.len(), if issues.len() == 1 { "" } else { "s" }),
+            );
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for (color, text, tab) in &issues {
+                let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click());
+                let p = ui.painter();
+                if resp.hovered() {
+                    p.rect_filled(rect, 8.0, SURFACE_HI);
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                p.circle_filled(Pos2::new(rect.left() + 10.0, rect.center().y), 4.0, *color);
+                p.text(Pos2::new(rect.left() + 24.0, rect.center().y), egui::Align2::LEFT_CENTER, text, FontId::proportional(13.0), TEXT);
+                p.text(
+                    Pos2::new(rect.right() - 8.0, rect.center().y),
+                    egui::Align2::RIGHT_CENTER,
+                    format!("{} ›", tab_label(*tab)),
+                    FontId::proportional(12.0),
+                    if resp.hovered() { ACCENT } else { FAINT },
+                );
+                if resp.clicked() {
+                    nav = Some(*tab);
+                }
+            }
+        });
+        nav
+    }
+
+    /// Machine vitals: each tile is the live number, its context and its
+    /// recent history — CPU, memory (+swap), GPU (disk when no GPU
+    /// reports), network.
+    fn vital_tiles(&self, ui: &mut Ui) {
+        let g = &self.gui;
+        let hist = |q: &VecDeque<f64>| q.iter().copied().collect::<Vec<f64>>();
+        let sum = |a: &VecDeque<f64>, b: &VecDeque<f64>| a.iter().zip(b.iter()).map(|(x, y)| x + y).collect::<Vec<f64>>();
+        let Some(h) = &g.hw else {
+            card(ui, |ui| {
+                ui.label(RichText::new("Collecting host vitals…").color(FAINT));
+            });
+            return;
+        };
+        let mem_used = h.mem_total - h.mem_avail;
+        let swap_used = h.swap_total.saturating_sub(h.swap_free);
+        let mut cpu_sub = vec![format!("load {:.2}", h.load1)];
+        if let Some(t) = h.cpu_temp_c.or(h.temp_c) {
+            cpu_sub.insert(0, format!("{} °C", temp_str(t)));
+        }
+        cpu_sub.push(format!("{} threads", h.ncpu));
+        let mut tiles = vec![
+            Kpi {
+                label: "CPU",
+                value: format!("{:.0}%", h.cpu_pct),
+                sub: cpu_sub.join(" · "),
+                color: ACCENT,
+                viz: Viz::Spark(hist(&g.hw_cpu_hist)),
+            },
+            Kpi {
+                label: "Memory",
+                value: format!("{:.0}%", mem_used as f64 / h.mem_total.max(1) as f64 * 100.0),
+                sub: format!(
+                    "{} of {}{}",
+                    human_size(mem_used as i64),
+                    human_size(h.mem_total as i64),
+                    if swap_used > 0 { format!(" · swap {}", human_size(swap_used as i64)) } else { String::new() }
+                ),
+                color: VIOLET,
+                viz: Viz::Spark(hist(&g.hw_mem_hist)),
+            },
+        ];
+        let gpu = g
+            .gpus
+            .iter()
+            .filter(|x| x.busy_pct.is_some())
+            .max_by(|a, b| a.busy_pct.partial_cmp(&b.busy_pct).unwrap_or(std::cmp::Ordering::Equal));
+        tiles.push(match gpu {
+            Some(gp) => {
+                let mut sub = Vec::new();
+                if let Some(t) = gp.temp_c {
+                    sub.push(format!("{} °C", temp_str(t)));
+                }
+                if gp.vram_total > 0 {
+                    sub.push(format!("VRAM {} of {}", human_size(gp.vram_used as i64), human_size(gp.vram_total as i64)));
+                }
+                if sub.is_empty() {
+                    sub.push(gp.name.clone());
+                }
+                Kpi {
+                    label: "GPU",
+                    value: format!("{:.0}%", gp.busy_pct.unwrap_or(0.0)),
+                    sub: sub.join(" · "),
+                    color: CYAN,
+                    viz: Viz::Spark(hist(&g.hw_gpu_busy_hist)),
+                }
+            }
+            None => Kpi {
+                label: "Disk I/O",
+                value: human_rate(h.disk_read_bps + h.disk_write_bps),
+                sub: format!("read {} · write {}", human_rate(h.disk_read_bps), human_rate(h.disk_write_bps)),
+                color: AMBER,
+                viz: Viz::Spark(sum(&g.hw_disk_r_hist, &g.hw_disk_w_hist)),
+            },
+        });
+        tiles.push(Kpi {
+            label: "Network",
+            value: human_rate(h.net_rx_bps + h.net_tx_bps),
+            sub: format!("↓ {} · ↑ {}", human_rate(h.net_rx_bps), human_rate(h.net_tx_bps)),
+            color: GREEN,
+            viz: Viz::Spark(sum(&g.hw_net_rx_hist, &g.hw_net_tx_hist)),
+        });
         let per_row = if ui.available_width() > 860.0 { 4 } else { 2 };
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.x = 14.0;
-            for (n, row) in kpis.chunks(per_row).enumerate() {
+            for (n, row) in tiles.chunks(per_row).enumerate() {
                 if n > 0 {
                     ui.add_space(6.0);
                 }
@@ -2283,235 +2285,45 @@ impl SysKamlingApp {
         });
     }
 
-    /// Host-wide charts fed by the /proc sampler: CPU, memory, swap, GPU,
-    /// network.
-    fn system_charts(&mut self, ui: &mut Ui) {
-        let g = &self.gui;
-        let cpu: Vec<f64> = g.hw_cpu_hist.iter().copied().collect();
-        let mem: Vec<f64> = g.hw_mem_hist.iter().copied().collect();
-        let swap: Vec<f64> = g.hw_swap_hist.iter().copied().collect();
-        let gpu: Vec<f64> = g.hw_gpu_busy_hist.iter().copied().collect();
-        let net: Vec<f64> = g
-            .hw_net_rx_hist
-            .iter()
-            .zip(g.hw_net_tx_hist.iter())
-            .map(|(r, t)| r + t)
-            .collect();
-        let samples = cpu.len();
-        card(ui, |ui| {
-            card_title(
-                ui,
-                "System vitals",
-                &if samples > 0 {
-                    format!("last {samples}s · /proc")
-                } else {
-                    String::new()
-                },
-            );
-            if samples < 2 {
-                ui.add_space(4.0);
-                ui.label(RichText::new("Collecting samples…").color(FAINT));
-                ui.add_space(70.0);
-                return;
-            }
-            let last = |s: &[f64]| s.last().copied().unwrap_or(0.0);
-            let mut charts: Vec<(&str, String, Vec<f64>, Color32, fn(f64) -> String)> = vec![
-                ("CPU", format!("{:.1}%", last(&cpu)), cpu, ACCENT, |v| format!("{v:.1}%")),
-                ("Memory", human_size(last(&mem) as i64), mem, VIOLET, |v| human_size(v as i64)),
-                ("Swap", human_size(last(&swap) as i64), swap, AMBER, |v| human_size(v as i64)),
-            ];
-            if g.gpus.iter().any(|x| x.busy_pct.is_some()) {
-                charts.push(("GPU", format!("{:.0}%", last(&gpu)), gpu, CYAN, |v| format!("{v:.0}%")));
-            }
-            charts.push(("Network", format!("{}/s", human_size(last(&net) as i64)), net, GREEN, |v| {
-                format!("{}/s", human_size(v as i64))
-            }));
-            let per_row = if ui.available_width() > 1000.0 { 3 } else if ui.available_width() > 640.0 { 2 } else { 1 };
-            ui.scope(|ui| {
-                ui.spacing_mut().item_spacing.x = 20.0;
-                for row in charts.chunks(per_row) {
-                    ui.columns(per_row, |cols| {
-                        for (col, (label, now, series, color, fmt)) in cols.iter_mut().zip(row) {
-                            col.horizontal(|ui| {
-                                ui.label(RichText::new(*label).size(12.5).color(MUTED));
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.label(RichText::new(now).font(bold(14.0)).color(TEXT));
-                                });
-                            });
-                            let w = col.available_width();
-                            area_chart(col, series, *color, Vec2::new(w, 110.0), *fmt);
-                        }
-                    });
-                    ui.add_space(4.0);
+    /// One card per workload, two per row; returns the tab to open when a
+    /// card is clicked.
+    fn workload_cards(&self, ui: &mut Ui) -> Option<Tab> {
+        let mut nav = None;
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.x = 14.0;
+            ui.columns(2, |cols| {
+                if overview_card(&mut cols[0], Tab::Containers, "Containers", |ui| self.containers_overview(ui)) {
+                    nav = Some(Tab::Containers);
                 }
-            });
-        });
-    }
-
-    /// One-line host summary: uptime, load, CPU/GPU temps, ports, agents,
-    /// disk throughput — the "system at a glance" strip.
-    fn system_summary(&mut self, ui: &mut Ui) {
-        let g = &self.gui;
-        let Some(h) = &g.hw else { return };
-        let n_listen = g.ports.iter().filter(|p| p.state == "LISTEN").count();
-        let n_agents = g.agents.len();
-        let temp_cell = |t: Option<f64>, warn: f64, hot: f64| -> (String, Color32) {
-            match t {
-                Some(t) => {
-                    let c = if t > hot { RED } else if t > warn { AMBER } else { GREEN };
-                    (format!("{} °C", temp_str(t)), c)
-                }
-                None => ("n/a".to_string(), FAINT),
-            }
-        };
-        let cpu_t = temp_cell(h.cpu_temp_c.or(h.temp_c), 70.0, 85.0);
-        let gpu_t = temp_cell(
-            h.gpu_temp_c.or_else(|| g.gpus.iter().filter_map(|x| x.temp_c).max_by(|a, b| a.partial_cmp(b).unwrap())),
-            75.0,
-            88.0,
-        );
-        let ssd_t = temp_cell(h.disks.iter().filter_map(|d| d.temp_c).max_by(|a, b| a.partial_cmp(b).unwrap()), 60.0, 70.0);
-        let cells: Vec<(&str, String, Color32)> = vec![
-            ("Uptime", uptime_str(h.uptime as i64), TEXT),
-            (
-                "Load",
-                format!("{} · {} · {}", h.load1, h.load5, h.load15),
-                TEXT,
-            ),
-            ("CPU temp", cpu_t.0, cpu_t.1),
-            ("GPU temp", gpu_t.0, gpu_t.1),
-            ("SSD temp", ssd_t.0, ssd_t.1),
-            ("Listening", format!("{n_listen} ports"), CYAN),
-            (
-                "Agents",
-                format!("{n_agents} running"),
-                if n_agents > 0 { GREEN } else { FAINT },
-            ),
-            (
-                "Disk I/O",
-                format!("↓ {} ↑ {}", human_rate(h.disk_read_bps), human_rate(h.disk_write_bps)),
-                TEXT,
-            ),
-        ];
-        card(ui, |ui| {
-            // the machine's identity, one line above the numbers
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(&hwinv::INVENTORY.cpu).font(bold(13.0)).color(TEXT));
-                let gpu_names: Vec<&str> = g.gpus.iter().map(|x| x.name.as_str()).collect();
-                if !gpu_names.is_empty() {
-                    ui.label(RichText::new(gpu_names.join(" + ")).size(12.5).color(CYAN));
-                }
-                if let Some(d) = hwinv::INVENTORY.devices.iter().find(|d| d.kind == "disk") {
-                    ui.label(RichText::new(format!("{} ({})", d.name, d.detail)).size(12.0).color(FAINT));
+                if overview_card(&mut cols[1], Tab::Strata, "Strata", |ui| self.strata_overview(ui)) {
+                    // nothing to look at until it's configured
+                    nav = Some(if self.gui.strata_cfg.api_key.trim().is_empty() { Tab::Settings } else { Tab::Strata });
                 }
             });
             ui.add_space(6.0);
-            let per_row = if ui.available_width() > 980.0 { 4 } else if ui.available_width() > 640.0 { 3 } else { 2 };
-            ui.scope(|ui| {
-                ui.spacing_mut().item_spacing.x = 14.0;
-                for (n, row) in cells.chunks(per_row).enumerate() {
-                    if n > 0 {
-                        ui.add_space(8.0);
-                    }
-                    ui.columns(per_row, |cols| {
-                        for (col, (label, value, color)) in cols.iter_mut().zip(row) {
-                            col.vertical(|ui| {
-                                ui.spacing_mut().item_spacing.y = 1.0;
-                                ui.label(RichText::new(*label).size(11.5).color(FAINT));
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(value).font(FontId::monospace(13.5)).color(*color),
-                                    )
-                                    .truncate(),
-                                );
-                            });
-                        }
-                    });
+            ui.columns(2, |cols| {
+                if overview_card(&mut cols[0], Tab::Agents, "Agents", |ui| self.agents_overview(ui)) {
+                    nav = Some(Tab::Agents);
+                }
+                if overview_card(&mut cols[1], Tab::Ports, "Ports", |ui| self.ports_overview(ui)) {
+                    nav = Some(Tab::Ports);
                 }
             });
         });
+        nav
     }
 
-    /// Docker one-liner under the section heading: engine state, container
-    /// counts, or the offline reason.
-    fn docker_strip(&mut self, ui: &mut Ui, ok: bool) {
+    fn containers_overview(&self, ui: &mut Ui) {
         let g = &self.gui;
-        let n_all = g.containers.len();
+        if !g.daemon_ok && g.error.is_some() {
+            headline(ui, "Offline", "Docker engine unreachable", RED);
+            return;
+        }
         let n_run = g.containers.iter().filter(|c| c.state == "running").count();
-        let text = if !ok {
-            "Docker engine offline — containers, images and volumes are unavailable".to_string()
-        } else {
-            match &g.info {
-                Some(i) => format!(
-                    "Docker {} · {} containers, {} running · {} images · {} volumes",
-                    i.server_version,
-                    n_all,
-                    n_run,
-                    g.images.len(),
-                    g.volumes.len()
-                ),
-                None => "Connecting to the Docker engine…".to_string(),
-            }
-        };
-        let color = if ok { MUTED } else { RED };
-        ui.horizontal(|ui| {
-            let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
-            ui.painter().circle_filled(r.center(), 3.5, if ok { GREEN } else { RED });
-            ui.label(RichText::new(text).size(12.5).color(color));
-        });
-    }
-
-    /// Per-container resource charts (CPU/mem/net summed over containers).
-    fn docker_charts(&mut self, ui: &mut Ui) {
-        let (cpu, mem, net, samples) = self.host_series();
-        let n = self.gui.stats.len();
-        card(ui, |ui| {
-            card_title(
-                ui,
-                "Resource usage",
-                &if samples > 0 {
-                    format!("last {samples}s · {n} containers")
-                } else {
-                    String::new()
-                },
-            );
-            if samples < 2 {
-                ui.add_space(4.0);
-                ui.label(RichText::new("Collecting samples…").color(FAINT));
-                ui.add_space(70.0);
-                return;
-            }
-            let last = |s: &[f64]| s.last().copied().unwrap_or(0.0);
-            let charts: [(&str, String, &[f64], Color32, fn(f64) -> String); 3] = [
-                ("CPU", format!("{:.1}%", last(&cpu)), &cpu, ACCENT, |v| format!("{v:.1}%")),
-                ("Memory", human_size(last(&mem) as i64), &mem, VIOLET, |v| human_size(v as i64)),
-                ("Network", format!("{}/s", human_size(last(&net) as i64)), &net, CYAN, |v| {
-                    format!("{}/s", human_size(v as i64))
-                }),
-            ];
-            let per_row = if ui.available_width() > 720.0 { 3 } else { 1 };
-            ui.scope(|ui| {
-                ui.spacing_mut().item_spacing.x = 20.0;
-                for row in charts.chunks(per_row) {
-                    ui.columns(per_row, |cols| {
-                        for (col, (label, now, series, color, fmt)) in cols.iter_mut().zip(row) {
-                            col.horizontal(|ui| {
-                                ui.label(RichText::new(*label).size(12.5).color(MUTED));
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.label(RichText::new(now).font(bold(14.0)).color(TEXT));
-                                });
-                            });
-                            let w = col.available_width();
-                            area_chart(col, series, *color, Vec2::new(w, 110.0), *fmt);
-                        }
-                    });
-                }
-            });
-        });
-    }
-
-    fn top_containers(&mut self, ui: &mut Ui) {
-        let g = &self.gui;
+        headline(ui, &n_run.to_string(), &format!("running of {}", g.containers.len()), if n_run > 0 { GREEN } else { TEXT });
+        // share of the whole host, like the CPU tile above (Docker reports
+        // 100% per core)
+        let ncpu = g.hw.as_ref().map(|h| h.ncpu.max(1)).unwrap_or(1) as f64;
         let mut rows: Vec<(String, f64, i64)> = g
             .containers
             .iter()
@@ -2519,166 +2331,132 @@ impl SysKamlingApp {
             .filter_map(|c| {
                 let s = g.stats.get(&c.id)?;
                 let cpu = StatsSample::cpu_percent(g.prev_stats.get(&c.id), s).unwrap_or(0.0);
-                Some((c.short_name(), cpu.max(0.0), s.mem_usage()))
+                Some((c.short_name(), cpu.max(0.0) / ncpu, s.mem_usage()))
             })
             .collect();
         rows.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        let peak = rows.first().map(|r| r.1).unwrap_or(0.0).max(1.0);
-        card(ui, |ui| {
-            ui.set_min_height(286.0);
-            card_title(ui, "Top containers", "CPU · 100% = 1 core");
-            if rows.is_empty() {
-                ui.label(RichText::new("No running containers with stats yet.").color(FAINT));
-                return;
-            }
-            for (name, cpu, mem) in rows.iter().take(7) {
-                let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::hover());
-                let p = ui.painter();
-                let name_w = rect.width() * 0.42;
-                let n = elide(p, name.clone(), FontId::proportional(13.0), TEXT, name_w - 8.0);
-                p.galley(Pos2::new(rect.left(), rect.center().y - n.size().y / 2.0), n, TEXT);
-                let bar = Rect::from_min_max(
-                    Pos2::new(rect.left() + name_w, rect.center().y - 3.0),
-                    Pos2::new(rect.right() - 128.0, rect.center().y + 3.0),
-                );
-                // Bars scale to the busiest container so small loads stay visible.
-                progress(p, bar, (*cpu / peak) as f32, ACCENT);
-                p.text(
-                    Pos2::new(rect.right() - 66.0, rect.center().y),
-                    egui::Align2::RIGHT_CENTER,
-                    format!("{cpu:.1}%"),
-                    FontId::monospace(12.0),
-                    TEXT,
-                );
-                p.text(
-                    Pos2::new(rect.right(), rect.center().y),
-                    egui::Align2::RIGHT_CENTER,
-                    human_size(*mem),
-                    FontId::monospace(12.0),
-                    FAINT,
-                );
-            }
+        let cpu: f64 = rows.iter().map(|r| r.1).sum();
+        let mem: i64 = rows.iter().map(|r| r.2).sum();
+        let disk = g.df.as_ref().map(|d| {
+            [&d.image_usage, &d.container_usage, &d.volume_usage, &d.build_cache_usage]
+                .into_iter()
+                .flatten()
+                .map(|u| u.total_size)
+                .sum::<i64>()
         });
-    }
-
-    /// Recent container lifecycle events, newest first.
-    fn event_feed(&mut self, ui: &mut Ui) {
-        let g = &self.gui;
-        let now = epoch();
-        card(ui, |ui| {
-            ui.set_min_height(286.0);
-            card_title(ui, "Activity", if g.events.is_empty() { "listening" } else { "live" });
-            if g.events.is_empty() {
-                ui.label(RichText::new("No container events yet. Start or stop something to see it here.").color(FAINT));
-                return;
-            }
-            ScrollArea::vertical()
-                .max_height(236.0)
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    for e in g.events.iter().rev().take(60) {
-                        let action = e.action.split(':').next().unwrap_or(&e.action);
-                        let color = match action {
-                            "start" | "create" | "attach" | "unpause" => GREEN,
-                            "die" | "kill" | "stop" | "oom" => RED,
-                            "destroy" => AMBER,
-                            _ => MUTED,
-                        };
-                        let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::hover());
-                        let p = ui.painter();
-                        p.circle_filled(Pos2::new(rect.left() + 5.0, rect.center().y), 3.5, color);
-                        let when = ago(now - e.time);
-                        let when_w = 70.0;
-                        let name = elide(
-                            p,
-                            e.container_name(),
-                            FontId::proportional(13.0),
-                            TEXT,
-                            rect.width() - 20.0 - when_w - 70.0,
-                        );
-                        let nw = name.size().x;
-                        p.galley(Pos2::new(rect.left() + 18.0, rect.center().y - name.size().y / 2.0), name, TEXT);
-                        p.text(
-                            Pos2::new(rect.left() + 26.0 + nw, rect.center().y),
-                            egui::Align2::LEFT_CENTER,
-                            action,
-                            FontId::proportional(12.5),
-                            color,
-                        );
-                        p.text(
-                            Pos2::new(rect.right() - 4.0, rect.center().y),
-                            egui::Align2::RIGHT_CENTER,
-                            when,
-                            FontId::proportional(12.0),
-                            FAINT,
-                        );
-                    }
-                });
-        });
-    }
-
-    fn disk_section(&mut self, ui: &mut Ui) {
-        let g = &self.gui;
-        card(ui, |ui| {
-            let Some(df) = &g.df else {
-                card_title(ui, "Disk usage", "");
-                ui.label(RichText::new("Collecting…").color(FAINT));
-                return;
+        let mut meta = vec![format!("{} images", g.images.len())];
+        if !rows.is_empty() {
+            meta.insert(0, format!("{cpu:.1}% CPU · {}", human_size(mem)));
+        }
+        if let Some(d) = disk {
+            meta.push(format!("{} on disk", human_size(d)));
+        }
+        meta_line(ui, &meta.join(" · "));
+        for (name, cpu, mem) in rows.iter().take(3) {
+            mini_row(ui, GREEN, name, &format!("{cpu:.1}% · {}", human_size(*mem)));
+        }
+        if rows.is_empty() {
+            meta_line(ui, if n_run > 0 { "Collecting container stats…" } else { "No running containers." });
+        }
+        if let Some(e) = g.events.last() {
+            let action = e.action.split(':').next().unwrap_or(&e.action);
+            let color = match action {
+                "start" | "create" | "unpause" => GREEN,
+                "die" | "kill" | "stop" | "oom" => RED,
+                _ => FAINT,
             };
-            let sections: Vec<(&str, &docker::UsageTotals, Color32)> = [
-                ("Images", df.image_usage.as_ref(), ACCENT),
-                ("Build cache", df.build_cache_usage.as_ref(), AMBER),
-                ("Volumes", df.volume_usage.as_ref(), VIOLET),
-                ("Containers", df.container_usage.as_ref(), GREEN),
-            ]
-            .into_iter()
-            .filter_map(|(l, u, c)| Some((l, u?, c)))
-            .collect();
-            let total: i64 = sections.iter().map(|(_, u, _)| u.total_size).sum();
-            let reclaim: i64 = sections.iter().map(|(_, u, _)| u.reclaimable).sum();
-            card_title(
-                ui,
-                "Disk usage",
-                &format!("{} total · {} reclaimable", human_size(total), human_size(reclaim)),
-            );
-            // One stacked bar, segments proportional to each category.
-            let (bar, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 10.0), Sense::hover());
-            let p = ui.painter();
-            p.rect_filled(bar, 5.0, SURFACE_HI);
-            let mut x = bar.left();
-            for (_, u, color) in &sections {
-                let w = bar.width() * (u.total_size as f32 / total.max(1) as f32);
-                if w >= 1.0 {
-                    let seg = Rect::from_min_max(Pos2::new(x, bar.top()), Pos2::new((x + w - 2.0).max(x + 1.0), bar.bottom()));
-                    p.rect_filled(seg, 3.0, *color);
-                }
-                x += w;
+            mini_row(ui, color, &format!("{} {action}", e.container_name()), &ago(epoch() - e.time));
+        }
+    }
+
+    fn agents_overview(&self, ui: &mut Ui) {
+        let g = &self.gui;
+        let n = g.agents.len();
+        headline(ui, &n.to_string(), "AI coding sessions", if n > 0 { GREEN } else { TEXT });
+        if n == 0 {
+            meta_line(ui, "No agents running.");
+            return;
+        }
+        let cpu: f64 = g.agents.iter().map(|a| a.cpu_pct).sum();
+        let mem: u64 = g.agents.iter().map(|a| a.mem_bytes).sum();
+        meta_line(ui, &format!("{cpu:.0}% CPU · {} RSS", human_size(mem as i64)));
+        let mut top: Vec<&AgentSession> = g.agents.iter().collect();
+        top.sort_by(|a, b| b.cpu_pct.partial_cmp(&a.cpu_pct).unwrap_or(std::cmp::Ordering::Equal));
+        for a in top.iter().take(3) {
+            let name = match &a.cwd {
+                Some(d) => format!("{} · {}", a.agent, basename(d)),
+                None => a.agent.to_string(),
+            };
+            mini_row(ui, agent_color(a.agent), &name, &format!("{:.0}% · {}", a.cpu_pct, human_size(a.mem_bytes as i64)));
+        }
+    }
+
+    fn ports_overview(&self, ui: &mut Ui) {
+        let g = &self.gui;
+        let listen: Vec<&PortEntry> = g.ports.iter().filter(|p| p.state == "LISTEN").collect();
+        let exposed = listen.iter().filter(|p| p.addr == "0.0.0.0" || p.addr == "[::]").count();
+        headline(ui, &listen.len().to_string(), "listening ports", CYAN);
+        meta_line(ui, &format!("{exposed} open on all interfaces"));
+        // dev servers first: sockets whose owner runs in a project directory
+        let mut picks: Vec<&PortEntry> = listen.iter().copied().filter(|p| p.cwd.is_some()).collect();
+        if picks.is_empty() {
+            picks = listen.iter().copied().filter(|p| p.proc_name.is_some()).collect();
+        }
+        picks.sort_by_key(|p| p.port);
+        picks.dedup_by_key(|p| p.port);
+        let home = std::env::var("HOME").unwrap_or_default();
+        for p in picks.iter().take(3) {
+            let name = format!(":{} {}", p.port, p.proc_name.as_deref().unwrap_or("?"));
+            let dir = match p.cwd.as_deref() {
+                Some(d) if d.trim_end_matches('/') == home => "~".to_string(),
+                Some(d) => basename(d),
+                None => String::new(),
+            };
+            mini_row(ui, port_color(p), &name, &dir);
+        }
+    }
+
+    fn strata_overview(&self, ui: &mut Ui) {
+        let g = &self.gui;
+        let Some(m) = &g.strata_metrics else {
+            if g.strata_cfg.api_key.trim().is_empty() {
+                headline(ui, "Not set up", "", FAINT);
+                meta_line(ui, "Add the endpoint and API key in Settings.");
+            } else if let Some(e) = &g.strata_error {
+                headline(ui, "Offline", "", RED);
+                meta_line(ui, e);
+            } else {
+                headline(ui, "Connecting…", "", FAINT);
             }
-            ui.add_space(12.0);
-            let per_row = if ui.available_width() > 640.0 { 4 } else { 2 };
-            ui.scope(|ui| {
-                ui.spacing_mut().item_spacing.x = 16.0;
-                for row in sections.chunks(per_row) {
-                    ui.columns(per_row, |cols| {
-                        for (col, (label, u, color)) in cols.iter_mut().zip(row) {
-                            col.spacing_mut().item_spacing.y = 2.0;
-                            col.horizontal(|ui| {
-                                let (r, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
-                                ui.painter().rect_filled(r.shrink(1.0), 2.0, *color);
-                                ui.label(RichText::new(*label).size(12.5).color(MUTED));
-                            });
-                            col.label(RichText::new(human_size(u.total_size)).font(bold(16.0)).color(TEXT));
-                            col.label(
-                                RichText::new(format!("{} reclaimable", human_size(u.reclaimable)))
-                                    .size(11.5)
-                                    .color(FAINT),
-                            );
-                        }
-                    });
-                }
-            });
-        });
+            return;
+        };
+        let (state, color) = match m.state.as_str() {
+            "generating" => ("Generating", GREEN),
+            "reading" => ("Reading", ACCENT),
+            _ => ("Idle", TEXT),
+        };
+        let queued = if m.queued > 0 { format!(" · {} queued", m.queued) } else { String::new() };
+        headline(ui, state, &format!("{}{queued}", if m.model.is_empty() { "strata" } else { &m.model }), color);
+        let mut meta = vec![format!("{} requests served", fmt_tokens(m.tot_requests))];
+        if let (Some(u), Some(t)) = (m.gpu_mem_used, m.gpu_mem_total) {
+            meta.push(format!("VRAM {:.1} of {:.0} GB", u / 1e9, t / 1e9));
+        }
+        meta_line(ui, &meta.join(" · "));
+        let last = m.requests.first();
+        let dash = || "–".to_string();
+        mini_row(ui, ACCENT, "Decode speed", &strata::decode_now(m, last).map(|v| format!("{v:.1} tok/s")).unwrap_or_else(dash));
+        mini_row(ui, VIOLET, "First token (p50)", &m.ttft.p50.map(|v| format!("{v:.2} s")).unwrap_or_else(dash));
+        let used = strata::context_used(m, last);
+        mini_row(
+            ui,
+            CYAN,
+            "Context",
+            &if m.max_context > 0 {
+                format!("{}% of {}", (used * 100) / m.max_context, fmt_tokens(m.max_context))
+            } else {
+                dash()
+            },
+        );
     }
 
     // ------------------------------------------------------------------
@@ -4654,6 +4432,83 @@ fn kpi_card(ui: &mut Ui, k: &Kpi) {
         });
 }
 
+/// Dashboard card for one feature: icon + title, then `add`'s summary.
+/// The whole card is the click target; true when clicked.
+fn overview_card(ui: &mut Ui, tab: Tab, title: &str, add: impl FnOnce(&mut Ui)) -> bool {
+    let inner = Frame::NONE
+        .fill(SURFACE)
+        .stroke(Stroke::new(1.0_f32, BORDER))
+        .corner_radius(14)
+        .inner_margin(Margin::symmetric(16, 14))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.set_min_height(176.0);
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                nav_icon(ui.painter(), tab, r, MUTED);
+                ui.label(RichText::new(title).font(bold(14.0)).color(TEXT));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new("›").size(16.0).color(FAINT));
+                });
+            });
+            ui.add_space(6.0);
+            add(ui);
+        });
+    let rect = inner.response.rect;
+    let resp = ui.interact(rect, ui.id().with(("overview", title)), Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_stroke(
+            rect,
+            14.0,
+            Stroke::new(1.0_f32, ACCENT.gamma_multiply(0.6)),
+            egui::epaint::StrokeKind::Inside,
+        );
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    resp.clicked()
+}
+
+/// Big number (or state word) with a caption beside it.
+fn headline(ui: &mut Ui, value: &str, caption: &str, color: Color32) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(value).font(bold(24.0)).color(color));
+        ui.label(RichText::new(caption).size(12.5).color(MUTED));
+    });
+}
+
+fn meta_line(ui: &mut Ui, text: &str) {
+    ui.add(egui::Label::new(RichText::new(text).size(12.0).color(FAINT)).truncate());
+    ui.add_space(4.0);
+}
+
+/// Compact dot · name ……… value row for the dashboard cards.
+fn mini_row(ui: &mut Ui, dot: Color32, name: &str, value: &str) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), Sense::hover());
+    let p = ui.painter();
+    p.circle_filled(Pos2::new(rect.left() + 4.0, rect.center().y), 3.0, dot);
+    let v = p.layout_no_wrap(value.to_string(), FontId::monospace(12.0), MUTED);
+    let vw = v.size().x;
+    p.galley(Pos2::new(rect.right() - vw, rect.center().y - v.size().y / 2.0), v, MUTED);
+    let n = elide(p, name.to_string(), FontId::proportional(13.0), TEXT, rect.width() - vw - 28.0);
+    p.galley(Pos2::new(rect.left() + 14.0, rect.center().y - n.size().y / 2.0), n, TEXT);
+}
+
+fn tab_label(tab: Tab) -> &'static str {
+    match tab {
+        Tab::Dashboard => "Dashboard",
+        Tab::Containers => "Containers",
+        Tab::Images => "Images",
+        Tab::Volumes => "Volumes",
+        Tab::Agents => "Agents",
+        Tab::Hardware => "Hardware",
+        Tab::Ports => "Ports",
+        Tab::Strata => "Strata",
+        Tab::Logs => "Logs",
+        Tab::Settings => "Settings",
+    }
+}
+
 /// Surface card with standard padding; fills the available width.
 fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     Frame::NONE
@@ -4746,17 +4601,6 @@ fn temp_str(c: f64) -> String {
 
 /// Short OS label for the dashboard header: prefers the kernel name from
 /// /proc (Linux + release) over the Docker-reported string.
-fn host_os_name() -> String {
-    if let Ok(s) = std::fs::read_to_string("/proc/sys/kernel/ostype") {
-        let name = s.trim();
-        if let Ok(rel) = std::fs::read_to_string("/proc/sys/kernel/osrelease") {
-            return format!("{name} {}", rel.trim());
-        }
-        return name.to_string();
-    }
-    "Linux".to_string()
-}
-
 fn engine_card(ui: &mut Ui, ok: bool, version: &str) {
     Frame::NONE
         .fill(SURFACE)
