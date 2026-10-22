@@ -1367,6 +1367,30 @@ fn render_hardware(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
                 Style::default().fg(Color::White),
             ),
         ]));
+        for u in hw_inventory::disk_usage().iter().filter(|u| u.kern == d.name) {
+            let frac = u.used as f64 / u.total.max(1) as f64;
+            let filled = (frac * 20.0).round() as usize;
+            let color = if frac > 0.9 {
+                Color::Red
+            } else if frac > 0.75 {
+                Color::Yellow
+            } else {
+                Color::Green
+            };
+            lines.push(Line::from(vec![
+                Span::styled("         ", Style::default().fg(Color::Gray)),
+                Span::styled(format!("{:<10}", u.mount), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    "█".repeat(filled) + &"░".repeat(20 - filled),
+                    Style::default().fg(color),
+                ),
+                Span::raw(format!(
+                    " {} / {}",
+                    human_bytes(u.used as i64),
+                    human_bytes(u.total as i64)
+                )),
+            ]));
+        }
     }
     let vitals = Paragraph::new(lines)
         .block(Block::default().borders(Borders::ALL).title(" Hardware "));

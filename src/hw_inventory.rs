@@ -42,6 +42,114 @@ impl Inventory {
             .filter_map(|d| d.kern.clone())
             .collect()
     }
+
+}
+
+/// Filesystems mounted off the inventoried drives (root and home, …), read
+/// from /proc/mounts. One entry per physical device — the mount with the
+/// most capacity wins, so a btrfs multi-mount pool counts once.
+pub fn disk_usage() -> Vec<DiskUsage> {
+    let inv = &*INVENTORY;
+    let txt = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
+    let mut best: std::collections::HashMap<String, DiskUsage> = Default::default();
+    for line in txt.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() < 3 || !f[0].starts_with("/dev/") {
+            continue;
+        }
+        let dev = f[0].replace("\\040", " ");
+        let kern = match whole_of(&dev[5..]) {
+            Some(k) => k,
+            None => continue,
+        };
+        if inv.disk_kerns().iter().all(|k| k != &kern) {
+            continue; // not an inventoried drive
+        }
+        let dev = f[0].replace("\\040", " ");
+        let Ok(stat) = statvfs(&dev) else {
+            continue;
+        };
+        let du = DiskUsage {
+            kern: kern.clone(),
+            mount: f[1].replace("\\040", " "),
+            total: stat.0,
+            used: stat.0 - stat.1,
+        };
+        match best.get(&kern) {
+            Some(cur) if cur.total >= du.total => {}
+            _ => {
+                best.insert(kern, du);
+            }
+        }
+    }
+    let mut out: Vec<DiskUsage> = best.into_values().collect();
+    out.sort_by(|a, b| a.kern.cmp(&b.kern));
+    out
+}
+
+/// Whole-disk name for a partition: nvme0n1p2 -> nvme0n1, sda1 -> sda,
+    /// mmcblk0p1 -> mmcblk0.
+pub fn whole_of(part: &str) -> Option<String> {
+    if part.starts_with("nvme") || part.starts_with("mmcblk") {
+    match part.rfind('p') {
+        Some(i)
+            if !part[i + 1..].is_empty()
+                && part[i + 1..].chars().all(|c| c.is_ascii_digit()) =>
+        {
+            Some(part[..i].to_string())
+        }
+        _ => Some(part.to_string()), // the whole disk mounted directly
+    }
+    } else {
+    match part.find(|c: char| c.is_ascii_digit()) {
+        Some(end) => Some(part[..end].to_string()),
+        None => Some(part.to_string()), // sda, vda: already whole
+    }
+    }
+}
+
+/// Filesystem capacity for one mount, attributed to its whole disk.
+#[derive(Clone, Debug)]
+pub struct DiskUsage {
+    pub kern: String,
+    pub mount: String,
+    pub total: u64,
+    pub used: u64,
+}
+
+/// (total, free) bytes for a mounted path, via libc statvfs.
+fn statvfs(path: &str) -> Result<(u64, u64), ()> {
+    extern "C" {
+        fn statvfs(path: *const std::ffi::c_char, buf: *mut u8) -> i32;
+    }
+    // struct statvfs on linux x86_64 is 120 bytes; over-allocate and read the
+    // f_frsize/f_blocks/f_bavail fields at their documented offsets.
+    #[repr(C)]
+    struct SvfsBuf {
+        f_bsize: u64,
+        f_frsize: u64,
+        f_blocks: u64,
+        f_bfree: u64,
+        f_bavail: u64,
+        _rest: [u8; 512],
+    }
+    let c = std::ffi::CString::new(path).map_err(|_| ())?;
+    let mut buf = SvfsBuf {
+        f_bsize: 0,
+        f_frsize: 0,
+        f_blocks: 0,
+        f_bfree: 0,
+        f_bavail: 0,
+        _rest: [0; 512],
+    };
+    let rc = unsafe { statvfs(c.as_ptr(), &mut buf as *mut _ as *mut u8) };
+    if rc != 0 || buf.f_frsize == 0 || buf.f_blocks == 0 {
+        return Err(());
+    }
+    Ok((
+        buf.f_blocks * buf.f_frsize,
+        buf.f_bavail * buf.f_frsize,
+    ))
 }
 
 
@@ -452,6 +560,28 @@ pub static INVENTORY: LazyLock<Inventory> = LazyLock::new(|| {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn whole_of_maps_partitions_to_their_disk() {
+        assert_eq!(whole_of("nvme0n1p2").as_deref(), Some("nvme0n1"));
+        assert_eq!(whole_of("sda1").as_deref(), Some("sda"));
+        assert_eq!(whole_of("mmcblk0p1").as_deref(), Some("mmcblk0"));
+        // a whole disk mounted directly maps to itself
+        assert_eq!(whole_of("nvme0n1").as_deref(), Some("nvme0n1"));
+    }
+
+    #[test]
+    fn disk_usage_reports_plausible_capacity_for_inventoried_disks() {
+        let usages = disk_usage();
+        // any real Linux box has at least the root fs on an inventoried disk
+        assert!(!usages.is_empty(), "no mounted filesystem matched the inventory");
+        for u in &usages {
+            assert!(u.total > 0, "{} total=0", u.mount);
+            assert!(u.used <= u.total, "{} used>total", u.mount);
+            assert!(u.mount.starts_with('/'), "{} not a path", u.mount);
+            assert!(INVENTORY.disk_kerns().iter().any(|k| *k == u.kern), "{} not inventoried", u.kern);
+        }
+    }
+
     use super::*;
 
     #[test]

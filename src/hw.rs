@@ -63,8 +63,7 @@ pub struct DiskStat {
     /// Lifetime completed IOs.
     pub reads: u64,
     pub writes: u64,
-    /// Busy and weighted-busy milliseconds since boot (for util% and queue).
-    pub ms_busy: u64,
+    /// Weighted-busy milliseconds since boot (for the avg-queue figure).
     pub ms_weighted: u64,
     /// NVMe drive temperature, Celsius, when exposed via hwmon.
     pub temp_c: Option<f64>,
@@ -79,7 +78,6 @@ pub struct DiskRow {
     pub reads_sectors: u64,  // 512 B sectors
     pub writes: u64,
     pub writes_sectors: u64,
-    pub ms_busy: u64,
     pub ms_weighted: u64,
 }
 
@@ -138,7 +136,6 @@ impl Sampler {
                     total_write: d.writes_sectors * 512,
                     reads: d.reads,
                     writes: d.writes,
-                    ms_busy: d.ms_busy,
                     ms_weighted: d.ms_weighted,
                     temp_c: None,
                     uptime: s.uptime,
@@ -314,7 +311,6 @@ fn diskstats_full() -> Vec<DiskRow> {
             reads_sectors: g(5),
             writes: g(7),
             writes_sectors: g(9),
-            ms_busy: g(12),
             ms_weighted: g(13),
         });
     }

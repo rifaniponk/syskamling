@@ -14,7 +14,7 @@ use egui::{
 
 use tokio::sync::mpsc;
 
-use crate::agents::{AgentScanner, AgentSession};
+use crate::agents::{Activity, AgentScanner, AgentSession, Step, StepKind};
 use crate::docker::{
     self, ContainerSummary, DiskSummary, Docker, DockerError, EventMessage, ImageSummary,
     LogLine, StatsSample, StreamKind, SystemInfo,
@@ -189,7 +189,8 @@ struct Gui {
     stats_gen: u64,
     // --- agents tab ---
     agents: Vec<AgentSession>,
-    selected_agent: Option<usize>,
+    /// lead pid of the selected session (indexes shift between scans)
+    selected_agent: Option<u32>,
     agent_filter: String,
     // --- hardware tab ---
     hw: Option<HwSample>,
@@ -485,6 +486,8 @@ struct SysKamlingApp {
     /// when the scanner task was last kicked
     last_agent_scan: Instant,
     agent_scan_busy: Arc<Mutex<bool>>,
+    /// kept across scans: CPU% needs the previous sample, transcripts are cached
+    agent_scanner: Arc<Mutex<AgentScanner>>,
     // --- hardware tab ---
     sampler: Sampler,
     last_hw_sample: Instant,
@@ -548,6 +551,7 @@ impl SysKamlingApp {
             toast: (String::new(), Instant::now()),
             last_agent_scan: Instant::now() - Duration::from_secs(999),
             agent_scan_busy: Arc::new(Mutex::new(false)),
+            agent_scanner: Arc::new(Mutex::new(AgentScanner::default())),
             sampler: Sampler::default(),
             last_hw_sample: Instant::now() - Duration::from_secs(999),
             last_port_scan: Instant::now() - Duration::from_secs(999),
@@ -597,6 +601,7 @@ impl SysKamlingApp {
             toast: (String::new(), Instant::now()),
             last_agent_scan: Instant::now() - Duration::from_secs(999),
             agent_scan_busy: Arc::new(Mutex::new(false)),
+            agent_scanner: Arc::new(Mutex::new(AgentScanner::default())),
             sampler: Sampler::default(),
             last_hw_sample: Instant::now() - Duration::from_secs(999),
             last_port_scan: Instant::now() - Duration::from_secs(999),
@@ -631,7 +636,6 @@ impl SysKamlingApp {
                 writes: 20,
                 total_read: 1000,
                 total_write: 2000,
-                ms_busy: 50,
                 ms_weighted: 3,
                 uptime: 3600.0,
                 temp_c: Some(40.0),
@@ -900,10 +904,10 @@ impl SysKamlingApp {
         self.last_agent_scan = Instant::now();
         *self.agent_scan_busy.lock().unwrap() = true;
         let busy = Arc::clone(&self.agent_scan_busy);
+        let scanner = Arc::clone(&self.agent_scanner);
         let tx = self.tx.clone();
         self.rt.spawn_blocking(move || {
-            let mut scanner = AgentScanner::default();
-            let sessions = scanner.scan();
+            let sessions = scanner.lock().unwrap().scan();
             *busy.lock().unwrap() = false;
             let _ = tx.send(Msg::AgentsScanned(sessions));
         });
@@ -1275,15 +1279,6 @@ impl SysKamlingApp {
             }
             Msg::AgentsScanned(sessions) => {
                 g.agents = sessions;
-                // keep the selection pointing at the same session
-                if let Some(key) = g
-                    .selected_agent
-                    .and_then(|i| g.agents.get(i))
-                    .map(|a| (a.agent, a.lead_pid))
-                {
-                    g.selected_agent =
-                        g.agents.iter().position(|a| a.agent == key.0 && a.lead_pid == key.1);
-                }
             }
             Msg::PortsScanned(entries) => {
                 g.ports = entries;
@@ -1747,7 +1742,7 @@ impl SysKamlingApp {
     }
 
     fn agent_list(&mut self, ui: &mut Ui) {
-        let rows = self.gui.filtered_agents();
+        let mut rows: Vec<&AgentSession> = self.gui.filtered_agents().into_iter().map(|(_, a)| a).collect();
         let sel = self.gui.selected_agent;
         if rows.is_empty() {
             if self.gui.agents.is_empty() {
@@ -1761,63 +1756,80 @@ impl SysKamlingApp {
             }
             return;
         }
+        // whatever needs you first, then whatever is working
+        rows.sort_by_key(|a| (agent_state(a).rank, a.agent, a.lead_pid));
+        let count = |rank: u8| self.gui.agents.iter().filter(|a| agent_state(a).rank == rank).count();
+        let (needs, working) = (count(0), count(1));
+        ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            ui.label(RichText::new(format!("{} sessions", self.gui.agents.len())).size(12.0).color(MUTED));
+            if working > 0 {
+                ui.label(RichText::new(format!("· {working} working")).size(12.0).color(GREEN));
+            }
+            if needs > 0 {
+                ui.label(RichText::new(format!("· {needs} need you")).size(12.0).color(AMBER));
+            }
+        });
+        ui.add_space(6.0);
         let now = epoch();
-        let mut new_sel: Option<Option<usize>> = None;
+        let time = ui.input(|i| i.time);
+        let mut new_sel: Option<Option<u32>> = None;
         ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 4.0;
-                for (i, a) in rows {
+                for a in rows {
                     let (rect, resp) = ui.allocate_exact_size(
-                        Vec2::new(ui.available_width(), 58.0),
+                        Vec2::new(ui.available_width(), 62.0),
                         Sense::click(),
                     );
-                    let is_sel = sel == Some(i);
+                    let is_sel = sel == Some(a.lead_pid);
                     if resp.clicked() {
-                        new_sel = Some(if is_sel { None } else { Some(i) });
+                        new_sel = Some(if is_sel { None } else { Some(a.lead_pid) });
                     }
                     if !ui.is_rect_visible(rect) {
                         continue;
                     }
                     let p = ui.painter();
                     row_bg(p, rect, is_sel, resp.hovered());
-                    let color = agent_color(a.agent);
-                    icon_tile(p, rect, Tab::Agents, color);
+                    icon_tile(p, rect, Tab::Agents, agent_color(a.agent));
+                    let st = agent_state(a);
+                    // status pill on the right, with how long it has held
+                    let pill_c = Pos2::new(rect.right() - 10.0, rect.top() + 20.0);
+                    pill_at(p, pill_c, st.label, st.color, st.color.gamma_multiply(0.14));
+                    if let Some(since) = a.activity.as_ref().and_then(|x| x.status_since) {
+                        p.text(
+                            Pos2::new(rect.right() - 12.0, rect.top() + 44.0),
+                            egui::Align2::RIGHT_CENTER,
+                            uptime_str(now - since),
+                            FontId::proportional(11.0),
+                            FAINT,
+                        );
+                    }
                     let left = rect.left() + 54.0;
-                    let text_w = (rect.width() - 54.0 - 86.0).max(40.0);
-                    let name = elide(
-                        p,
-                        a.agent.to_string(),
-                        FontId::proportional(14.0),
-                        TEXT,
-                        text_w,
-                    );
-                    p.galley(Pos2::new(left, rect.top() + 10.0), name, TEXT);
-                    let proj = a
-                        .cwd
-                        .as_deref()
-                        .map(basename)
-                        .unwrap_or_else(|| a.vendor.to_string());
-                    let sub = elide(
-                        p,
-                        format!("{} · pid {} · {}", proj, a.lead_pid, ago(now - a.started.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0))),
-                        FontId::proportional(12.0),
-                        MUTED,
-                        text_w,
-                    );
-                    p.galley(Pos2::new(left, rect.top() + 32.0), sub, MUTED);
-                    let busy = a.cpu_pct > 1.0;
-                    p.text(
-                        Pos2::new(rect.right() - 12.0, rect.center().y),
-                        egui::Align2::RIGHT_CENTER,
-                        format!("{:.0}%", a.cpu_pct),
-                        FontId::monospace(12.0),
-                        if busy { GREEN } else { FAINT },
-                    );
+                    let text_w = (rect.width() - 54.0 - 104.0).max(40.0);
+                    let title = elide(p, agent_title(a), FontId::proportional(14.0), TEXT, text_w);
+                    p.galley(Pos2::new(left, rect.top() + 10.0), title, TEXT);
+                    // second line: what it's doing right now, else where it runs
+                    let doing = a.activity.as_ref().filter(|_| st.live).and_then(|x| x.steps.last());
+                    let (sub, sub_color) = match doing {
+                        Some(s) => (step_line(s), MUTED),
+                        None => (agent_where(a), FAINT),
+                    };
+                    let mut x = left;
+                    if doing.is_some() {
+                        spinner_at(p, time, Pos2::new(x + 5.0, rect.top() + 42.0), 4.5, st.color);
+                        x += 16.0;
+                    }
+                    let sub = elide(p, sub, FontId::proportional(12.0), sub_color, text_w - (x - left));
+                    p.galley(Pos2::new(x, rect.top() + 34.0), sub, sub_color);
                 }
             });
         if let Some(s) = new_sel {
             self.gui.selected_agent = s;
+        }
+        if self.gui.agents.iter().any(|a| agent_state(a).live) {
+            ui.ctx().request_repaint_after(Duration::from_millis(50));
         }
     }
 
@@ -2150,6 +2162,10 @@ impl SysKamlingApp {
         if crashed > 0 {
             issues.push((AMBER, format!("{crashed} container(s) exited with an error in the last hour"), Tab::Containers));
         }
+        let waiting = g.agents.iter().filter(|a| agent_state(a).rank == 0).count();
+        if waiting > 0 {
+            issues.push((AMBER, format!("{waiting} agent session(s) waiting for your input"), Tab::Agents));
+        }
         if !g.strata_cfg.api_key.trim().is_empty() && g.strata_error.is_some() {
             issues.push((AMBER, "Strata server is not responding".into(), Tab::Strata));
         }
@@ -2405,17 +2421,19 @@ value: human_rate(h.net_rx_bps + h.net_tx_bps),
             meta_line(ui, "No agents running.");
             return;
         }
-        let cpu: f64 = g.agents.iter().map(|a| a.cpu_pct).sum();
-        let mem: u64 = g.agents.iter().map(|a| a.mem_bytes).sum();
-        meta_line(ui, &format!("{cpu:.0}% CPU · {} RSS", human_size(mem as i64)));
-        let mut top: Vec<&AgentSession> = g.agents.iter().collect();
-        top.sort_by(|a, b| b.cpu_pct.partial_cmp(&a.cpu_pct).unwrap_or(std::cmp::Ordering::Equal));
-        for a in top.iter().take(3) {
-            let name = match &a.cwd {
-                Some(d) => format!("{} · {}", a.agent, basename(d)),
-                None => a.agent.to_string(),
-            };
-            mini_row(ui, agent_color(a.agent), &name, &format!("{:.0}% · {}", a.cpu_pct, human_size(a.mem_bytes as i64)));
+        let mut top: Vec<(&AgentSession, AgentState)> = g.agents.iter().map(|a| (a, agent_state(a))).collect();
+        top.sort_by_key(|(a, st)| (st.rank, a.lead_pid));
+        let count = |rank: u8| top.iter().filter(|(_, st)| st.rank == rank).count();
+        let mut meta = Vec::new();
+        for (rank, what) in [(0, "need you"), (1, "working"), (2, "idle")] {
+            let c = count(rank);
+            if c > 0 {
+                meta.push(format!("{c} {what}"));
+            }
+        }
+        meta_line(ui, &meta.join(" · "));
+        for (a, st) in top.iter().take(3) {
+            mini_row(ui, st.color, &agent_title(a), st.label);
         }
     }
 
@@ -2791,110 +2809,160 @@ value: im.containers.max(0).to_string(),
     }
 
     fn agent_detail(&mut self, ui: &mut Ui) {
-        let Some(i) = self.gui.selected_agent else {
+        let Some(pid) = self.gui.selected_agent else {
             empty_state(
                 ui,
                 "No agent selected",
-                "Pick an agent session on the left to see its details.",
+                "Pick an agent session on the left to see what it's doing.",
             );
             return;
         };
-        // The selection indexes the unfiltered list; the filtered view may
-        // hide it, in which case show the "ended" state rather than stale data.
-        let Some(a) = self
-            .gui
-            .filtered_agents()
-            .into_iter()
-            .find(|(idx, _)| *idx == i)
-            .map(|(_, a)| a)
-            .cloned()
-        else {
+        let Some(a) = self.gui.agents.iter().find(|a| a.lead_pid == pid).cloned() else {
             empty_state(ui, "Session ended", "That agent session is no longer running.");
             return;
         };
-        let color = agent_color(a.agent);
+        let st = agent_state(&a);
+        let now = epoch();
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
-                ui.label(RichText::new(a.agent).font(bold(22.0)).color(TEXT));
-                ui.label(RichText::new(a.vendor).size(12.5).color(MUTED));
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                chip(ui, &format!("{} procs", a.pids.len()), color);
-            });
-        });
-        ui.add_space(16.0);
-        let uptime = epoch()
-            - a.started
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-        let kpis = [
-            Kpi {
-                label: "CPU",
-                device: String::new(),
-value: format!("{:.1}%", a.cpu_pct),
-                sub: "across the session tree".into(),
-                color: GREEN,
-                viz: Viz::None,
-                glyph: Some("cpu"),
-            },
-            Kpi {
-                label: "Memory",
-                device: String::new(),
-value: human_size(a.mem_bytes as i64),
-                sub: "resident, summed".into(),
-                color: VIOLET,
-                viz: Viz::None,
-                glyph: Some("ram"),
-            },
-            Kpi {
-                label: "Uptime",
-                device: String::new(),
-value: ago(uptime),
-                sub: format!("lead pid {}", a.lead_pid),
-                color: ACCENT,
-                viz: Viz::None,
-                glyph: None,
-            },
-        ];
-        ui.scope(|ui| {
-            ui.spacing_mut().item_spacing.x = 14.0;
-            ui.columns(3, |cols| {
-                for (col, k) in cols.iter_mut().zip(&kpis) {
-                    kpi_card(col, k);
+                ui.add(egui::Label::new(RichText::new(agent_title(&a)).font(bold(22.0)).color(TEXT)).truncate());
+                let mut sub = vec![a.agent.to_string()];
+                if let Some(c) = &a.cwd {
+                    sub.push(c.clone());
                 }
+                if let Some(b) = a.activity.as_ref().and_then(|x| x.branch.clone()) {
+                    sub.push(format!("⎇ {b}"));
+                }
+                ui.label(RichText::new(sub.join(" · ")).size(12.5).color(MUTED));
             });
         });
         ui.add_space(14.0);
-
-        card(ui, |ui| {
-            card_title(ui, "Project", "");
-            match &a.cwd {
-                Some(c) => {
-                    ui.label(RichText::new(c).font(FontId::monospace(12.5)).color(TEXT));
-                }
+        ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| match &a.activity {
+                Some(act) => self.agent_activity(ui, &a, act, &st, now),
                 None => {
-                    ui.label(RichText::new("not readable (different user?)").color(FAINT));
+                    card(ui, |ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "Live activity is read from Claude Code's session files. For {}, SysKamling sees the processes only.",
+                                a.agent
+                            ))
+                            .size(12.5)
+                            .color(MUTED),
+                        );
+                    });
+                    ui.add_space(12.0);
+                    agent_process_card(ui, &a, now);
                 }
+            });
+    }
+
+    /// Status, task, numbers and recent steps of an agent that reports them.
+    fn agent_activity(&self, ui: &mut Ui, a: &AgentSession, act: &Activity, st: &AgentState, now: i64) {
+        let time = ui.input(|i| i.time);
+        // ---- now: status, what it's on, the task ----
+        card(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(st.label).font(bold(18.0)).color(st.color));
+                if let Some(since) = act.status_since {
+                    ui.label(RichText::new(format!("for {}", uptime_str(now - since))).size(12.5).color(FAINT));
+                }
+            });
+            ui.add_space(2.0);
+            let current = act.steps.last().filter(|_| st.live);
+            match (act.status.as_str(), current) {
+                (_, Some(s)) => {
+                    let (r, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 22.0), Sense::hover());
+                    let p = ui.painter();
+                    spinner_at(p, time, Pos2::new(r.left() + 6.0, r.center().y), 5.0, st.color);
+                    let line = elide(p, step_line(s), FontId::proportional(13.5), TEXT, r.width() - 22.0);
+                    p.galley(Pos2::new(r.left() + 20.0, r.center().y - line.size().y / 2.0), line, TEXT);
+                    ui.ctx().request_repaint_after(Duration::from_millis(50));
+                }
+                ("waiting", _) => {
+                    ui.label(RichText::new("Waiting for you: approve a tool call or answer a question in its terminal.").size(13.0).color(TEXT));
+                }
+                ("idle", _) => {
+                    ui.label(RichText::new("Done. Waiting for the next prompt.").size(13.0).color(MUTED));
+                }
+                _ => {}
+            }
+            if let Some(p) = &act.last_prompt {
+                ui.add_space(8.0);
+                ui.label(RichText::new("TASK").size(10.5).color(FAINT));
+                ui.add(egui::Label::new(RichText::new(p).size(13.0).color(TEXT)).wrap());
             }
         });
-        ui.add_space(10.0);
+        ui.add_space(12.0);
+        // ---- numbers: one compact strip ----
+        let stats = [
+            (
+                "Last activity",
+                act.last_active.map(|t| ago(now - t)).unwrap_or_else(|| "–".into()),
+                format!("{} steps in view", act.steps.len()),
+            ),
+            (
+                "Context",
+                act.context_tokens.map(|t| format!("{} tokens", fmt_tokens(t as i64))).unwrap_or_else(|| "–".into()),
+                act.model.clone().unwrap_or_default(),
+            ),
+            (
+                "CPU",
+                format!("{:.1}%", a.cpu_pct),
+                format!("{} process{}", a.pids.len(), if a.pids.len() == 1 { "" } else { "es" }),
+            ),
+            ("Memory", human_size(a.mem_bytes as i64), "resident".to_string()),
+        ];
         card(ui, |ui| {
-            card_title(ui, "Command line", "");
-            ui.add(
-                egui::Label::new(
-                    RichText::new(&a.cmdline).font(FontId::monospace(12.0)).color(MUTED),
-                )
-                .wrap(),
-            );
+            ui.columns(4, |cols| {
+                for (col, (label, value, sub)) in cols.iter_mut().zip(&stats) {
+                    col.spacing_mut().item_spacing.y = 1.0;
+                    col.label(RichText::new(*label).size(11.5).color(FAINT));
+                    col.add(egui::Label::new(RichText::new(value).font(bold(17.0)).color(TEXT)).truncate());
+                    col.add(egui::Label::new(RichText::new(sub).size(11.5).color(FAINT)).truncate());
+                }
+            });
         });
-        ui.add_space(10.0);
+        ui.add_space(12.0);
+        // ---- recent steps, newest first ----
         card(ui, |ui| {
-            card_title(ui, &format!("Processes ({})", a.pids.len()), "");
-            for pid in &a.pids {
-                ui.label(RichText::new(format!("pid {pid}")).font(FontId::monospace(12.0)).color(TEXT));
+            card_title(ui, "Recent activity", "newest first");
+            if act.steps.is_empty() {
+                ui.label(RichText::new("No steps recorded yet.").color(FAINT));
+                return;
+            }
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for s in act.steps.iter().rev() {
+                let (r, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::hover());
+                if !ui.is_rect_visible(r) {
+                    continue;
+                }
+                let p = ui.painter();
+                let (tag, color) = match s.kind {
+                    StepKind::Prompt => ("You".to_string(), ACCENT),
+                    StepKind::Reply => ("Reply".to_string(), MUTED),
+                    StepKind::Tool if s.failed => (s.tool.clone(), RED),
+                    StepKind::Tool => (s.tool.clone(), CYAN),
+                };
+                let y = r.center().y;
+                if s.pending && st.live {
+                    spinner_at(p, time, Pos2::new(r.left() + 5.0, y), 4.0, color);
+                } else {
+                    p.circle_filled(Pos2::new(r.left() + 5.0, y), 3.0, color);
+                }
+                let when = s.at.map(|t| ago(now - t)).unwrap_or_default();
+                p.text(Pos2::new(r.right() - 4.0, y), egui::Align2::RIGHT_CENTER, when, FontId::proportional(11.5), FAINT);
+                let tag_g = elide(p, tag, FontId::proportional(12.0), color, 150.0);
+                let tag_w = tag_g.size().x;
+                p.galley(Pos2::new(r.left() + 18.0, y - tag_g.size().y / 2.0), tag_g, color);
+                let text_color = if s.kind == StepKind::Reply { MUTED } else { TEXT };
+                let text = elide(p, s.text.clone(), FontId::proportional(13.0), text_color, r.width() - tag_w - 120.0);
+                p.galley(Pos2::new(r.left() + 28.0 + tag_w, y - text.size().y / 2.0), text, text_color);
             }
         });
+        ui.add_space(12.0);
+        agent_process_card(ui, a, now);
     }
 
     // ------------------------------------------------------------------
@@ -3055,17 +3123,19 @@ value: format!("{} °C", temp_str(t)),
         });
         ui.add_space(14.0);
 
-        let mem_hist: Vec<f64> = self.gui.hw_mem_hist.iter().copied().collect();
         let swap_hist: Vec<f64> = self.gui.hw_swap_hist.iter().copied().collect();
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.x = 14.0;
             ui.columns(2, |cols| {
                 card(&mut cols[0], |ui| {
-                    card_title(ui, "Memory & swap", "");
-                    bar_row(ui, "Used", mem_used, s.mem_total, VIOLET);
-                    bar_row(ui, "Swap", swap_used, s.swap_total, AMBER);
-                    let w = ui.available_width();
-                    area_chart(ui, &mem_hist, VIOLET, Vec2::new(w, 54.0), |v| human_size(v as i64));
+                    // memory already has its KPI card above; this one is
+                    // dedicated to swap pressure
+                    card_title(
+                        ui,
+                        "Swap",
+                        &format!("{} of {}", human_size(swap_used as i64), human_size(s.swap_total as i64)),
+                    );
+                    bar_row(ui, "Used", swap_used, s.swap_total, AMBER);
                     let w = ui.available_width();
                     area_chart(ui, &swap_hist, AMBER, Vec2::new(w, 54.0), |v| human_size(v as i64));
                 });
@@ -4673,9 +4743,13 @@ fn disk_card(ui: &mut Ui, d: &crate::hw::DiskStat, inv: Option<&hwinv::HwDevice>
                 });
             }
         });
-        // active time since boot = utilization, averaged over uptime
-        let util = if d.uptime > 0.0 { (d.ms_busy as f64 / (d.uptime * 1000.0) * 100.0).min(100.0) } else { 0.0 };
-        bar_row(ui, "Active", (util * 10.0) as u64, 1000, GREEN);
+        // filesystem capacity on this drive (root, home, …), from /proc/mounts
+        let usage = hwinv::disk_usage();
+        for u in usage.iter().filter(|u| u.kern == d.name) {
+            let frac = u.used as f32 / u.total.max(1) as f32;
+            let col = if frac > 0.9 { RED } else if frac > 0.75 { AMBER } else { GREEN };
+            bar_row(ui, &u.mount, u.used, u.total, col);
+        }
         ui.horizontal(|ui| {
             ui.label(RichText::new("Lifetime").size(12.5).color(MUTED).weak());
             ui.label(RichText::new(format!("{} read", human_size(d.total_read as i64))).font(FontId::monospace(12.0)).color(MUTED));
@@ -5730,6 +5804,76 @@ fn basename(p: &str) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or(p)
         .to_string()
+}
+
+/// How an agent session reads at a glance.
+struct AgentState {
+    label: &'static str,
+    color: Color32,
+    /// actively doing something (spinner, repaint)
+    live: bool,
+    /// list order: 0 needs you, 1 working, 2 idle, 3 unknown
+    rank: u8,
+}
+
+/// Claude Code reports its own status; other agents only have CPU to go on.
+fn agent_state(a: &AgentSession) -> AgentState {
+    let st = |label, color, live, rank| AgentState { label, color, live, rank };
+    match a.activity.as_ref().map(|x| x.status.as_str()) {
+        Some("waiting") => st("Needs you", AMBER, false, 0),
+        Some("busy") => st("Working", GREEN, true, 1),
+        Some("shell") => st("Running shell", GREEN, true, 1),
+        Some("idle") => st("Idle", FAINT, false, 2),
+        Some(_) => st("Running", ACCENT, false, 3),
+        None if a.cpu_pct >= 2.0 => st("Active", GREEN, false, 1),
+        None => st("Quiet", FAINT, false, 3),
+    }
+}
+
+/// Session title, else the project it runs in, else the agent's name.
+fn agent_title(a: &AgentSession) -> String {
+    a.activity
+        .as_ref()
+        .and_then(|x| x.title.clone())
+        .or_else(|| a.cwd.as_deref().map(|c| format!("{} · {}", a.agent, basename(c))))
+        .unwrap_or_else(|| a.agent.to_string())
+}
+
+/// "Claude Code · project · up 2h 10m" for the list's second line.
+fn agent_where(a: &AgentSession) -> String {
+    let up = epoch() - a.started.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let mut parts = vec![a.agent.to_string()];
+    if let Some(c) = &a.cwd {
+        parts.push(basename(c));
+    }
+    parts.push(format!("up {}", uptime_str(up)));
+    parts.join(" · ")
+}
+
+/// One step as a single line, e.g. "Bash: Run tests".
+fn step_line(s: &Step) -> String {
+    match s.kind {
+        StepKind::Prompt => format!("You: {}", s.text),
+        StepKind::Reply => s.text.clone(),
+        StepKind::Tool => format!("{}: {}", s.tool, s.text),
+    }
+}
+
+/// Where the session runs: project, command line, process ids.
+fn agent_process_card(ui: &mut Ui, a: &AgentSession, now: i64) {
+    let up = now - a.started.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    card(ui, |ui| {
+        card_title(ui, "Process", &format!("up {}", uptime_str(up)));
+        kv(ui, "Project", a.cwd.as_deref().unwrap_or("not readable (different user?)"), true);
+        kv(
+            ui,
+            "PIDs",
+            &a.pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", "),
+            true,
+        );
+        ui.add_space(4.0);
+        ui.add(egui::Label::new(RichText::new(&a.cmdline).font(FontId::monospace(11.5)).color(FAINT)).wrap());
+    });
 }
 
 /// Stable per-agent accent color for the Agents tab.
@@ -6794,7 +6938,7 @@ mod hw_titles_tests {
         rich.disks.push(crate::hw::DiskStat {
             name: "sda".into(),
             reads: 1, writes: 1, total_read: 1, total_write: 1,
-            ms_busy: 1, ms_weighted: 0, uptime: 3600.0, temp_c: None,
+            ms_weighted: 0, uptime: 3600.0, temp_c: None,
             read_bps: 0.0, write_bps: 0.0,
         });
         app.gui.hw = Some(rich);
@@ -6831,5 +6975,41 @@ mod hw_titles_tests {
         assert!(!all.contains("Per-core load"), "per-core section still present");
         // internal sda gets no storage card of its own
         assert!(!all.split('\n').any(|t| t.trim() == "sda"), "internal sda still shown");
+    }
+
+    #[test]
+    fn storage_cards_show_capacity_bars_and_swap_card_stands_alone() {
+        let ctx = egui::Context::default();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let rt = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
+        let mut app = SysKamlingApp::new_offscreen(&ctx, tx, rx, rt);
+        app.gui.tab = Tab::Hardware;
+        app.sample_hardware();
+        app.sample_hardware();
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1200.0, 900.0)));
+        let mut all = String::new();
+        for _ in 0..3 {
+            ctx.begin_pass(raw.clone());
+            egui::CentralPanel::default().show(&ctx, |ui| match app.gui.tab {
+                Tab::Hardware => app.hardware_view(ui),
+                _ => {}
+            });
+            let out = ctx.end_pass();
+            all = out.shapes.iter().filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
+                _ => None,
+            }).collect::<Vec<String>>().join("\n");
+        }
+        // every inventoried disk card carries its mounted filesystems' usage
+        let usage = crate::hw_inventory::disk_usage();
+        assert!(!usage.is_empty(), "no inventoried filesystems on this box");
+        for u in &usage {
+            assert!(all.contains(&u.mount), "storage card never shows {} usage", u.mount);
+        }
+        // the retired bits stay retired
+        assert!(!all.contains("Active"), "utilization bar still rendered");
+        assert!(!all.contains("Memory & swap"), "memory+swap combo card still present");
+        assert!(all.contains("Swap"), "swap card missing");
     }
 }
