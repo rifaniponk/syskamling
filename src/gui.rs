@@ -843,6 +843,9 @@ impl eframe::App for SysKamlingApp {
             }
             ctx.request_repaint();
         }
+        // A frame that lands between ticks must still schedule the next
+        // one, or the loop goes idle until the mouse moves.
+        ctx.request_repaint_after(Duration::from_millis(250));
 
         // Animation bookkeeping: ease status dots toward their target,
         // expire the spin, and schedule fast repaints while anything moves.
@@ -6094,12 +6097,15 @@ mod settings_tab_tests {
             std::process::id()
         ));
         std::fs::create_dir_all(dir.join(".config/syskamling")).unwrap();
+        let lock = crate::strata::tests::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let original = std::env::var_os("HOME");
+        std::env::set_var("HOME", &dir);
         HomeGuard {
-            original: std::env::var_os("HOME"),
+            original,
             dir,
-            _lock: crate::strata::tests::HOME_TEST_LOCK
-                .lock()
-                .unwrap_or_else(|p| p.into_inner()),
+            _lock: lock,
         }
     }
 
