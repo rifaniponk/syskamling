@@ -1626,7 +1626,9 @@ impl SysKamlingApp {
                     Tab::Images => self.image_list(ui),
                     Tab::Agents => self.agent_list(ui),
                     Tab::Ports => self.port_list(ui),
-                    Tab::Processes => self.proc_list(ui),
+                    // the process table needs real width: it renders in the
+                // center panel instead, with the detail below it
+                Tab::Processes => {}
                     _ => self.volume_list(ui),
                 }
             });
@@ -1985,8 +1987,9 @@ impl SysKamlingApp {
         if self.gui.procs.is_empty() {
             empty_state(
                 ui,
-                "Scanning processes…",
-                "The first /proc walk lands within a refresh tick.",
+                "No process data yet",
+                "The /proc walk should land within a refresh tick — if this\
+                 persists, the app may lack permission to read /proc.",
             );
             return;
         }
@@ -2134,31 +2137,25 @@ impl SysKamlingApp {
 
     fn proc_detail(&mut self, ui: &mut Ui) {
         let Some(pid) = self.gui.selected_proc else {
-            empty_state(
-                ui,
-                "No process selected",
-                "Pick a process on the left to inspect it.",
+            ui.label(
+                RichText::new("Click a row above to inspect a process — full command line, threads, owner and process tree.")
+                    .size(12.5)
+                    .color(FAINT),
             );
             return;
         };
         let Some(r) = self.gui.procs.iter().find(|r| r.pid == pid).cloned() else {
-            empty_state(ui, "Process exited", "That pid is gone; pick another row.");
+            ui.label(RichText::new("That process exited; pick another row.").size(12.5).color(FAINT));
             return;
         };
         let now = epoch();
         let up = (now - r.started).max(0);
-        page_header(ui, &r.name, &format!("pid {} · {} threads · up {}", r.pid, r.threads, uptime_str(up as i64)));
-        ui.add_space(12.0);
         card(ui, |ui| {
-            card_title(ui, "Vitals", "");
-            let cpu_color = if r.cpu_pct > 80.0 { RED } else if r.cpu_pct > 30.0 { AMBER } else { ACCENT };
             ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("{:.1}%", r.cpu_pct)).font(bold(24.0)).color(cpu_color));
-                ui.label(RichText::new("CPU, of one core").size(12.5).color(MUTED));
-                ui.add_space(24.0);
-                ui.label(RichText::new(human_size(r.rss_bytes as i64)).font(bold(24.0)).color(VIOLET));
-                ui.label(RichText::new("resident memory").size(12.5).color(MUTED));
-                ui.add_space(24.0);
+                ui.label(RichText::new(&r.name).font(bold(16.0)).color(TEXT));
+                let cpu_color = if r.cpu_pct > 80.0 { RED } else if r.cpu_pct > 30.0 { AMBER } else { ACCENT };
+                ui.label(RichText::new(format!("{:.1}% cpu", r.cpu_pct)).font(bold(13.0)).color(cpu_color));
+                ui.label(RichText::new(format!("· {}", human_size(r.rss_bytes as i64))).size(13.0).color(VIOLET));
                 let st: (&str, Color32) = match r.state {
                     'R' => ("running", GREEN),
                     'S' | 'I' => ("sleeping", MUTED),
@@ -2168,17 +2165,26 @@ impl SysKamlingApp {
                     _ => ("other", FAINT),
                 };
                 chip(ui, st.0, st.1);
+                ui.label(
+                    RichText::new(format!(
+                        "pid {} · {} threads · uid {} · up {}",
+                        r.pid,
+                        r.threads,
+                        r.uid,
+                        uptime_str(up as i64)
+                    ))
+                    .size(12.0)
+                    .color(FAINT),
+                );
             });
-            meta_line(ui, &format!("owner uid {} · started {}", r.uid, fmt_epoch(r.started)));
-        });
-        ui.add_space(10.0);
-        card(ui, |ui| {
-            card_title(ui, "Command line", "");
-            ui.add(egui::Label::new(RichText::new(if r.cmdline.is_empty() { "(kernel thread)" } else { &r.cmdline }).font(FontId::monospace(12.0)).color(MUTED)).wrap());
-        });
-        ui.add_space(10.0);
-        card(ui, |ui| {
-            card_title(ui, "Process tree", "");
+            if !r.cmdline.is_empty() {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(&r.cmdline).font(FontId::monospace(12.0)).color(MUTED),
+                    )
+                    .wrap(),
+                );
+            }
             // ancestors up to init, then direct children
             let mut chain = Vec::new();
             let mut cur = r.ppid;
@@ -2196,10 +2202,9 @@ impl SysKamlingApp {
                 }
                 guard += 1;
             }
-            if chain.is_empty() {
-                ui.label(RichText::new("parent not visible").color(FAINT));
-            } else {
-                ui.label(RichText::new(chain.join(" ← ")).size(12.5).color(MUTED));
+            if !chain.is_empty() {
+                ui.add_space(2.0);
+                ui.label(RichText::new(chain.join(" ← ")).size(11.5).color(FAINT));
             }
             let kids: Vec<String> = self
                 .gui
@@ -2209,8 +2214,7 @@ impl SysKamlingApp {
                 .map(|x| format!("{} ({})", x.name, x.pid))
                 .collect();
             if !kids.is_empty() {
-                ui.add_space(4.0);
-                ui.label(RichText::new(format!("children: {}", kids.join(", "))).size(12.0).color(FAINT));
+                ui.label(RichText::new(format!("children: {}", kids.join(", "))).size(11.5).color(FAINT));
             }
         });
     }
@@ -2306,7 +2310,11 @@ impl SysKamlingApp {
                     Tab::Agents => self.agent_detail(ui),
                     Tab::Hardware => self.hardware_view(ui),
                     Tab::Ports => self.port_detail(ui),
-                    Tab::Processes => self.proc_detail(ui),
+                    Tab::Processes => {
+                        self.proc_list(ui);
+                        ui.add_space(10.0);
+                        self.proc_detail(ui);
+                    }
                     Tab::Strata => self.strata_view(ui),
                     Tab::Settings => self.settings_view(ui),
                 }
