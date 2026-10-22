@@ -980,11 +980,13 @@ impl SysKamlingApp {
         });
     }
 
-    /// Process scan: one /proc walk per refresh while the Processes tab is
-    /// open, on the blocking pool — the walk touches hundreds of pids. The
+    /// Process scan: one /proc walk per refresh, on the blocking pool —
+    /// the walk touches hundreds of pids. It runs on every tab (like the
+    /// agent and port scans) so the nav-rail count and the dashboard's
+    /// process card are never blank, whatever screen you are on. The
     /// scanner keeps tick counters between scans so CPU% is a real delta.
     fn spawn_proc_scan(&mut self) {
-        if self.gui.tab != Tab::Processes || self.refresh <= 0.0 {
+        if self.refresh <= 0.0 {
             return;
         }
         if self.last_proc_scan.elapsed() < Duration::from_secs_f64(self.refresh.max(1.0)) {
@@ -1382,6 +1384,8 @@ impl SysKamlingApp {
 
     /// Left navigation rail: brand, engine status, sections, host footer.
     fn nav_rail(&mut self, ctx: &egui::Context) {
+        #[cfg(test)]
+        NAV_ROW_RECTS.lock().unwrap().clear();
         let mut new_tab: Option<Tab> = None;
         let mut refresh_now = false;
         let g = &self.gui;
@@ -1577,7 +1581,6 @@ impl SysKamlingApp {
                     Tab::Images => ("Images", self.gui.images.len(), "Search tags"),
                     Tab::Agents => ("Agents", self.gui.agents.len(), "Search agent or project"),
                     Tab::Ports => ("Ports", self.gui.ports.len(), "Search port, process or address"),
-                    Tab::Processes => ("Processes", self.gui.procs.len(), "Search name, command or pid"),
                     _ => ("Volumes", self.gui.volumes.len(), "Search volumes"),
                 };
                 ui.horizontal(|ui| {
@@ -1588,7 +1591,6 @@ impl SysKamlingApp {
                 match tab {
                     Tab::Agents => search_box(ui, &mut self.gui.agent_filter, hint),
                     Tab::Ports => search_box(ui, &mut self.gui.port_filter, hint),
-                    Tab::Processes => search_box(ui, &mut self.gui.proc_filter, hint),
                     _ => search_box(ui, &mut self.gui.filter, hint),
                 }
                 if tab == Tab::Containers {
@@ -1626,9 +1628,6 @@ impl SysKamlingApp {
                     Tab::Images => self.image_list(ui),
                     Tab::Agents => self.agent_list(ui),
                     Tab::Ports => self.port_list(ui),
-                    // the process table needs real width: it renders in the
-                // center panel instead, with the detail below it
-                Tab::Processes => {}
                     _ => self.volume_list(ui),
                 }
             });
@@ -1983,6 +1982,31 @@ impl SysKamlingApp {
 
     /// Process list: Task-Manager style sortable table. Clicking a column
     /// header sorts by it; clicking again flips the direction.
+    /// Search bar for the Processes tab, painted at the top of the center
+    /// panel — wider than the sidebar box, with a live match count.
+    fn proc_search(&mut self, ui: &mut Ui) {
+        let n_all = self.gui.procs.len();
+        let hint = "Search name, command, user, pid or cwd — click a column header to sort";
+        search_box(ui, &mut self.gui.proc_filter, hint);
+        let n = self
+            .gui
+            .procs
+            .iter()
+            .filter(|r| {
+                let f = self.gui.proc_filter.to_lowercase();
+                f.is_empty()
+                    || r.name.to_lowercase().contains(&f)
+                    || r.cmdline.to_lowercase().contains(&f)
+                    || r.user.to_lowercase().contains(&f)
+                    || r.cwd.to_lowercase().contains(&f)
+                    || r.pid.to_string() == f
+            })
+            .count();
+        if !self.gui.proc_filter.is_empty() {
+            ui.label(RichText::new(format!("{n} of {n_all} processes match")).size(11.5).color(FAINT));
+        }
+    }
+
     fn proc_list(&mut self, ui: &mut Ui) {
         if self.gui.procs.is_empty() {
             empty_state(
@@ -1995,10 +2019,12 @@ impl SysKamlingApp {
         }
         // fixed column layout: name flexes, the rest are right-aligned numbers
         let w = ui.available_width();
+        let icon_w = 30.0;
+        let user_w = 84.0;
         let pid_w = 64.0;
         let cpu_w = 74.0;
         let mem_w = 92.0;
-        let name_w = (w - pid_w - cpu_w - mem_w - 24.0).max(80.0);
+        let name_w = (w - icon_w - user_w - pid_w - cpu_w - mem_w - 30.0).max(80.0);
 
         // ---- header ----
         let (hr, _) = ui.allocate_exact_size(Vec2::new(w, 24.0), Sense::hover());
@@ -2016,7 +2042,7 @@ impl SysKamlingApp {
             // cell starts at x. Cells never overlap, so a click can only
             // ever hit one header.
             let (cx, cw) = match col {
-                SortCol::Name => (x, name_w + 12.0),
+                SortCol::Name => (hr.left(), icon_w + name_w + 12.0),
                 SortCol::Pid => (x - pid_w - 6.0, pid_w + 12.0),
                 SortCol::Cpu => (x - cpu_w - 6.0, cpu_w + 12.0),
                 SortCol::Mem => (x - mem_w - 6.0, mem_w + 12.0),
@@ -2045,9 +2071,16 @@ impl SysKamlingApp {
                 if active { ACCENT } else if resp.hovered() { TEXT } else { FAINT },
             );
         };
-        header(ui, "Name", SortCol::Name, hr.left() + 6.0, egui::Align2::LEFT_CENTER);
-        header(ui, "PID", SortCol::Pid, hr.left() + name_w + pid_w - 6.0, egui::Align2::RIGHT_CENTER);
-        header(ui, "CPU", SortCol::Cpu, hr.left() + name_w + pid_w + cpu_w - 6.0, egui::Align2::RIGHT_CENTER);
+        header(ui, "Name", SortCol::Name, hr.left() + icon_w + 6.0, egui::Align2::LEFT_CENTER);
+        ui.painter().text(
+            Pos2::new(hr.left() + icon_w + name_w + user_w - 6.0, hr.center().y),
+            egui::Align2::RIGHT_CENTER,
+            "User",
+            FontId::proportional(12.0),
+            FAINT,
+        );
+        header(ui, "PID", SortCol::Pid, hr.left() + icon_w + name_w + user_w + pid_w - 6.0, egui::Align2::RIGHT_CENTER);
+        header(ui, "CPU", SortCol::Cpu, hr.left() + icon_w + name_w + user_w + pid_w + cpu_w - 6.0, egui::Align2::RIGHT_CENTER);
         header(ui, "Memory", SortCol::Mem, hr.right() - 6.0, egui::Align2::RIGHT_CENTER);
         if let Some(col) = new_sort {
             if self.gui.proc_sort == col {
@@ -2070,6 +2103,8 @@ impl SysKamlingApp {
                 f.is_empty()
                     || r.name.to_lowercase().contains(&f)
                     || r.cmdline.to_lowercase().contains(&f)
+                    || r.user.to_lowercase().contains(&f)
+                    || r.cwd.to_lowercase().contains(&f)
                     || r.pid.to_string() == f
             })
             .cloned()
@@ -2085,7 +2120,7 @@ impl SysKamlingApp {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 for r in &rows {
-                    let rect = ui.allocate_exact_size(Vec2::new(w, 26.0), Sense::click()).0;
+                    let rect = ui.allocate_exact_size(Vec2::new(w, 30.0), Sense::click()).0;
                     let is_sel = sel == Some(r.pid);
                     if ui.interact(rect, ui.id().with(("proc-row", r.pid)), Sense::click()).clicked() {
                         new_sel = Some(if is_sel { None } else { Some(r.pid) });
@@ -2095,7 +2130,6 @@ impl SysKamlingApp {
                     }
                     let p = ui.painter();
                     row_bg(p, rect, is_sel, false);
-                    let x_name = rect.left() + 6.0;
                     let color = if r.cpu_pct > 80.0 {
                         RED
                     } else if r.cpu_pct > 30.0 {
@@ -2105,17 +2139,31 @@ impl SysKamlingApp {
                     } else {
                         TEXT
                     };
+                    // app icon: a small tinted tile with a drawn glyph per
+                    // process family (browser, terminal, service, …)
+                    let tile = Rect::from_center_size(rect.left_center() + Vec2::new(15.0, 0.0), Vec2::splat(24.0));
+                    let ic = proc_icon_color(r.icon);
+                    p.rect_filled(tile, 7.0, ic.gamma_multiply(0.14));
+                    icon_glyph(p, r.icon, tile.center(), 8.0, ic);
+                    let x_name = rect.left() + icon_w + 6.0;
                     let name = elide(p, r.name.clone(), FontId::proportional(13.0), color, name_w - 12.0);
                     p.galley(Pos2::new(x_name, rect.center().y - name.size().y / 2.0), name, color);
                     p.text(
-                        Pos2::new(rect.left() + name_w + pid_w - 6.0, rect.center().y),
+                        Pos2::new(rect.left() + icon_w + name_w + user_w - 6.0, rect.center().y),
+                        egui::Align2::RIGHT_CENTER,
+                        &r.user,
+                        FontId::proportional(11.5),
+                        if r.uid == 0 { AMBER } else { MUTED },
+                    );
+                    p.text(
+                        Pos2::new(rect.left() + icon_w + name_w + user_w + pid_w - 6.0, rect.center().y),
                         egui::Align2::RIGHT_CENTER,
                         r.pid.to_string(),
                         FontId::monospace(12.0),
                         MUTED,
                     );
                     p.text(
-                        Pos2::new(rect.left() + name_w + pid_w + cpu_w - 6.0, rect.center().y),
+                        Pos2::new(rect.left() + icon_w + name_w + user_w + pid_w + cpu_w - 6.0, rect.center().y),
                         egui::Align2::RIGHT_CENTER,
                         format!("{:.1}", r.cpu_pct),
                         FontId::monospace(12.0),
@@ -2167,10 +2215,10 @@ impl SysKamlingApp {
                 chip(ui, st.0, st.1);
                 ui.label(
                     RichText::new(format!(
-                        "pid {} · {} threads · uid {} · up {}",
+                        "pid {} · {} threads · user {} · up {}",
                         r.pid,
                         r.threads,
-                        r.uid,
+                        r.user,
                         uptime_str(up as i64)
                     ))
                     .size(12.0)
@@ -2185,6 +2233,19 @@ impl SysKamlingApp {
                     .wrap(),
                 );
             }
+            ui.add_space(2.0);
+            ui.label(
+                RichText::new(format!(
+                    "vm {} · resident {} · io {} read / {} written · cwd {}",
+                    human_size(r.vsize_bytes as i64),
+                    human_size(r.rss_bytes as i64),
+                    human_size(r.io_read as i64),
+                    human_size(r.io_write as i64),
+                    if r.cwd.is_empty() { "—" } else { &r.cwd }
+                ))
+                .size(11.5)
+                .color(FAINT),
+            );
             // ancestors up to init, then direct children
             let mut chain = Vec::new();
             let mut cur = r.ppid;
@@ -2311,6 +2372,8 @@ impl SysKamlingApp {
                     Tab::Hardware => self.hardware_view(ui),
                     Tab::Ports => self.port_detail(ui),
                     Tab::Processes => {
+                        self.proc_search(ui);
+                        ui.add_space(8.0);
                         self.proc_list(ui);
                         ui.add_space(10.0);
                         self.proc_detail(ui);
@@ -2652,24 +2715,38 @@ value: human_rate(h.net_rx_bps + h.net_tx_bps),
     /// card is clicked.
     fn workload_cards(&self, ui: &mut Ui) -> Option<Tab> {
         let mut nav = None;
+        let pick = |nav: &mut Option<Tab>, t: Tab| {
+            if nav.is_none() {
+                *nav = Some(t);
+            }
+        };
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.x = 14.0;
             ui.columns(2, |cols| {
                 if overview_card(&mut cols[0], Tab::Containers, "Containers", |ui| self.containers_overview(ui)) {
-                    nav = Some(Tab::Containers);
+                    pick(&mut nav, Tab::Containers);
                 }
                 if overview_card(&mut cols[1], Tab::Strata, "Strata", |ui| self.strata_overview(ui)) {
                     // nothing to look at until it's configured
-                    nav = Some(if self.gui.strata_cfg.api_key.trim().is_empty() { Tab::Settings } else { Tab::Strata });
+                    pick(&mut nav, if self.gui.strata_cfg.api_key.trim().is_empty() { Tab::Settings } else { Tab::Strata });
                 }
             });
             ui.add_space(6.0);
             ui.columns(2, |cols| {
                 if overview_card(&mut cols[0], Tab::Agents, "Agents", |ui| self.agents_overview(ui)) {
-                    nav = Some(Tab::Agents);
+                    pick(&mut nav, Tab::Agents);
                 }
                 if overview_card(&mut cols[1], Tab::Ports, "Ports", |ui| self.ports_overview(ui)) {
-                    nav = Some(Tab::Ports);
+                    pick(&mut nav, Tab::Ports);
+                }
+            });
+            ui.add_space(6.0);
+            ui.columns(2, |cols| {
+                if overview_card(&mut cols[0], Tab::Processes, "Processes", |ui| self.processes_overview(ui)) {
+                    pick(&mut nav, Tab::Processes);
+                }
+                if overview_card(&mut cols[1], Tab::Hardware, "Hardware", |ui| self.hardware_overview(ui)) {
+                    pick(&mut nav, Tab::Hardware);
                 }
             });
         });
@@ -2779,6 +2856,70 @@ value: human_rate(h.net_rx_bps + h.net_tx_bps),
             };
             mini_row(ui, port_color(p), &name, &dir);
         }
+    }
+
+    /// Dashboard card for the process list: how many run, and the hogs.
+    fn processes_overview(&self, ui: &mut Ui) {
+        let g = &self.gui;
+        if g.procs.is_empty() {
+            headline(ui, "—", "processes", FAINT);
+            meta_line(ui, "The /proc walk has not landed yet.");
+            return;
+        }
+        headline(ui, &g.procs.len().to_string(), "processes running", if g.procs.len() > 0 { TEXT } else { FAINT });
+        let mut cpu: Vec<ProcInfo> = g.procs.clone();
+        procsmod::sort_rows(&mut cpu, SortCol::Cpu, true);
+        let mut mem: Vec<ProcInfo> = g.procs.clone();
+        procsmod::sort_rows(&mut mem, SortCol::Mem, true);
+        // top three by CPU, then the single biggest memory holder, so the
+        // card answers "what is eating my machine right now"
+        let mut picks: Vec<(&ProcInfo, String)> = cpu
+            .iter()
+            .take(3)
+            .map(|r| (r, format!("{:.0}% cpu", r.cpu_pct)))
+            .collect();
+        if !mem.is_empty() && !picks.iter().any(|(r, _)| r.pid == mem[0].pid) {
+            picks.push((&mem[0], human_size(mem[0].rss_bytes as i64)));
+        }
+        for (r, v) in picks.into_iter().take(4) {
+            mini_row(ui, proc_icon_color(r.icon), &format!("{} · pid {}", r.name, r.pid), &v);
+        }
+    }
+
+    /// Dashboard card for the Hardware tab: what the machine is doing right
+    /// now, so the vitals are readable without leaving the dashboard.
+    fn hardware_overview(&self, ui: &mut Ui) {
+        let g = &self.gui;
+        let Some(h) = &g.hw else {
+            headline(ui, "—", "host vitals", FAINT);
+            meta_line(ui, "Collecting host vitals…");
+            return;
+        };
+        let mem = h.mem_total - h.mem_avail;
+        headline(
+            ui,
+            &format!("{:.0}%", h.cpu_pct),
+            &format!("cpu · {} cores", h.ncpu),
+            if h.cpu_pct > 85.0 { RED } else if h.cpu_pct > 60.0 { AMBER } else { ACCENT },
+        );
+        meta_line(ui, &format!(
+            "load {} · up {}",
+            h.load1,
+            uptime_str(h.uptime as i64)
+        ));
+        mini_row(ui, VIOLET, "Memory", &format!("{} of {}", human_size(mem as i64), human_size(h.mem_total as i64)));
+        mini_row(
+            ui,
+            GREEN,
+            "Disk I/O",
+            &format!("↓ {} ↑ {}", human_rate(h.disk_read_bps), human_rate(h.disk_write_bps)),
+        );
+        mini_row(
+            ui,
+            AMBER,
+            "Network",
+            &format!("↓ {} ↑ {}", human_rate(h.net_rx_bps), human_rate(h.net_tx_bps)),
+        );
     }
 
     fn strata_overview(&self, ui: &mut Ui) {
@@ -4993,6 +5134,11 @@ fn overview_card(ui: &mut Ui, tab: Tab, title: &str, add: impl FnOnce(&mut Ui)) 
         });
     let rect = inner.response.rect;
     let resp = ui.interact(rect, ui.id().with(("overview", title)), Sense::click());
+    #[cfg(test)]
+    DASH_CARD_RECTS
+        .lock()
+        .unwrap()
+        .push((tab, rect, title.to_string()));
     if resp.hovered() {
         ui.painter().rect_stroke(
             rect,
@@ -5112,6 +5258,29 @@ fn card_title(ui: &mut Ui, title: &str, right: &str) {
 
 /// Small line icons for inline buttons (eye, refresh) drawn with the
 /// painter, matching the nav-rail icon language.
+/// Per-family accent for the process-row icon tiles; families that share a
+/// colour family (browsers, terminals) stay visually distinct.
+fn proc_icon_color(kind: &str) -> Color32 {
+    match kind {
+        "browser" => ACCENT,
+        "terminal" => GREEN,
+        "service" | "kernel" => FAINT,
+        "container" => CYAN,
+        "database" => ORANGE,
+        "runtime" => VIOLET,
+        "chat" => GREEN,
+        "music" => ORANGE,
+        "media" => VIOLET,
+        "files" => AMBER,
+        "game" => RED,
+        "agent" => ACCENT,
+        "audio" => ORANGE,
+        "desktop" => CYAN,
+        "settings" => MUTED,
+        _ => MUTED,
+    }
+}
+
 fn icon_glyph(p: &egui::Painter, kind: &str, c: Pos2, r: f32, col: Color32) {
     let s = Stroke::new(1.5_f32, col);
     match kind {
@@ -5313,6 +5482,160 @@ fn icon_glyph(p: &egui::Painter, kind: &str, c: Pos2, r: f32, col: Color32) {
             let nrm = Vec2::new(-tang.y, tang.x);
             p.line_segment([tip, tip - tang * r * 0.55 + nrm * r * 0.38], s);
             p.line_segment([tip, tip - tang * r * 0.55 - nrm * r * 0.38], s);
+        }
+        "browser" => {
+            // globe: circle, equator, one meridian ellipse
+            p.circle_stroke(c, r, Stroke::new(1.4_f32, col));
+            p.line_segment([Pos2::new(c.x - r, c.y), Pos2::new(c.x + r, c.y)], s);
+            p.add(egui::Shape::ellipse_stroke(c, Vec2::new(r * 0.45, r), Stroke::new(1.2_f32, col)));
+        }
+        "terminal" => {
+            // window with a prompt caret
+            let b = Rect::from_center_size(c, Vec2::new(r * 2.0, r * 1.6));
+            p.rect_stroke(b, 3.0, Stroke::new(1.4_f32, col), egui::epaint::StrokeKind::Inside);
+            p.line_segment([Pos2::new(b.left() + 3.0, b.top() + 4.0), Pos2::new(b.right() - 3.0, b.top() + 4.0)], Stroke::new(1.1_f32, col));
+            let x = b.left() + 4.0;
+            let y = b.center().y + 1.0;
+            p.line_segment([Pos2::new(x, y - 2.5), Pos2::new(x + 2.5, y)], s);
+            p.line_segment([Pos2::new(x + 2.5, y), Pos2::new(x, y + 2.5)], s);
+            p.line_segment([Pos2::new(x + 4.0, y + 2.5), Pos2::new(x + 8.0, y + 2.5)], s);
+        }
+        "service" => {
+            // gear: hub + six teeth
+            p.circle_stroke(c, r * 0.55, Stroke::new(1.3_f32, col));
+            for i in 0..6 {
+                let a = std::f32::consts::TAU * i as f32 / 6.0;
+                let u = Vec2::new(a.cos(), a.sin());
+                p.line_segment([c + u * r * 0.7, c + u * r], Stroke::new(1.6_f32, col));
+            }
+        }
+        "kernel" => {
+            // hexagon node: the kernel mark
+            let mut pts: Vec<Pos2> = (0..6)
+                .map(|i| {
+                    let a = std::f32::consts::TAU * i as f32 / 6.0 - std::f32::consts::FRAC_PI_2;
+                    c + Vec2::new(a.cos(), a.sin()) * r
+                })
+                .collect();
+            pts.push(pts[0]);
+            p.add(egui::Shape::closed_line(pts, Stroke::new(1.4_f32, col)));
+            p.circle_filled(c, r * 0.22, col);
+        }
+        "container" => {
+            // docker-ish: rounded hull, two portholes, mast line
+            let b = Rect::from_center_size(c + Vec2::new(0.0, r * 0.15), Vec2::new(r * 1.9, r * 1.2));
+            p.rect_stroke(b, 4.0, Stroke::new(1.4_f32, col), egui::epaint::StrokeKind::Inside);
+            for f in [0.35, 0.65] {
+                p.circle_stroke(Pos2::new(b.left() + b.width() * f, b.center().y + 1.0), r * 0.18, Stroke::new(1.1_f32, col));
+            }
+            p.line_segment([Pos2::new(b.left() + b.width() * 0.25, b.top() - r * 0.35), Pos2::new(b.left() + b.width() * 0.75, b.top() - r * 0.35)], s);
+        }
+        "database" => {
+            // cylinder: top ellipse + sides + bottom arc
+            let rx = r * 0.85;
+            let top = Pos2::new(c.x, c.y - r * 0.7);
+            p.add(egui::Shape::ellipse_stroke(top, Vec2::new(rx, r * 0.32), Stroke::new(1.3_f32, col)));
+            p.line_segment([Pos2::new(c.x - rx, top.y), Pos2::new(c.x - rx, c.y + r * 0.55)], s);
+            p.line_segment([Pos2::new(c.x + rx, top.y), Pos2::new(c.x + rx, c.y + r * 0.55)], s);
+            let arc: Vec<Pos2> = (0..=12)
+                .map(|i| {
+                    let a = std::f32::consts::PI * i as f32 / 12.0;
+                    Pos2::new(c.x + rx * a.cos(), c.y + r * 0.55 + r * 0.32 * a.sin())
+                })
+                .collect();
+            p.add(egui::Shape::line(arc, s));
+        }
+        "runtime" => {
+            // curly braces { } around a dot
+            let (x, y) = (c.x, c.y);
+            p.line_segment([Pos2::new(x - r * 0.5, y - r), Pos2::new(x - r * 0.9, y - r * 0.5)], s);
+            p.line_segment([Pos2::new(x - r * 0.9, y - r * 0.5), Pos2::new(x - r * 0.9, y + r * 0.5)], s);
+            p.line_segment([Pos2::new(x - r * 0.9, y + r * 0.5), Pos2::new(x - r * 0.5, y + r)], s);
+            p.line_segment([Pos2::new(x + r * 0.5, y - r), Pos2::new(x + r * 0.9, y - r * 0.5)], s);
+            p.line_segment([Pos2::new(x + r * 0.9, y - r * 0.5), Pos2::new(x + r * 0.9, y + r * 0.5)], s);
+            p.line_segment([Pos2::new(x + r * 0.9, y + r * 0.5), Pos2::new(x + r * 0.5, y + r)], s);
+            p.circle_filled(c, r * 0.18, col);
+        }
+        "chat" => {
+            // speech bubble with tail
+            let b = Rect::from_center_size(c + Vec2::new(0.0, -r * 0.15), Vec2::new(r * 1.9, r * 1.35));
+            p.rect_stroke(b, 4.0, Stroke::new(1.4_f32, col), egui::epaint::StrokeKind::Inside);
+            p.line_segment([Pos2::new(b.left() + r * 0.5, b.bottom()), Pos2::new(b.left() + r * 0.2, b.bottom() + r * 0.45)], s);
+            p.line_segment([Pos2::new(b.left() + r * 0.2, b.bottom() + r * 0.45), Pos2::new(b.left() + r * 0.95, b.bottom())], s);
+        }
+        "music" => {
+            // eighth note: head + stem + flag
+            p.add(egui::Shape::ellipse_stroke(Pos2::new(c.x - r * 0.35, c.y + r * 0.55), Vec2::new(r * 0.42, r * 0.32), Stroke::new(1.3_f32, col)));
+            p.line_segment([Pos2::new(c.x + r * 0.05, c.y + r * 0.5), Pos2::new(c.x + r * 0.05, c.y - r)], s);
+            p.line_segment([Pos2::new(c.x + r * 0.05, c.y - r), Pos2::new(c.x + r * 0.75, c.y - r * 0.55)], s);
+        }
+        "media" => {
+            // play triangle inside a frame: image/video tools
+            let b = Rect::from_center_size(c, Vec2::new(r * 1.9, r * 1.6));
+            p.rect_stroke(b, 3.0, Stroke::new(1.3_f32, col), egui::epaint::StrokeKind::Inside);
+            let t = b.center();
+            p.add(egui::Shape::closed_line(
+                vec![Pos2::new(t.x - r * 0.3, t.y - r * 0.45), Pos2::new(t.x + r * 0.5, t.y), Pos2::new(t.x - r * 0.3, t.y + r * 0.45)],
+                Stroke::new(1.3_f32, col),
+            ));
+        }
+        "files" => {
+            // folder: tab + body
+            let b = Rect::from_center_size(c + Vec2::new(0.0, r * 0.18), Vec2::new(r * 1.9, r * 1.25));
+            p.rect_stroke(b, 3.0, Stroke::new(1.4_f32, col), egui::epaint::StrokeKind::Inside);
+            p.line_segment([Pos2::new(b.left(), b.top()), Pos2::new(b.left() + b.width() * 0.45, b.top())], Stroke::new(1.6_f32, col));
+            p.line_segment([Pos2::new(b.left() + b.width() * 0.45, b.top()), Pos2::new(b.left() + b.width() * 0.6, b.top() - r * 0.3)], s);
+        }
+        "game" => {
+            // gamepad: body + dpad + two buttons
+            let b = Rect::from_center_size(c, Vec2::new(r * 2.0, r * 1.25));
+            p.rect_stroke(b, r * 0.5, Stroke::new(1.4_f32, col), egui::epaint::StrokeKind::Inside);
+            p.line_segment([Pos2::new(b.left() + r * 0.45, b.center().y), Pos2::new(b.left() + r * 1.05, b.center().y)], s);
+            p.line_segment([Pos2::new(b.left() + r * 0.75, b.center().y - r * 0.3), Pos2::new(b.left() + r * 0.75, b.center().y + r * 0.3)], s);
+            p.circle_filled(Pos2::new(b.right() - r * 0.7, b.center().y - r * 0.18), r * 0.14, col);
+            p.circle_filled(Pos2::new(b.right() - r * 0.45, b.center().y + r * 0.18), r * 0.14, col);
+        }
+        "agent" => {
+            // robot head: box, two eyes, antenna
+            let b = Rect::from_center_size(c, Vec2::new(r * 1.7, r * 1.5));
+            p.rect_stroke(b, 3.0, Stroke::new(1.4_f32, col), egui::epaint::StrokeKind::Inside);
+            p.circle_filled(Pos2::new(b.center().x - r * 0.35, b.center().y), r * 0.16, col);
+            p.circle_filled(Pos2::new(b.center().x + r * 0.35, b.center().y), r * 0.16, col);
+            p.line_segment([Pos2::new(b.center().x, b.top()), Pos2::new(b.center().x, b.top() - r * 0.35)], s);
+            p.circle_filled(Pos2::new(b.center().x, b.top() - r * 0.42), r * 0.12, col);
+        }
+        "audio" => {
+            // speaker cone + two waves
+            let x = c.x - r * 0.7;
+            p.line_segment([Pos2::new(x, c.y - r * 0.3), Pos2::new(x + r * 0.45, c.y - r * 0.3)], s);
+            p.line_segment([Pos2::new(x + r * 0.45, c.y - r * 0.3), Pos2::new(x + r * 0.9, c.y - r * 0.75)], s);
+            p.line_segment([Pos2::new(x + r * 0.9, c.y - r * 0.75), Pos2::new(x + r * 0.9, c.y + r * 0.75)], s);
+            p.line_segment([Pos2::new(x + r * 0.9, c.y + r * 0.75), Pos2::new(x + r * 0.45, c.y + r * 0.3)], s);
+            p.line_segment([Pos2::new(x + r * 0.45, c.y + r * 0.3), Pos2::new(x, c.y + r * 0.3)], s);
+            for f in [0.55, 0.9] {
+                let arc: Vec<Pos2> = (0..=8)
+                    .map(|i| {
+                        let a = -std::f32::consts::FRAC_PI_3 + std::f32::consts::FRAC_PI_2 * 2.0 / 3.0 * i as f32 / 8.0;
+                        Pos2::new(c.x - r * 0.1 + a.cos() * r * f, c.y + a.sin() * r * f)
+                    })
+                    .collect();
+                p.add(egui::Shape::line(arc, Stroke::new(1.1_f32, col)));
+            }
+        }
+        "desktop" => {
+            // monitor + stand
+            let b = Rect::from_center_size(c + Vec2::new(0.0, -r * 0.2), Vec2::new(r * 2.0, r * 1.3));
+            p.rect_stroke(b, 3.0, Stroke::new(1.4_f32, col), egui::epaint::StrokeKind::Inside);
+            p.line_segment([Pos2::new(b.center().x, b.bottom()), Pos2::new(b.center().x, c.y + r * 0.75)], s);
+            p.line_segment([Pos2::new(c.x - r * 0.5, c.y + r * 0.75), Pos2::new(c.x + r * 0.5, c.y + r * 0.75)], Stroke::new(1.6_f32, col));
+        }
+        "settings" => {
+            // sliders: three rails with knobs
+            for (i, f) in [0.3, 0.55, 0.8].iter().enumerate() {
+                let y = c.y - r + r * 2.0 * (i as f32 + 0.5) / 3.0;
+                p.line_segment([Pos2::new(c.x - r, y), Pos2::new(c.x + r, y)], Stroke::new(1.1_f32, col));
+                p.circle_filled(Pos2::new(c.x - r + 2.0 * r * f, y), r * 0.22, col);
+            }
         }
         _ => {}
     }
@@ -5516,6 +5839,8 @@ fn engine_card(ui: &mut Ui, ok: bool, version: &str) {
 /// Sidebar navigation entry; true when clicked.
 fn nav_item(ui: &mut Ui, tab: Tab, label: &str, badge: &str, active: bool) -> bool {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 38.0), Sense::click());
+    #[cfg(test)]
+    NAV_ROW_RECTS.lock().unwrap().push((tab, rect));
     let hovered = resp.hovered();
     if hovered {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -7026,6 +7351,15 @@ mod strata_tab_tests {
 }
 
 /// Test hook: the Processes header cells (column → clickable rect) from the
+/// last painted pass, so offscreen tests can click exact centres. The egui
+/// passes in these tests are process-wide shared state — two tests clicking
+/// at once would clobber each other's captured rects — so every offscreen
+/// egui test serialises on this lock.
+#[cfg(test)]
+static PROBE_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+
+/// Test hook: the Processes header cells (column → clickable rect) from the
 /// last painted pass, so offscreen tests can click exact centres.
 #[cfg(test)]
 static PROC_HEADER_CELLS: std::sync::LazyLock<std::sync::Mutex<Vec<(SortCol, Rect)>>> =
@@ -7034,6 +7368,117 @@ static PROC_HEADER_CELLS: std::sync::LazyLock<std::sync::Mutex<Vec<(SortCol, Rec
 #[cfg(test)]
 fn proc_header_cells() -> Vec<(SortCol, Rect)> {
     PROC_HEADER_CELLS.lock().unwrap().clone()
+}
+
+/// Dashboard overview-card rects from the last painted pass, so offscreen
+/// tests can click a card and check where it navigates.
+#[cfg(test)]
+static DASH_CARD_RECTS: std::sync::LazyLock<std::sync::Mutex<Vec<(Tab, Rect, String)>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
+#[cfg(test)]
+fn dash_card_rects() -> Vec<(Tab, Rect, String)> {
+    DASH_CARD_RECTS.lock().unwrap().clone()
+}
+
+/// Card rects from the most recent offscreen pass: the sink accumulates
+/// across passes, so the last six entries are the six cards of the last
+/// dashboard render.
+#[cfg(test)]
+fn last_dash_cards() -> Vec<(Tab, Rect, String)> {
+    let all = dash_card_rects();
+    all[all.len().saturating_sub(6)..].to_vec()
+}
+
+/// Offscreen egui pass at a fixed viewport; returns the painted text plus
+/// the y of each string's first appearance.
+#[cfg(test)]
+fn offscreen_pass(
+    ctx: &egui::Context,
+    app: &mut SysKamlingApp,
+    size: (f32, f32),
+    body: impl FnOnce(&mut SysKamlingApp, &mut Ui),
+) -> Vec<(String, f32)> {
+    let mut raw = egui::RawInput::default();
+    raw.screen_rect = Some(egui::Rect::from_min_size(
+        egui::Pos2::ZERO,
+        egui::Vec2::new(size.0, size.1),
+    ));
+    ctx.begin_pass(raw);
+    egui::CentralPanel::default().show(ctx, |ui| body(app, ui));
+    let out = ctx.end_pass();
+    let mut texts: Vec<(String, f32)> = Vec::new();
+    for s in &out.shapes {
+        if let egui::Shape::Text(t) = &s.shape {
+            texts.push((t.galley.text().to_owned(), t.pos.y));
+        }
+    }
+    texts
+}
+
+/// Click at `at` during an offscreen pass; returns the painted text.
+#[cfg(test)]
+fn offscreen_click(
+    ctx: &egui::Context,
+    app: &mut SysKamlingApp,
+    size: (f32, f32),
+    at: egui::Pos2,
+    body: impl FnOnce(&mut SysKamlingApp, &mut Ui),
+) -> Vec<(String, f32)> {
+    let mut raw = egui::RawInput::default();
+    raw.screen_rect = Some(egui::Rect::from_min_size(
+        egui::Pos2::ZERO,
+        egui::Vec2::new(size.0, size.1),
+    ));
+    raw.events = vec![
+        egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        },
+        egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        },
+    ];
+    ctx.begin_pass(raw);
+    egui::CentralPanel::default().show(ctx, |ui| body(app, ui));
+    let out = ctx.end_pass();
+    let mut texts: Vec<(String, f32)> = Vec::new();
+    for s in &out.shapes {
+        if let egui::Shape::Text(t) = &s.shape {
+            texts.push((t.galley.text().to_owned(), t.pos.y));
+        }
+    }
+    texts
+}
+
+/// The nav rail's clickable rows, from the last painted pass: `nav_rail`
+/// allocates one 38px row per entry, in rail order; the rects are recorded
+/// during the pass and read back after it ends.
+#[cfg(test)]
+static NAV_ROW_RECTS: std::sync::LazyLock<std::sync::Mutex<Vec<(Tab, Rect)>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+
+/// Paint the real rail once, then return the rect of `tab`'s row.
+#[cfg(test)]
+fn nav_row_rect(ctx: &egui::Context, app: &mut SysKamlingApp, tab: Tab) -> Rect {
+    let mut raw = egui::RawInput::default();
+    raw.screen_rect =
+        Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1280.0, 860.0)));
+    ctx.begin_pass(raw);
+    app.nav_rail(ctx);
+    let _ = ctx.end_pass();
+    NAV_ROW_RECTS
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(t, _)| *t == tab)
+        .map(|(_, r)| *r)
+        .expect("nav row rect")
 }
 
 #[cfg(test)]
@@ -7053,6 +7498,12 @@ mod processes_tab_tests {
             threads: 1,
             started: 0,
             uid: 1000,
+            vsize_bytes: 0,
+            io_read: 0,
+            io_write: 0,
+            cwd: "/home/rifan".into(),
+            user: "rifan".into(),
+            icon: crate::procs::icon_for(name, cmd),
         }
     }
 
@@ -7137,10 +7588,70 @@ mod processes_tab_tests {
             .collect()
     }
 
+    /// One pass of the whole Processes tab (KPIs, search, table, detail) at
+    /// a realistic desktop size, returning painted text plus each text
+    /// glyph's y position, so tests can assert on what the user actually
+    /// sees on the page — not just the table in isolation.
+    fn tab_pass(ctx: &egui::Context, app: &mut SysKamlingApp) -> Vec<(String, f32)> {
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect =
+            Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1280.0, 860.0)));
+        ctx.begin_pass(raw);
+        egui::CentralPanel::default().show(ctx, |ui| {
+            app.proc_search(ui);
+            ui.add_space(8.0);
+            app.proc_list(ui);
+            ui.add_space(10.0);
+            app.proc_detail(ui);
+        });
+        let out = ctx.end_pass();
+        out.shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Text(t) => Some((t.galley.text().to_owned(), t.pos.y)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The whole page at a given viewport size (nav rail + side panel +
+    /// center, exactly as `update` lays them out), returning painted text
+    /// plus each glyph's y position.
+    fn page_pass(
+        ctx: &egui::Context,
+        app: &mut SysKamlingApp,
+        w: f32,
+        h: f32,
+    ) -> Vec<(String, f32)> {
+        // live /proc rows, like the real app on the user's machine
+        app.gui.procs = ProcScanner::new().scan();
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(w, h)));
+        ctx.begin_pass(raw);
+        app.nav_rail(ctx);
+        if matches!(
+            app.gui.tab,
+            Tab::Containers | Tab::Images | Tab::Volumes | Tab::Agents | Tab::Ports
+        ) {
+            app.list_panel(ctx);
+        }
+        app.center(ctx);
+        app.toast(ctx);
+        let out = ctx.end_pass();
+        out.shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Text(t) => Some((t.galley.text().to_owned(), t.pos.y)),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Clicking the CPU header sorts numerically descending; clicking again
     /// flips to ascending — the Task-Manager contract.
     #[test]
     fn clicking_the_cpu_header_sorts_then_flips() {
+    let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (ctx, mut app) = procs_probe();
         let cpu = header_point(&ctx, &mut app, SortCol::Cpu);
         click(&ctx, &mut app, cpu);
@@ -7159,6 +7670,7 @@ mod processes_tab_tests {
     /// Search filters by name, full command line, or exact pid.
     #[test]
     fn search_matches_name_cmdline_and_pid() {
+    let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (ctx, mut app) = procs_probe();
         // rows paint the process name, never the full cmdline (that lives
         // in the detail panel), so "busy-loop" must match via the name
@@ -7179,10 +7691,11 @@ mod processes_tab_tests {
 
     #[test]
     fn clicking_a_row_selects_it_and_detail_shows_cmdline() {
+    let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (ctx, mut app) = procs_probe();
-        // rows are 26 px tall; the first one sits right below the header band
+        // rows are 30 px tall; the first one sits right below the header band
         let name = header_point(&ctx, &mut app, SortCol::Name);
-        click(&ctx, &mut app, egui::pos2(name.x, 44.0 + 13.0));
+        click(&ctx, &mut app, egui::pos2(name.x, 44.0 + 15.0));
         // probe data is memory-sorted by default: pid 900 (9 GiB) is row one
         assert_eq!(app.gui.selected_proc, Some(900));
         // detail panel renders the full command line of the selection
@@ -7206,6 +7719,346 @@ mod processes_tab_tests {
             texts.iter().any(|t| t.contains("hog --big")),
             "detail should show the full command line of the selected row"
         );
+    }
+
+    /// The full page: search bar at the top, table below it, detail at the
+    /// bottom — and no machine-metric cards (the user asked for the list,
+    /// not a second dashboard). The search box actually filters the rows.
+    #[test]
+    fn search_bar_sits_at_the_top_and_filters_the_table() {
+    let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (ctx, mut app) = procs_probe();
+        let texts = tab_pass(&ctx, &mut app);
+        let y = |needle: &str| {
+            texts
+                .iter()
+                .find(|(t, _)| t.contains(needle))
+                .unwrap_or_else(|| panic!("expected {needle:?} painted on the page"))
+                .1
+        };
+        // search above the table header (compare against the left-aligned
+        // "Name" header; "Memory" sits at the table's right edge)
+        assert!(y("Search name") < y("Name"), "search bar sits above the table");
+        // no KPI/metric strip: the machine vitals labels never appear here
+        for banned in ["Top CPU", "Top Memory", "load ", "of 91.9 GB"] {
+            assert!(
+                !texts.iter().any(|(t, _)| t.contains(banned)),
+                "processes page must not show the {banned:?} metric card"
+            );
+        }
+        // typing in the filter drops non-matching rows from the page
+        app.gui.proc_filter = "busy".into();
+        let texts = tab_pass(&ctx, &mut app);
+        assert!(texts.iter().any(|(t, _)| t.trim() == "busy"));
+        assert!(!texts.iter().any(|(t, _)| t.trim() == "systemd"));
+        assert!(texts.iter().any(|(t, _)| t.contains("of 3 processes match")));
+    }
+
+    /// Every row carries a per-family icon tile: a browser, a terminal and
+    /// a service each get their own glyph, and the User column paints the
+    /// resolved username (root highlighted).
+    #[test]
+    fn rows_carry_family_icons_and_user_names() {
+    let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (ctx, mut app) = procs_probe();
+        app.gui.procs.push(row(4242, "firefox", "/usr/lib/firefox/firefox", 3.0, 900 << 20));
+        app.gui.procs.push(row(77, "bash", "bash", 0.0, 8 << 20));
+        let mut p = row(2, "kthreadd", "", 0.0, 0);
+        p.uid = 0;
+        p.user = "root".into();
+        app.gui.procs.push(p);
+        let texts = tab_pass(&ctx, &mut app);
+        for name in ["firefox", "bash", "kthreadd"] {
+            assert!(texts.iter().any(|(t, _)| t.trim() == name), "{name} row painted");
+        }
+        assert!(texts.iter().any(|(t, _)| t.trim() == "rifan"), "user column");
+        assert!(texts.iter().any(|(t, _)| t.trim() == "root"), "root user");
+        // icon tiles: 24px rounded rects at the left of each row, one per row
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1280.0, 860.0))),
+            ..Default::default()
+        };
+        ctx.begin_pass(raw);
+        egui::CentralPanel::default().show(&ctx, |ui| {
+            app.proc_search(ui);
+            ui.add_space(8.0);
+            app.proc_list(ui);
+        });
+        let out = ctx.end_pass();
+        let tiles = out
+            .shapes
+            .iter()
+            .filter(|s| {
+                matches!(&s.shape, egui::Shape::Rect(r) if (r.rect.width() - 24.0).abs() < 0.6 && (r.rect.height() - 24.0).abs() < 0.6)
+            })
+            .count();
+        assert!(tiles >= 6, "one icon tile per visible row, got {tiles}");
+    }
+
+    /// Regression for the reported "I can't really see the process list,
+    /// it just shows No process selected": at the app's minimum window
+    /// size, with real /proc data, the table must still paint rows —
+    /// never an empty state, never a page where the only text is the
+    /// detail placeholder.
+    #[test]
+    fn processes_page_shows_rows_at_the_minimum_window_size() {
+    let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (ctx, mut app) = procs_probe();
+        // the window manager pins this app at 960x400; that's the worst case
+        let texts = page_pass(&ctx, &mut app, 960.0, 400.0);
+        let all: Vec<&str> = texts.iter().map(|(t, _)| t.as_str()).collect();
+        assert!(
+            !all.iter().any(|t| t.contains("No process data yet")),
+            "table must have data at 960x400"
+        );
+        // the header row and at least a handful of real process names paint
+        let header = |needle: &str| {
+            texts
+                .iter()
+                .find(|(t, _)| t.trim().starts_with(needle))
+                .unwrap_or_else(|| {
+                    panic!("header {needle:?} missing; painted: {:?}", texts.iter().map(|(t, _)| t).take(40).collect::<Vec<_>>())
+                })
+                .1
+        };
+        header("Name");
+        header("PID");
+        header("Memory");
+        let painted_names = texts
+            .iter()
+            .filter(|(t, _)| {
+                let t = t.trim();
+                !t.is_empty()
+                    && !t.contains(char::is_whitespace)
+                    && t.chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+            })
+            .count();
+        assert!(painted_names >= 5, "several process rows visible, got {painted_names}");
+        // the search bar is on the page, above the table
+        let y = |needle: &str| {
+            texts
+                .iter()
+                .find(|(t, _)| t.contains(needle))
+                .unwrap_or_else(|| panic!("expected {needle:?} on the page"))
+                .1
+        };
+        assert!(y("Search name") < y("Name"), "search sits above the table");
+        // and the empty-selection hint must NOT swallow the page: it sits
+        // below the table, never instead of it
+        if let Some((_, dy)) = texts.iter().find(|(t, _)| t.contains("Click a row above")) {
+            assert!(*dy > y("Name"), "hint below the table, not replacing it");
+        }
+    }
+
+    /// The /proc walk runs on every screen, not just when the Processes tab
+    /// is open, so the nav-rail count and the dashboard card are never blank.
+    #[test]
+    fn process_scan_is_gated_on_refresh_only_not_on_the_visible_tab() {
+        let ctx = egui::Context::default();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap(),
+        );
+        let mut app = SysKamlingApp::new_offscreen(&ctx, tx, rx, rt.clone());
+        app.gui.tab = Tab::Dashboard;
+        app.refresh = 1.0;
+        app.last_proc_scan = Instant::now() - Duration::from_secs(999);
+        app.spawn_proc_scan();
+        // the scan task runs on the blocking pool; drain the app's inbox
+        // until the ProcsScanned message lands
+        let got = rt.block_on(async {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    match app.rx.recv().await {
+                        Some(Msg::ProcsScanned(_)) => return true,
+                        Some(_) => continue,
+                        None => return false,
+                    }
+                }
+            })
+            .await
+        });
+        assert!(matches!(got, Ok(true)), "a scan must be scheduled while on the Dashboard tab");
+    }
+
+    /// The dashboard carries a Processes card that names the hogs, and
+    /// clicking it opens the Processes tab.
+    #[test]
+    fn dashboard_processes_card_shows_hogs_and_opens_the_tab() {
+    let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let ctx = egui::Context::default();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let rt = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
+        let mut app = SysKamlingApp::new_offscreen(&ctx, tx, rx, rt);
+        app.gui.tab = Tab::Dashboard;
+        app.gui.procs = vec![
+            row(1, "systemd", "/sbin/init", 0.1, 12 << 20),
+            row(900, "hog", "hog --big", 71.0, 9 << 30),
+            row(901, "busy", "busy-loop", 99.0, 100 << 20),
+        ];
+        let texts = offscreen_pass(&ctx, &mut app, (1280.0, 860.0), |a, ui| {
+            a.dashboard_view(ui);
+        });
+        let painted: Vec<&str> = texts.iter().map(|(t, _)| t.as_str()).collect();
+        assert!(
+            painted.iter().any(|t| t.contains("processes running")),
+            "processes card headline missing"
+        );
+        for hog in ["busy", "hog"] {
+            assert!(
+                painted.iter().any(|t| t.contains(hog)),
+                "processes card never names the {hog} hog"
+            );
+        }
+        // clicking the Processes card navigates to the Processes tab
+        let card = dash_card_rects()
+            .into_iter()
+            .find(|(_, _, title)| title == "Processes")
+            .expect("dashboard has no Processes card");
+        offscreen_click(
+            &ctx,
+            &mut app,
+            (1280.0, 860.0),
+            card.1.center(),
+            |a, ui| a.dashboard_view(ui),
+        );
+        assert_eq!(app.gui.tab, Tab::Processes, "card click must open Processes");
+    }
+
+    /// The dashboard also carries a Hardware card with the live host
+    /// vitals; before the first sample lands it must say so, and clicking
+    /// it opens the Hardware tab.
+    #[test]
+    fn dashboard_hardware_card_shows_vitals_and_opens_the_tab() {
+    let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let ctx = egui::Context::default();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let rt = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
+        let mut app = SysKamlingApp::new_offscreen(&ctx, tx, rx, rt);
+        app.gui.tab = Tab::Dashboard;
+        // no sample yet: the card must state the placeholder, not crash
+        let texts = offscreen_pass(&ctx, &mut app, (1280.0, 1600.0), |a, ui| {
+            a.dashboard_view(ui);
+        });
+        let painted: Vec<&str> = texts.iter().map(|(t, _)| t.as_str()).collect();
+        assert!(
+            painted.iter().any(|t| t.contains("Collecting host vitals")),
+            "hardware card placeholder missing, got {painted:?}"
+        );
+        // a real sample now: the card paints live cpu/load values
+        app.sample_hardware();
+        app.sample_hardware(); // two samples so rates have a delta
+        // tall viewport: the overview cards sit at the bottom of the
+        // dashboard scroll area and must be visible to be painted
+        let texts = offscreen_pass(&ctx, &mut app, (1280.0, 1600.0), |a, ui| {
+            a.dashboard_view(ui);
+        });
+        let painted: Vec<&str> = texts.iter().map(|(t, _)| t.as_str()).collect();
+        // the overview card paints live load/uptime and ↓/↑ rate rows
+        assert!(
+            painted.iter().any(|t| t.contains("load ") && t.contains("up ")),
+            "hardware card must show load and uptime, got {painted:?}"
+        );
+        assert!(
+            painted.iter().any(|t| t.contains("↓ ") && t.contains("↑ ")),
+            "hardware card must show disk/network rates, got {painted:?}"
+        );
+        // clicking the card navigates: the click pass re-renders the whole
+        // dashboard; the sample before the click adds a health-strip issue
+        // (load above core count) that shifts the layout, so take the rect
+        // from a pass with the exact same data state as the click pass
+        app.sample_hardware();
+        let card = last_dash_cards()
+            .into_iter()
+            .find(|(_, _, title)| title == "Hardware")
+            .expect("dashboard has no Hardware card");
+        offscreen_click(
+            &ctx,
+            &mut app,
+            (1280.0, 1600.0),
+            card.1.center(),
+            |a, ui| a.dashboard_view(ui),
+        );
+        assert_eq!(app.gui.tab, Tab::Hardware, "card click must open Hardware");
+    }
+
+    /// A click on the Processes card opens the Processes tab — the nav
+    /// bookkeeping must not let a later card steal an earlier card's click.
+    #[test]
+    fn dashboard_processes_card_click_opens_processes() {
+    let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let ctx = egui::Context::default();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let rt = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
+        let mut app = SysKamlingApp::new_offscreen(&ctx, tx, rx, rt);
+        app.gui.tab = Tab::Dashboard;
+        app.gui.procs = vec![row(1, "systemd", "/sbin/init", 0.1, 12 << 20)];
+        offscreen_pass(&ctx, &mut app, (1280.0, 1600.0), |a, ui| {
+            a.dashboard_view(ui);
+        });
+        let card = last_dash_cards()
+            .into_iter()
+            .find(|(_, _, title)| title == "Processes")
+            .expect("dashboard has no Processes card");
+        offscreen_click(
+            &ctx,
+            &mut app,
+            (1280.0, 1600.0),
+            card.1.center(),
+            |a, ui| a.dashboard_view(ui),
+        );
+        assert_eq!(app.gui.tab, Tab::Processes, "Processes card click must open Processes, not the card painted after it");
+    }
+    /// The nav rail lists Processes between Hardware and Ports, and clicking
+    /// its entry opens the tab.
+    #[test]
+    fn nav_lists_processes_between_hardware_and_ports() {
+    let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let ctx = egui::Context::default();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let rt = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
+        let mut app = SysKamlingApp::new_offscreen(&ctx, tx, rx, rt);
+        // rail order is asserted through the probe sink: nav_row_rect finds
+        // each entry by its position in the rail, so a wrong order would
+        // land the click on a different tab
+        let hw = nav_row_rect(&ctx, &mut app, Tab::Hardware);
+        let procs = nav_row_rect(&ctx, &mut app, Tab::Processes);
+        let ports = nav_row_rect(&ctx, &mut app, Tab::Ports);
+        assert!(hw.top() < procs.top() && procs.top() < ports.top(), "Processes must sit between Hardware and Ports in the rail");
+        // click the rail: paint it once so its widget rects exist, then
+        // press inside the rail (x = 110) at the probe's row height
+        let click_at = egui::pos2(110.0, procs.center().y);
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(1280.0, 860.0),
+        ));
+        ctx.begin_pass(raw.clone());
+        app.nav_rail(&ctx);
+        let _ = ctx.end_pass();
+        raw.events = vec![
+            egui::Event::PointerMoved(click_at),
+            egui::Event::PointerButton {
+                pos: click_at,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerButton {
+                pos: click_at,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        ctx.begin_pass(raw);
+        app.nav_rail(&ctx);
+        let _ = ctx.end_pass();
+        assert_eq!(app.gui.tab, Tab::Processes, "rail click must open Processes");
     }
 }
 
@@ -7283,6 +8136,7 @@ mod settings_tab_tests {
     /// live config — the whole point of moving the fields here.
     #[test]
     fn typing_endpoint_then_test_and_save_commits_it() {
+    let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let _home = isolate_home();
         let (ctx, mut app) = settings_probe();
         // Pass 1 paints the tab; the view records the endpoint field's rect
@@ -7353,6 +8207,7 @@ mod settings_tab_tests {
     /// must fit a short window without sideways overflow.
     #[test]
     fn save_button_sits_close_under_the_fields() {
+    let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let _home = isolate_home();
         let (ctx, mut app) = settings_probe();
         let mut raw = egui::RawInput::default();
@@ -7372,6 +8227,7 @@ mod settings_tab_tests {
     /// Changing the refresh interval must retune the poller at once.
     #[test]
     fn refresh_interval_drag_takes_effect() {
+    let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let _home = isolate_home();
         let (ctx, mut app) = settings_probe();
         app.gui.refresh_edit = 7.5;
@@ -7401,6 +8257,7 @@ mod hw_scroll_tests {
 
     #[test]
     fn hardware_page_body_scrolls_instead_of_clipping() {
+    let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (viewport_h, content_h) = SysKamlingApp::probe_hardware_scroll(egui::Vec2::new(1100.0, 420.0));
         assert!(viewport_h > 0.0, "probe never ran");
         assert!(content_h > viewport_h, "content {content_h} must exceed viewport {viewport_h} so the body scrolls");

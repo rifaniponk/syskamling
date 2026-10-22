@@ -28,8 +28,8 @@ def pump(dur=1.0):
             except OSError: break
 pump(1.5)
 
-# --- Strata tab (key 7) ---
-os.write(fd, b'7'); pump(4.0)   # give the poller two refresh cycles
+# --- Strata tab (key 8) ---
+os.write(fd, b'8'); pump(4.0)   # give the poller two refresh cycles
 scr = "\n".join(term.display)
 assert "Strata" in scr, "Strata screen missing"
 assert "OFFLINE" not in scr and "not configured" not in scr, f"server unreachable:\n{scr}"

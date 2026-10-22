@@ -44,7 +44,7 @@ pub fn run(
     res
 }
 
-#[derive(PartialEq, Eq, Clone, Copy)]
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
 enum Tab {
     Containers,
     Images,
@@ -64,9 +64,9 @@ impl Tab {
             Tab::Images => Tab::Volumes,
             Tab::Volumes => Tab::Agents,
             Tab::Agents => Tab::Hardware,
-            Tab::Hardware => Tab::Ports,
-            Tab::Ports => Tab::Processes,
-            Tab::Processes => Tab::Strata,
+            Tab::Hardware => Tab::Processes,
+            Tab::Processes => Tab::Ports,
+            Tab::Ports => Tab::Strata,
             Tab::Strata => Tab::Logs,
             Tab::Logs => Tab::Containers,
         }
@@ -78,9 +78,9 @@ impl Tab {
             Tab::Volumes => Tab::Images,
             Tab::Agents => Tab::Volumes,
             Tab::Hardware => Tab::Agents,
-            Tab::Ports => Tab::Hardware,
-            Tab::Strata => Tab::Processes,
-            Tab::Processes => Tab::Ports,
+            Tab::Processes => Tab::Hardware,
+            Tab::Ports => Tab::Processes,
+            Tab::Strata => Tab::Ports,
             Tab::Logs => Tab::Strata,
         }
     }
@@ -478,9 +478,10 @@ async fn run_async(
             });
         }
 
-        // Process scan: /proc walk per refresh, only while the Processes tab
-        // is open; the scanner keeps tick counters so CPU% is a real delta.
-        if refresh > 0.0 && app.tab == Tab::Processes && last_proc_scan.elapsed() >= Duration::from_secs_f64(refresh.max(1.0)) {
+        // Process scan: /proc walk per refresh, on every screen (like the
+        // agent and port scans) so the table is warm the moment tab 7 opens;
+        // the scanner keeps tick counters so CPU% is a real delta.
+        if refresh > 0.0 && last_proc_scan.elapsed() >= Duration::from_secs_f64(refresh.max(1.0)) {
             last_proc_scan = Instant::now();
             let tx4 = tx.clone();
             rt.spawn_blocking(move || {
@@ -1094,6 +1095,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         Tab::Volumes,
         Tab::Agents,
         Tab::Hardware,
+        Tab::Processes,
         Tab::Ports,
         Tab::Strata,
         Tab::Logs,
@@ -1585,18 +1587,8 @@ fn render_ports(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
 }
 
 fn render_procs(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
-    use crate::procs::SortCol;
     let rows_data = app.sorted_procs();
     let sel = app.procs_state.selected().unwrap_or(0);
-    let mark = |c: SortCol| {
-        if app.proc_sort != c {
-            String::new()
-        } else if app.proc_sort_desc {
-            "▼".to_string()
-        } else {
-            "▲".to_string()
-        }
-    };
     let rows: Vec<Row> = rows_data
         .iter()
         .enumerate()
@@ -1618,6 +1610,7 @@ fn render_procs(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
             };
             Row::new(vec![
                 r.name.clone(),
+                r.user.clone(),
                 r.pid.to_string(),
                 Span::styled(format!("{cpu:>5.1}", cpu = cpu), Style::default().fg(cpu_color)).to_string(),
                 human_bytes(r.rss_bytes as i64),
@@ -1638,31 +1631,36 @@ fn render_procs(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
         )
     };
 
-    let header = format!(
-        "NAME{}  PID{}  CPU{}  MEMORY{}  S  TH  CMDLINE",
-        mark(SortCol::Name),
-        mark(SortCol::Pid),
-        mark(SortCol::Cpu),
-        mark(SortCol::Mem),
-    );
+    let header = Row::new(vec![
+        "NAME",
+        "USER",
+        "PID",
+        "CPU",
+        "MEMORY",
+        "S",
+        "TH",
+        "CMDLINE",
+    ])
+    .style(Style::default().fg(Color::Cyan));
 
     let table = Table::new(
         rows,
         [
-            Constraint::Length(22),
+            Constraint::Length(20),
+            Constraint::Length(9),
             Constraint::Length(7),
             Constraint::Length(6),
             Constraint::Length(9),
             Constraint::Length(2),
             Constraint::Length(3),
-            Constraint::Min(20),
+            Constraint::Min(16),
         ],
     )
+    .header(header)
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .title(title)
-            .title_bottom(Line::from(format!(" {header} ")).style(Style::default().fg(Color::Cyan))),
+            .title(title),
     )
     .column_spacing(2);
 
@@ -2134,5 +2132,119 @@ mod framing_tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].text, "multi");
         assert_eq!(lines[1].text, "line");
+    }
+}
+
+#[cfg(test)]
+mod procs_screen_tests {
+    use super::*;
+    use crate::procs::{ProcInfo, SortCol};
+    use ratatui::backend::TestBackend;
+
+    fn row(pid: u32, name: &str, cmd: &str, cpu: f64, rss: u64) -> ProcInfo {
+        ProcInfo {
+            pid,
+            ppid: 1,
+            name: name.into(),
+            cmdline: cmd.into(),
+            state: 'S',
+            cpu_pct: cpu,
+            rss_bytes: rss,
+            threads: 1,
+            started: 0,
+            uid: 1000,
+            vsize_bytes: 0,
+            io_read: 0,
+            io_write: 0,
+            cwd: "/home/rifan".into(),
+            user: "rifan".into(),
+            icon: crate::procs::icon_for(name, cmd),
+        }
+    }
+
+    /// Render the whole TUI (nav tabs + processes table) to a text buffer.
+    fn screen(app: &mut App) -> Vec<String> {
+        let backend = TestBackend::new(160, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| ui(f, app)).unwrap();
+        let cells = terminal.backend().buffer().clone();
+        let h = cells.area().height as usize;
+        let w = cells.area().width as usize;
+        (0..h)
+            .map(|y| {
+                (0..w)
+                    .map(|x| cells[(x as u16, y as u16)].symbol())
+                    .collect::<String>()
+                    .trim()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    fn app_with_procs() -> App {
+        let mut app = App::new();
+        app.tab = Tab::Processes;
+        app.procs = vec![
+            row(1, "systemd", "/sbin/init", 0.1, 12 << 20),
+            row(900, "hog", "hog --big", 71.0, 9 << 30),
+            row(901, "busy", "busy-loop", 99.0, 100 << 20),
+        ];
+        app
+    }
+
+    /// The Processes screen is a real table: header row, then one row per
+    /// process, with the USER column populated.
+    #[test]
+    fn procs_screen_renders_a_table_with_a_user_column() {
+        let mut app = app_with_procs();
+        let lines = screen(&mut app);
+        let joined = lines.join("\n");
+        assert!(joined.contains("NAME"), "no NAME header");
+        assert!(joined.contains("USER"), "no USER header");
+        assert!(joined.contains("rifan"), "user column never painted");
+        assert!(joined.contains("901"), "pid column never painted");
+        // default sort is memory desc: hog (9 GB) above busy (100 MB)
+        let hog = lines.iter().position(|l| l.contains("hog")).unwrap();
+        let busy = lines.iter().position(|l| l.contains("busy")).unwrap();
+        assert!(hog < busy, "memory-desc: hog above busy");
+    }
+
+    /// Tab cycling must visit Processes, and the nav bar must show it in
+    /// order (Hardware, Processes, Ports).
+    #[test]
+    fn tab_cycle_visits_processes_in_order() {
+        assert_eq!(Tab::Hardware.next(), Tab::Processes);
+        assert_eq!(Tab::Processes.next(), Tab::Ports);
+        assert_eq!(Tab::Ports.prev(), Tab::Processes);
+        assert_eq!(Tab::Processes.prev(), Tab::Hardware);
+        let mut app = App::new();
+        app.tab = Tab::Hardware;
+        app.tab = app.tab.next();
+        assert_eq!(app.tab, Tab::Processes);
+        // the nav bar lists the tabs in order, Processes between the two
+        let lines = screen(&mut app);
+        let nav = lines
+            .iter()
+            .find(|l| l.contains("Processes"))
+            .expect("nav bar never shows Processes");
+        let at = |t: &str| nav.find(t).unwrap();
+        assert!(at("Hardware") < at("Processes") && at("Processes") < at("Ports"),
+            "nav order: {nav}");
+    }
+
+    /// 'c' sorts by CPU descending; pressing it again flips to ascending.
+    #[test]
+    fn cpu_sort_key_orders_rows_and_flips() {
+        let mut app = app_with_procs();
+        app.sort_procs(SortCol::Cpu);
+        let lines = screen(&mut app);
+        let busy = lines.iter().position(|l| l.contains("busy")).unwrap();
+        let hog = lines.iter().position(|l| l.contains("hog")).unwrap();
+        assert!(busy < hog, "cpu-desc: busy above hog");
+        app.sort_procs(SortCol::Cpu);
+        let lines = screen(&mut app);
+        let sysd = lines.iter().position(|l| l.contains("systemd")).unwrap();
+        let busy = lines.iter().position(|l| l.contains("busy")).unwrap();
+        assert!(sysd < busy, "cpu-asc: systemd first");
     }
 }
