@@ -3442,6 +3442,12 @@ impl SysKamlingApp {
         let Some(m) = self.gui.strata_metrics.clone() else {
             if let Some(e) = &self.gui.strata_error {
                 empty_state(ui, "Server not reachable", e);
+            } else if self.gui.strata_cfg.api_key.trim().is_empty() {
+                empty_state(
+                    ui,
+                    "No API key set",
+                    "This server keeps /metrics behind a key — type it in the field above and press ⟳ Test & save.",
+                );
             } else {
                 empty_state(ui, "Collecting…", "The first /metrics pull lands in a moment.");
             }
