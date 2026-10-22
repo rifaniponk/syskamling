@@ -40,6 +40,8 @@ egui/eframe window, ~10–20 MB resident.
 - Dashboard leads with the machine: host CPU/memory/swap/GPU KPIs, system
   vitals charts, CPU/GPU/SSD temperatures, and the hardware identity line —
   with Docker as one section below
+- Hardware tab names each device on its own card (CPU model, RAM, the actual
+  SSD, NIC, GPU) and shows CPU temperature; internal/OEM disks stay hidden
 - Terminal UI (`syskamling tui`) for keyboard-driven, mouse-free use over SSH
 
 ## Install

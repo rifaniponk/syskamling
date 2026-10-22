@@ -14,6 +14,8 @@ pub struct HwDevice {
     pub name: String,
     /// Short qualifier: core count, VRAM size, capacity, interface speed…
     pub detail: String,
+    /// Kernel block device this maps to, e.g. "nvme0n1" (disks only).
+    pub kern: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -22,6 +24,27 @@ pub struct Inventory {
     pub board: String,
     pub devices: Vec<HwDevice>,
 }
+
+impl Inventory {
+    /// Human name for one physical disk (kernel name like "nvme0n1").
+    pub fn disk_name(&self, kern: &str) -> Option<&str> {
+        self.devices
+            .iter()
+            .find(|d| d.kind == "disk" && d.kern.as_deref() == Some(kern))
+            .map(|d| d.name.as_str())
+    }
+
+    /// Kernel block names of the physical drives we actually inventory.
+    pub fn disk_kerns(&self) -> Vec<String> {
+        self.devices
+            .iter()
+            .filter(|d| d.kind == "disk")
+            .filter_map(|d| d.kern.clone())
+            .collect()
+    }
+}
+
+
 
 /// PCI vendor/device id -> human name, from `lspci -mm -n -D` output.
 /// Returns an empty map when lspci is unavailable.
@@ -145,7 +168,7 @@ fn gpus(names: &HashMap<String, String>) -> Vec<HwDevice> {
             }
             detail.push_str(&format!("{} VRAM", fmt_size(v as i64)));
         }
-        out.push(HwDevice { kind: "gpu", name, detail });
+        out.push(HwDevice { kind: "gpu", name, detail, kern: None });
     }
     out
 }
@@ -191,6 +214,7 @@ fn disks() -> Vec<HwDevice> {
             kind: "disk",
             name: model.unwrap_or_else(|| n.clone()),
             detail: format!("{}, {}", fmt_size(size as i64), bus),
+            kern: Some(n.clone()),
         });
     }
     out
@@ -222,7 +246,7 @@ fn nics(names: &HashMap<String, String>) -> Vec<HwDevice> {
             .filter(|s| *s > 0)
             .map(|s| format!("{s} Mbit/s"))
             .unwrap_or_else(|| iface.clone());
-        out.push(HwDevice { kind: "nic", name, detail: speed });
+        out.push(HwDevice { kind: "nic", name, detail: speed, kern: None });
     }
     // the same PCI device can back several interfaces; keep one row
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -404,12 +428,14 @@ pub static INVENTORY: LazyLock<Inventory> = LazyLock::new(|| {
         kind: "cpu",
         name: cpu.clone(),
         detail: format!("{ncpu} threads"),
+        kern: None,
     });
     if !board.is_empty() {
         devices.push(HwDevice {
             kind: "board",
             name: board.clone(),
             detail: "motherboard".into(),
+            kern: None,
         });
     }
     devices.extend(gpus(&names));
@@ -417,6 +443,7 @@ pub static INVENTORY: LazyLock<Inventory> = LazyLock::new(|| {
         kind: "memory",
         name: "System memory".into(),
         detail: fmt_size(mem_total_bytes() as i64),
+        kern: None,
     });
     devices.extend(disks());
     devices.extend(nics(&names));

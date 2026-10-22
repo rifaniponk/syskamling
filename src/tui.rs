@@ -1355,11 +1355,15 @@ fn render_hardware(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
         ]));
     }
     for d in &s.disks {
+        // only drives the inventory can name; internal/OEM disks (sda…) hide
+        let Some(nm) = hw_inventory::INVENTORY.disk_name(&d.name) else {
+            continue;
+        };
         let temp = d.temp_c.map(|t| format!("{t:.0}°C")).unwrap_or_else(|| "n/a".into());
         lines.push(Line::from(vec![
             Span::styled("ssd     ", Style::default().fg(Color::Gray)),
             Span::styled(
-                format!("{}  {} read  {} write  {temp}", d.name, human_rate(d.read_bps), human_rate(d.write_bps)),
+                format!("{nm}  {} read  {} write  {temp}", human_rate(d.read_bps), human_rate(d.write_bps)),
                 Style::default().fg(Color::White),
             ),
         ]));
@@ -1368,38 +1372,35 @@ fn render_hardware(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
         .block(Block::default().borders(Borders::ALL).title(" Hardware "));
     f.render_widget(vitals, top[0]);
 
-    // per-core bars, two cores per line
-    let rows: Vec<Line> = s
-        .per_core
-        .chunks(2)
-        .enumerate()
-        .map(|(row_i, pair)| {
-            let mut spans = Vec::new();
-            for (j, v) in pair.iter().enumerate() {
-                let idx = row_i * 2 + j;
-                let filled = (*v / 100.0 * 12.0).round() as usize;
-                let color = if *v > 85.0 {
-                    Color::Red
-                } else if *v > 60.0 {
-                    Color::Yellow
-                } else {
-                    Color::Cyan
-                };
-                if j > 0 {
-                    spans.push(Span::raw("  "));
-                }
-                spans.push(Span::styled(
-                    format!("{idx:>2} [{}{:>4.0}%]", "█".repeat(filled) + &"░".repeat(12 - filled), v),
-                    Style::default().fg(color),
-                ));
-            }
-            Line::from(spans)
-        })
-        .collect();
+    // sensor readings instead of per-core bars: every hwmon temperature
+    let mut rows: Vec<Line> = Vec::new();
+    if let Some(t) = s.cpu_temp_c.or(s.temp_c) {
+        rows.push(Line::from(vec![
+            Span::styled("cpu temp ", Style::default().fg(Color::Gray)),
+            Span::styled(format!("{t:.0}°C"), Style::default().fg(Color::Green)),
+        ]));
+    }
+    for x in &s.sensors {
+        let color = if x.c > 85.0 {
+            Color::Red
+        } else if x.c > 70.0 {
+            Color::Yellow
+        } else {
+            Color::Green
+        };
+        rows.push(Line::from(vec![
+            Span::styled(format!("{:<8}", x.group), Style::default().fg(Color::Gray)),
+            Span::styled(format!("{:<12}", x.label), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:.0}°C", x.c), Style::default().fg(color)),
+        ]));
+    }
+    if rows.is_empty() {
+        rows.push(Line::from("no hwmon temperature sensors found"));
+    }
     let body = Paragraph::new(rows).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(format!(" Per-core load ({} cores) ", s.per_core.len())),
+            .title(" Sensors "),
     );
     f.render_widget(body, top[1]);
 }

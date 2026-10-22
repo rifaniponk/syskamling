@@ -620,9 +620,13 @@ impl SysKamlingApp {
         app.sample_hardware();
         app.sample_hardware(); // second sample so rates/sparklines populate
         let mut rich = app.gui.hw.clone().unwrap();
+        // names must match the inventory for the storage cards to render;
+        // pad with the first inventoried name so several cards stack up
+        let real: Vec<String> = crate::hw_inventory::INVENTORY.disk_kerns();
+        let base = if real.is_empty() { "nvme0n1".to_string() } else { real[0].clone() };
         rich.disks = (0..8)
             .map(|i| crate::hw::DiskStat {
-                name: format!("nvme{}n1", i),
+                name: if i < real.len() { real[i].clone() } else { base.clone() },
                 reads: 10,
                 writes: 20,
                 total_read: 1000,
@@ -2225,7 +2229,8 @@ impl SysKamlingApp {
         let mut tiles = vec![
             Kpi {
                 label: "CPU",
-                value: format!("{:.0}%", h.cpu_pct),
+                device: String::new(),
+value: format!("{:.0}%", h.cpu_pct),
                 sub: cpu_sub.join(" · "),
                 color: ACCENT,
                 viz: Viz::Spark(hist(&g.hw_cpu_hist)),
@@ -2233,7 +2238,8 @@ impl SysKamlingApp {
             },
             Kpi {
                 label: "Memory",
-                value: format!("{:.0}%", mem_used as f64 / h.mem_total.max(1) as f64 * 100.0),
+                device: String::new(),
+value: format!("{:.0}%", mem_used as f64 / h.mem_total.max(1) as f64 * 100.0),
                 sub: format!(
                     "{} of {}{}",
                     human_size(mem_used as i64),
@@ -2264,7 +2270,8 @@ impl SysKamlingApp {
                 }
                 Kpi {
                     label: "GPU",
-                    value: format!("{:.0}%", gp.busy_pct.unwrap_or(0.0)),
+                    device: String::new(),
+value: format!("{:.0}%", gp.busy_pct.unwrap_or(0.0)),
                     sub: sub.join(" · "),
                     color: CYAN,
                     viz: Viz::Spark(hist(&g.hw_gpu_busy_hist)),
@@ -2273,7 +2280,8 @@ impl SysKamlingApp {
             }
             None => Kpi {
                 label: "Disk I/O",
-                value: human_rate(h.disk_read_bps + h.disk_write_bps),
+                device: String::new(),
+value: human_rate(h.disk_read_bps + h.disk_write_bps),
                 sub: format!("read {} · write {}", human_rate(h.disk_read_bps), human_rate(h.disk_write_bps)),
                 color: AMBER,
                 viz: Viz::Spark(sum(&g.hw_disk_r_hist, &g.hw_disk_w_hist)),
@@ -2282,7 +2290,8 @@ impl SysKamlingApp {
         });
         tiles.push(Kpi {
             label: "Network",
-            value: human_rate(h.net_rx_bps + h.net_tx_bps),
+            device: String::new(),
+value: human_rate(h.net_rx_bps + h.net_tx_bps),
             sub: format!("↓ {} · ↑ {}", human_rate(h.net_rx_bps), human_rate(h.net_tx_bps)),
             color: GREEN,
             viz: Viz::Spark(sum(&g.hw_net_rx_hist, &g.hw_net_tx_hist)),
@@ -2623,7 +2632,8 @@ impl SysKamlingApp {
         let kpis = [
             Kpi {
                 label: "CPU",
-                value: format!("{cpu:.1}%"),
+                device: String::new(),
+value: format!("{cpu:.1}%"),
                 sub: "of one core = 100%".to_string(),
                 color: ACCENT,
                 viz: Viz::Spark(series(&|h| h.cpu.iter().copied().collect())),
@@ -2631,7 +2641,8 @@ impl SysKamlingApp {
             },
             Kpi {
                 label: "Memory",
-                value: human_size(s.mem_usage()),
+                device: String::new(),
+value: human_size(s.mem_usage()),
                 sub: format!(
                     "of {} · {:.0}%",
                     human_size(s.mem_limit()),
@@ -2643,7 +2654,8 @@ impl SysKamlingApp {
             },
             Kpi {
                 label: "Network",
-                value: format!("↓ {}/s", human_size(rx)),
+                device: String::new(),
+value: format!("↓ {}/s", human_size(rx)),
                 sub: format!("↑ {}/s · {} pids", human_size(txb), s.pids_stats.current),
                 color: CYAN,
                 viz: Viz::Spark(series(&|h| h.rx.iter().zip(&h.tx).map(|(a, b)| (a + b) as f64).collect())),
@@ -2651,7 +2663,8 @@ impl SysKamlingApp {
             },
             Kpi {
                 label: "Disk I/O",
-                value: format!("{}/s", human_size(br + bw)),
+                device: String::new(),
+value: format!("{}/s", human_size(br + bw)),
                 sub: format!("read {} · write {}", human_size(s.blk_read()), human_size(s.blk_write())),
                 color: AMBER,
                 viz: Viz::Spark(series(&|h| h.blk_r.iter().zip(&h.blk_w).map(|(a, b)| (a + b) as f64).collect())),
@@ -2712,7 +2725,8 @@ impl SysKamlingApp {
             let kpis = [
                 Kpi {
                     label: "Size",
-                    value: human_size(im.size),
+                    device: String::new(),
+value: human_size(im.size),
                     sub: format!("{:.1}% of all layers", im.size as f64 / total.max(1) as f64 * 100.0),
                     color: ACCENT,
                     viz: Viz::Ratio(im.size as f32 / total.max(1) as f32),
@@ -2720,7 +2734,8 @@ impl SysKamlingApp {
                 },
                 Kpi {
                     label: "Unique",
-                    value: human_size((im.size - im.shared_size.max(0)).max(0)),
+                    device: String::new(),
+value: human_size((im.size - im.shared_size.max(0)).max(0)),
                     sub: format!("{} shared with other images", human_size(im.shared_size.max(0))),
                     color: VIOLET,
                     viz: Viz::Ratio((im.size - im.shared_size.max(0)).max(0) as f32 / im.size.max(1) as f32),
@@ -2728,7 +2743,8 @@ impl SysKamlingApp {
                 },
                 Kpi {
                     label: "Containers",
-                    value: im.containers.max(0).to_string(),
+                    device: String::new(),
+value: im.containers.max(0).to_string(),
                     sub: if im.created > 0 { format!("created {}", fmt_epoch(im.created)) } else { String::new() },
                     color: GREEN,
                     viz: Viz::None,
@@ -2815,7 +2831,8 @@ impl SysKamlingApp {
         let kpis = [
             Kpi {
                 label: "CPU",
-                value: format!("{:.1}%", a.cpu_pct),
+                device: String::new(),
+value: format!("{:.1}%", a.cpu_pct),
                 sub: "across the session tree".into(),
                 color: GREEN,
                 viz: Viz::None,
@@ -2823,7 +2840,8 @@ impl SysKamlingApp {
             },
             Kpi {
                 label: "Memory",
-                value: human_size(a.mem_bytes as i64),
+                device: String::new(),
+value: human_size(a.mem_bytes as i64),
                 sub: "resident, summed".into(),
                 color: VIOLET,
                 viz: Viz::None,
@@ -2831,7 +2849,8 @@ impl SysKamlingApp {
             },
             Kpi {
                 label: "Uptime",
-                value: ago(uptime),
+                device: String::new(),
+value: ago(uptime),
                 sub: format!("lead pid {}", a.lead_pid),
                 color: ACCENT,
                 viz: Viz::None,
@@ -2892,7 +2911,11 @@ impl SysKamlingApp {
             "Hardware",
             &format!(
                 "{} · {} cores · {} RAM · up {}",
-                hwinv::INVENTORY.cpu,
+                if hwinv::INVENTORY.board.is_empty() {
+                    hwinv::INVENTORY.cpu.as_str()
+                } else {
+                    hwinv::INVENTORY.board.as_str()
+                },
                 s.ncpu,
                 human_size(s.mem_total as i64),
                 ago(s.uptime as i64)
@@ -2919,10 +2942,33 @@ impl SysKamlingApp {
         let tx_hist: Vec<f64> = self.gui.hw_net_tx_hist.iter().copied().collect();
         let gpus = self.gui.gpus.clone();
 
+        // per-card device identity from the inventory: the cards themselves
+        // say WHICH cpu/ram/ssd/nic this is — no separate machine section
+        let cpu_name = hwinv::INVENTORY.cpu.clone();
+        let mem_name = hwinv::INVENTORY
+            .devices
+            .iter()
+            .find(|d| d.kind == "memory")
+            .map(|d| format!("{} RAM", d.detail))
+            .unwrap_or_default();
+        let disk_name = hwinv::INVENTORY
+            .disk_kerns()
+            .first()
+            .and_then(|k| hwinv::INVENTORY.disk_name(k))
+            .unwrap_or_default()
+            .to_string();
+        let nic_name = hwinv::INVENTORY
+            .devices
+            .iter()
+            .find(|d| d.kind == "nic")
+            .map(|d| d.name.clone())
+            .unwrap_or_default();
+
         let mut kpis = vec![
             Kpi {
                 label: "CPU",
-                value: format!("{:.1}%", s.cpu_pct),
+                device: cpu_name,
+value: format!("{:.1}%", s.cpu_pct),
                 sub: match s.cpu_temp_c {
                     Some(t) => format!("{} °C · load {}", temp_str(t), s.load1),
                     None => format!("load {} · {} · {}", s.load1, s.load5, s.load15),
@@ -2933,7 +2979,8 @@ impl SysKamlingApp {
             },
             Kpi {
                 label: "Memory",
-                value: human_size(mem_used as i64),
+                device: mem_name,
+value: human_size(mem_used as i64),
                 sub: format!("of {} ({:.0}%)", human_size(s.mem_total as i64), mem_used as f64 / s.mem_total.max(1) as f64 * 100.0),
                 color: VIOLET,
                 viz: Viz::Ratio(mem_used as f32 / s.mem_total.max(1) as f32),
@@ -2941,7 +2988,8 @@ impl SysKamlingApp {
             },
             Kpi {
                 label: "Disk I/O",
-                value: format!("{} · {}", human_rate(s.disk_read_bps), human_rate(s.disk_write_bps)),
+                device: disk_name,
+value: format!("{} · {}", human_rate(s.disk_read_bps), human_rate(s.disk_write_bps)),
                 sub: "read · write per second".into(),
                 color: GREEN,
                 viz: Viz::Spark(dr_hist.into_iter().zip(dw_hist).map(|(r, w)| r + w).collect()),
@@ -2949,7 +2997,8 @@ impl SysKamlingApp {
             },
             Kpi {
                 label: "Network",
-                value: format!("{} · {}", human_rate(s.net_rx_bps), human_rate(s.net_tx_bps)),
+                device: nic_name,
+value: format!("{} · {}", human_rate(s.net_rx_bps), human_rate(s.net_tx_bps)),
                 sub: "down · up per second".into(),
                 color: AMBER,
                 viz: Viz::Spark(rx_hist.into_iter().zip(tx_hist).map(|(r, t)| r + t).collect()),
@@ -2959,7 +3008,8 @@ impl SysKamlingApp {
         if let Some(g) = gpus.iter().max_by(|a, b| a.busy_pct.unwrap_or(0.0).partial_cmp(&b.busy_pct.unwrap_or(0.0)).unwrap_or(std::cmp::Ordering::Equal)) {
             kpis.push(Kpi {
                 label: "GPU",
-                value: g.busy_pct.map(|b| format!("{b:.0}%")).unwrap_or_else(|| "—".into()),
+                device: g.name.clone(),
+value: g.busy_pct.map(|b| format!("{b:.0}%")).unwrap_or_else(|| "—".into()),
                 sub: match (g.temp_c, g.power_mw) {
                     (Some(t), Some(p)) => format!("{} · {} °C · {:.0} W", g.name, temp_str(t), p as f64 / 1000.0),
                     (Some(t), None) => format!("{} · {} °C", g.name, temp_str(t)),
@@ -2970,10 +3020,19 @@ impl SysKamlingApp {
                 glyph: Some("gpu"),
             });
         }
-        if let Some(t) = s.disks.iter().filter_map(|d| d.temp_c).max_by(|a, b| a.partial_cmp(b).unwrap()) {
+        if let Some((dname, t)) = s
+            .disks
+            .iter()
+            .filter_map(|d| d.temp_c.map(|t| (d.name.clone(), t)))
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+        {
             kpis.push(Kpi {
                 label: "SSD",
-                value: format!("{} °C", temp_str(t)),
+                device: hwinv::INVENTORY
+                    .disk_name(&dname)
+                    .map(String::from)
+                    .unwrap_or(dname),
+value: format!("{} °C", temp_str(t)),
                 sub: "drive temperature".into(),
                 color: if t > 70.0 { RED } else if t > 60.0 { AMBER } else { GREEN },
                 viz: Viz::Spark(self.gui.hw_disk_temp_hist.iter().copied().collect()),
@@ -2995,81 +3054,6 @@ impl SysKamlingApp {
             }
         });
         ui.add_space(14.0);
-
-        // ---- hardware inventory: every named device on the box ----
-        card(ui, |ui| {
-            card_title(ui, "Machine", &hwinv::INVENTORY.board);
-            let icons: &[(&str, &str)] = &[
-                ("cpu", "⬢"),
-                ("board", "▦"),
-                ("gpu", "◈"),
-                ("memory", "▤"),
-                ("disk", "⛁"),
-                ("nic", "⇄"),
-            ];
-            for d in &hwinv::INVENTORY.devices {
-                let icon = icons.iter().find(|(k, _)| *k == d.kind).map(|(_, i)| *i).unwrap_or("•");
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(icon).size(13.0).color(ACCENT));
-                    ui.label(RichText::new(&d.name).font(bold(13.0)).color(TEXT));
-                    if !d.detail.is_empty() {
-                        ui.label(RichText::new(&d.detail).size(12.0).color(FAINT));
-                    }
-                });
-            }
-        });
-        ui.add_space(10.0);
-
-        card(ui, |ui| {
-            card_title(
-                ui,
-                &format!("Per-core load ({})", s.per_core.len()),
-                &s.cpu_temp_c.map(|t| format!("{} °C", temp_str(t))).unwrap_or_default(),
-            );
-            if s.per_core.is_empty() {
-                ui.label(RichText::new("per-core stats unavailable").color(FAINT));
-            } else {
-                // grid of bars: one per core, labelled with its index
-                let per_row = s.per_core.len().isqrt().max(4).min(8);
-                for (row_i, row) in s.per_core.chunks(per_row).enumerate() {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        for (j, v) in row.iter().enumerate() {
-                            let idx = row_i * per_row + j;
-                            let bar_w = 34.0_f32;
-                            let (r, _) = ui.allocate_exact_size(Vec2::new(bar_w, 34.0), Sense::hover());
-                            let p = ui.painter();
-                            p.rect_filled(r, 4.0, WELL);
-                            let frac = (v / 100.0).clamp(0.0, 1.0) as f32;
-                            let fill = Rect::from_min_max(
-                                Pos2::new(r.left() + 1.0, r.bottom() - 1.0 - (r.height() - 2.0) * frac),
-                                Pos2::new(r.right() - 1.0, r.bottom() - 1.0),
-                            );
-                            let c = if *v > 85.0 {
-                                RED
-                            } else if *v > 60.0 {
-                                AMBER
-                            } else {
-                                ACCENT
-                            };
-                            p.rect_filled(fill.shrink(1.0), 3.0, c.gamma_multiply(0.85));
-                            p.text(
-                                Pos2::new(r.center().x, r.center().y),
-                                egui::Align2::CENTER_CENTER,
-                                idx.to_string(),
-                                FontId::monospace(9.5),
-                                if *v > 40.0 { TEXT } else { FAINT },
-                            );
-                        }
-                    });
-                    ui.add_space(6.0);
-                }
-            }
-            if let Some(note) = swap_note(&s) {
-                ui.label(RichText::new(note).size(12.0).color(MUTED));
-            }
-        });
-        ui.add_space(10.0);
 
         let mem_hist: Vec<f64> = self.gui.hw_mem_hist.iter().copied().collect();
         let swap_hist: Vec<f64> = self.gui.hw_swap_hist.iter().copied().collect();
@@ -3159,51 +3143,36 @@ impl SysKamlingApp {
             ui.add_space(6.0);
             section_heading(ui, "Storage");
             ui.add_space(6.0);
-            let models: std::collections::HashMap<String, hwinv::HwDevice> = hwinv::INVENTORY
-                .devices
+            // only drives we actually inventoried: internal SATA/OEM disks
+            // (sda…) and anything not named by the inventory are skipped
+            let inv_disks: Vec<&hwinv::HwDevice> =
+                hwinv::INVENTORY.devices.iter().filter(|d| d.kind == "disk").collect();
+            let named: Vec<(&crate::hw::DiskStat, Option<&hwinv::HwDevice>)> = s
+                .disks
                 .iter()
-                .filter(|d| d.kind == "disk")
-                .map(|d| (d.name.clone(), d.clone()))
+                .filter(|d| {
+                    inv_disks.iter().any(|x| x.kern.as_deref() == Some(d.name.as_str()))
+                })
+                .map(|d| {
+                    let inv = inv_disks.iter().find(|x| x.kern.as_deref() == Some(d.name.as_str())).copied();
+                    (d, inv)
+                })
                 .collect();
-            // match by kernel name order; the inventory keeps the same sort
-            let inv_disks: Vec<&hwinv::HwDevice> = hwinv::INVENTORY.devices.iter().filter(|d| d.kind == "disk").collect();
-            for (i, d) in s.disks.iter().enumerate() {
-                let inv = models.get(&d.name).or_else(|| {
-                    // diskstats names (nvme0n1, sda) vs inventory names: fall
-                    // back to positional matching, both lists are sorted
-                    inv_disks.get(i).map(|v| &**v)
-                });
-                let title = inv.map(|x| x.name.as_str()).unwrap_or(&d.name);
-                let temp = d.temp_c.map(|t| format!("{} °C", temp_str(t))).unwrap_or_default();
-                card(ui, |ui| {
-                    card_title(ui, title, &temp);
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Rate").size(12.5).color(MUTED).weak());
-                        ui.label(RichText::new(format!("↓ {}", human_rate(d.read_bps))).font(FontId::monospace(12.5)).color(TEXT));
-                        ui.label(RichText::new(format!("↑ {}", human_rate(d.write_bps))).font(FontId::monospace(12.5)).color(TEXT));
-                        if let Some(inv) = inv {
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.label(RichText::new(&inv.detail).size(11.5).color(FAINT));
-                            });
-                        }
-                    });
-                    // active time since boot = utilization, averaged over uptime
-                    let util = if d.uptime > 0.0 { (d.ms_busy as f64 / (d.uptime * 1000.0) * 100.0).min(100.0) } else { 0.0 };
-                    bar_row(ui, "Active", (util * 10.0) as u64, 1000, GREEN);
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Lifetime").size(12.5).color(MUTED).weak());
-                        ui.label(RichText::new(format!("{} read", human_size(d.total_read as i64))).font(FontId::monospace(12.0)).color(MUTED));
-                        ui.label(RichText::new(format!("{} written", human_size(d.total_write as i64))).font(FontId::monospace(12.0)).color(MUTED));
-                        ui.label(RichText::new(format!("{} reads · {} writes", d.reads, d.writes)).size(11.5).color(FAINT));
-                        // average queue depth = weighted busy ms / elapsed ms
-                        let queue = if d.uptime > 0.0 { d.ms_weighted as f64 / (d.uptime * 1000.0) } else { 0.0 };
-                        ui.label(RichText::new(format!("avg queue {queue:.2}")).size(11.5).color(FAINT));
-                    });
-                    if let Some(t) = d.temp_c {
-                        let c = if t > 70.0 { RED } else if t > 60.0 { AMBER } else { GREEN };
-                        ui.label(RichText::new(format!("drive temperature {} °C", temp_str(t))).size(11.5).color(c));
-                    }
-                });
+            if named.is_empty() && !s.disks.is_empty() {
+                // no inventory match at all: fall back to everything except
+                // obvious internal/OEM names so the section isn't blank
+                let fallback: Vec<&crate::hw::DiskStat> = s
+                    .disks
+                    .iter()
+                    .filter(|d| !(d.name == "sda" || d.name == "sdb"))
+                    .collect();
+                for d in fallback {
+                    disk_card(ui, d, None);
+                    ui.add_space(8.0);
+                }
+            }
+            for (d, inv) in &named {
+                disk_card(ui, d, *inv);
                 ui.add_space(8.0);
             }
         }
@@ -3260,7 +3229,8 @@ impl SysKamlingApp {
         let kpis = [
             Kpi {
                 label: "Process",
-                value: p.proc_name.clone().unwrap_or_else(|| "—".into()),
+                device: String::new(),
+value: p.proc_name.clone().unwrap_or_else(|| "—".into()),
                 sub: p.pid.map(|x| format!("pid {x}")).unwrap_or_else(|| "owner not visible".into()),
                 color: if p.pid.is_some() { GREEN } else { FAINT },
                 viz: Viz::None,
@@ -3268,7 +3238,8 @@ impl SysKamlingApp {
             },
             Kpi {
                 label: "Protocol",
-                value: p.proto.to_uppercase(),
+                device: String::new(),
+value: p.proto.to_uppercase(),
                 sub: format!("IPv{}", p.family),
                 color: ACCENT,
                 viz: Viz::None,
@@ -3276,7 +3247,8 @@ impl SysKamlingApp {
             },
             Kpi {
                 label: "Bind",
-                value: if p.addr == "0.0.0.0" || p.addr == "[::]" { "public" } else if p.addr.starts_with("127.") || p.addr == "[::1]" { "localhost" } else { "interface" }.into(),
+                device: String::new(),
+value: if p.addr == "0.0.0.0" || p.addr == "[::]" { "public" } else if p.addr.starts_with("127.") || p.addr == "[::1]" { "localhost" } else { "interface" }.into(),
                 sub: p.addr.clone(),
                 color: if p.addr == "0.0.0.0" || p.addr == "[::]" { AMBER } else { GREEN },
                 viz: Viz::None,
@@ -3720,7 +3692,8 @@ impl SysKamlingApp {
         let kpis = vec![
             Kpi {
                 label: "GPU SPEED",
-                value: speed.map(|v| format!("{v:.1}")).unwrap_or_else(|| "–".into()),
+                device: String::new(),
+value: speed.map(|v| format!("{v:.1}")).unwrap_or_else(|| "–".into()),
                 sub: if m.state == "generating" { "tok/s · decode now".into() } else { "tok/s · decode last request".into() },
                 color: ACCENT,
                 viz: Viz::Spark(hist("tok_s")),
@@ -3728,7 +3701,8 @@ impl SysKamlingApp {
             },
             Kpi {
                 label: "GPU PREFILL",
-                value: prefill.map(fmt_tokens_f).unwrap_or_else(|| "–".into()),
+                device: String::new(),
+value: prefill.map(fmt_tokens_f).unwrap_or_else(|| "–".into()),
                 sub: if m.state == "idle" { "t/s · prefill last request".into() } else { "t/s · prefill this request".into() },
                 color: CYAN,
                 viz: Viz::Spark(hist("prefill_tok_s_mean")),
@@ -3736,7 +3710,8 @@ impl SysKamlingApp {
             },
             Kpi {
                 label: "GPU LOAD",
-                value: m.gpu_util.map(|v| format!("{v:.0}")).unwrap_or_else(|| "–".into()),
+                device: String::new(),
+value: m.gpu_util.map(|v| format!("{v:.0}")).unwrap_or_else(|| "–".into()),
                 sub: format!("% · {}", gpu_sub),
                 color: GREEN,
                 viz: Viz::Spark(hist("gpu_util")),
@@ -3744,7 +3719,8 @@ impl SysKamlingApp {
             },
             Kpi {
                 label: "GPU VRAM",
-                value: m.gpu_mem_used.map(|v| format!("{:.1}", v / 1e9)).unwrap_or_else(|| "–".into()),
+                device: String::new(),
+value: m.gpu_mem_used.map(|v| format!("{:.1}", v / 1e9)).unwrap_or_else(|| "–".into()),
                 sub: m
                     .gpu_mem_total
                     .map(|t| format!("of {:.0} GB · {}", t / 1e9, fmt_tokens(m.expert_slots.unwrap_or(0))))
@@ -3755,7 +3731,8 @@ impl SysKamlingApp {
             },
             Kpi {
                 label: "GPU TEMP",
-                value: m.gpu_temp.map(|v| format!("{v:.0}")).unwrap_or_else(|| "–".into()),
+                device: String::new(),
+value: m.gpu_temp.map(|v| format!("{v:.0}")).unwrap_or_else(|| "–".into()),
                 sub: "°C".into(),
                 color: temp_color(m.gpu_temp.unwrap_or(0.0), 85.0),
                 viz: Viz::Spark(hist("gpu_temp")),
@@ -3763,7 +3740,8 @@ impl SysKamlingApp {
             },
             Kpi {
                 label: "GPU POWER",
-                value: m.gpu_power.map(|v| format!("{v:.0}")).unwrap_or_else(|| "–".into()),
+                device: String::new(),
+value: m.gpu_power.map(|v| format!("{v:.0}")).unwrap_or_else(|| "–".into()),
                 sub: m
                     .gpu_power_limit
                     .map(|l| format!("W · of {:.0} W limit", l))
@@ -3774,7 +3752,8 @@ impl SysKamlingApp {
             },
             Kpi {
                 label: "GPU PCIe",
-                value: gen.map(|g| format!("Gen{g}")).unwrap_or_else(|| "–".into()),
+                device: String::new(),
+value: gen.map(|g| format!("Gen{g}")).unwrap_or_else(|| "–".into()),
                 sub: format!(
                     "{} · to GPU {}",
                     m.gpu_pcie_width.map(|w| format!("x{w}")).unwrap_or_else(|| "x?".into()),
@@ -3786,7 +3765,8 @@ impl SysKamlingApp {
             },
             Kpi {
                 label: "CPU",
-                value: m.cpu.map(|v| format!("{v:.0}")).unwrap_or_else(|| "–".into()),
+                device: String::new(),
+value: m.cpu.map(|v| format!("{v:.0}")).unwrap_or_else(|| "–".into()),
                 sub: format!(
                     "% · {}",
                     match (m.cores, m.threads) {
@@ -3801,7 +3781,8 @@ impl SysKamlingApp {
             },
             Kpi {
                 label: "DISK READ",
-                value: m.disk_read_mb.map(|v| if v >= 1000.0 { format!("{:.2}", v / 1024.0) } else { format!("{v:.1}") }).unwrap_or_else(|| "–".into()),
+                device: String::new(),
+value: m.disk_read_mb.map(|v| if v >= 1000.0 { format!("{:.2}", v / 1024.0) } else { format!("{v:.1}") }).unwrap_or_else(|| "–".into()),
                 sub: m
                     .disk_write_mb
                     .map(|w| format!("{} · write {:.1} MB/s", if m.disk_read_mb.unwrap_or(0.0) >= 1000.0 { "GB/s" } else { "MB/s" }, w))
@@ -3812,7 +3793,8 @@ impl SysKamlingApp {
             },
             Kpi {
                 label: "FIRST TOKEN",
-                value: ttft.p50.map(|v| format!("{v:.2}")).unwrap_or_else(|| "–".into()),
+                device: String::new(),
+value: ttft.p50.map(|v| format!("{v:.2}")).unwrap_or_else(|| "–".into()),
                 sub: if ttft.count > 0 {
                     format!(
                         "s · p90 {:.2} s · {} requests{}",
@@ -3829,7 +3811,8 @@ impl SysKamlingApp {
             },
             Kpi {
                 label: "BATCH SLOTS",
-                value: if m.parallel > 0 {
+                device: String::new(),
+value: if m.parallel > 0 {
                     let busy = if m.running > 0 { m.running } else if m.state != "idle" { 1 } else { 0 };
                     format!("{busy}")
                 } else {
@@ -4154,7 +4137,8 @@ impl SysKamlingApp {
         let kpis = [
             Kpi {
                 label: "Size",
-                value: size.map(human_size).unwrap_or_else(|| "—".into()),
+                device: String::new(),
+value: size.map(human_size).unwrap_or_else(|| "—".into()),
                 sub: if size.is_some() { "on disk".into() } else { "not reported by driver".into() },
                 color: VIOLET,
                 viz: Viz::None,
@@ -4162,7 +4146,8 @@ impl SysKamlingApp {
             },
             Kpi {
                 label: "References",
-                value: refs.map(|n| n.to_string()).unwrap_or_else(|| "—".into()),
+                device: String::new(),
+value: refs.map(|n| n.to_string()).unwrap_or_else(|| "—".into()),
                 sub: if refs.is_some() { "containers mounting it".into() } else { "not reported by the daemon".into() },
                 color: GREEN,
                 viz: Viz::None,
@@ -4170,7 +4155,8 @@ impl SysKamlingApp {
             },
             Kpi {
                 label: "Created",
-                value: v.created.get(..10).unwrap_or("—").to_string(),
+                device: String::new(),
+value: v.created.get(..10).unwrap_or("—").to_string(),
                 sub: v.created.get(11..19).unwrap_or("").to_string(),
                 color: ACCENT,
                 viz: Viz::None,
@@ -4524,6 +4510,8 @@ fn temp_color(t: f64, hot: f64) -> Color32 {
 /// Dashboard / detail metric tile.
 struct Kpi {
     label: &'static str,
+    /// device identity shown above the number, e.g. "AMD Ryzen 7 7800X3D"
+    device: String,
     value: String,
     sub: String,
     color: Color32,
@@ -4548,6 +4536,14 @@ fn kpi_card(ui: &mut Ui, k: &Kpi) {
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.spacing_mut().item_spacing.y = 2.0;
+            if !k.device.is_empty() {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(&k.device).font(bold(13.0)).color(TEXT),
+                    )
+                    .truncate(),
+                );
+            }
             ui.horizontal(|ui| {
                 let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
                 ui.painter().circle_filled(r.center(), 3.5, k.color);
@@ -4661,6 +4657,41 @@ fn tab_label(tab: Tab) -> &'static str {
 }
 
 /// Surface card with standard padding; fills the available width.
+/// One physical drive's stats card: named title, rates, lifetime counters.
+fn disk_card(ui: &mut Ui, d: &crate::hw::DiskStat, inv: Option<&hwinv::HwDevice>) {
+    let title = inv.map(|x| x.name.as_str()).unwrap_or(&d.name);
+    let temp = d.temp_c.map(|t| format!("{} °C", temp_str(t))).unwrap_or_default();
+    card(ui, |ui| {
+        card_title(ui, title, &temp);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Rate").size(12.5).color(MUTED).weak());
+            ui.label(RichText::new(format!("↓ {}", human_rate(d.read_bps))).font(FontId::monospace(12.5)).color(TEXT));
+            ui.label(RichText::new(format!("↑ {}", human_rate(d.write_bps))).font(FontId::monospace(12.5)).color(TEXT));
+            if let Some(inv) = inv {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(&inv.detail).size(11.5).color(FAINT));
+                });
+            }
+        });
+        // active time since boot = utilization, averaged over uptime
+        let util = if d.uptime > 0.0 { (d.ms_busy as f64 / (d.uptime * 1000.0) * 100.0).min(100.0) } else { 0.0 };
+        bar_row(ui, "Active", (util * 10.0) as u64, 1000, GREEN);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Lifetime").size(12.5).color(MUTED).weak());
+            ui.label(RichText::new(format!("{} read", human_size(d.total_read as i64))).font(FontId::monospace(12.0)).color(MUTED));
+            ui.label(RichText::new(format!("{} written", human_size(d.total_write as i64))).font(FontId::monospace(12.0)).color(MUTED));
+            ui.label(RichText::new(format!("{} reads · {} writes", d.reads, d.writes)).size(11.5).color(FAINT));
+            // average queue depth = weighted busy ms / elapsed ms
+            let queue = if d.uptime > 0.0 { d.ms_weighted as f64 / (d.uptime * 1000.0) } else { 0.0 };
+            ui.label(RichText::new(format!("avg queue {queue:.2}")).size(11.5).color(FAINT));
+        });
+        if let Some(t) = d.temp_c {
+            let c = if t > 70.0 { RED } else if t > 60.0 { AMBER } else { GREEN };
+            ui.label(RichText::new(format!("drive temperature {} °C", temp_str(t))).size(11.5).color(c));
+        }
+    });
+}
+
 fn card<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
     Frame::NONE
         .fill(SURFACE)
@@ -5753,19 +5784,6 @@ fn human_rate(bps: f64) -> String {
     format!("{human}/s")
 }
 
-/// Swap usage note for the per-core card footer.
-fn swap_note(s: &HwSample) -> Option<String> {
-    if s.swap_total == 0 {
-        return None;
-    }
-    let used = s.swap_total - s.swap_free;
-    Some(format!(
-        "swap {} of {} in use",
-        human_size(used as i64),
-        human_size(s.swap_total as i64)
-    ))
-}
-
 /// Labelled horizontal bar: "Used ███░░ 12.3 GB of 64 GB".
 fn bar_row(ui: &mut Ui, label: &str, used: u64, total: u64, color: Color32) {
     if total == 0 {
@@ -6756,5 +6774,62 @@ pub mod hw_scroll_probe {
             f32::from_bits(MAX_RECT.load(Ordering::Relaxed)),
             f32::from_bits(CONTENT_H.load(Ordering::Relaxed)),
         )
+    }
+}
+
+#[cfg(test)]
+mod hw_titles_tests {
+    use super::*;
+
+    #[test]
+    fn hardware_page_names_devices_and_hides_internal_disks() {
+        let ctx = egui::Context::default();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let rt = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
+        let mut app = SysKamlingApp::new_offscreen(&ctx, tx, rx, rt);
+        app.gui.tab = Tab::Hardware;
+        app.sample_hardware();
+        app.sample_hardware();
+        let mut rich = app.gui.hw.clone().unwrap();
+        rich.disks.push(crate::hw::DiskStat {
+            name: "sda".into(),
+            reads: 1, writes: 1, total_read: 1, total_write: 1,
+            ms_busy: 1, ms_weighted: 0, uptime: 3600.0, temp_c: None,
+            read_bps: 0.0, write_bps: 0.0,
+        });
+        app.gui.hw = Some(rich);
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1200.0, 900.0)));
+        let mut all = String::new();
+        for _ in 0..3 {
+            ctx.begin_pass(raw.clone());
+            egui::CentralPanel::default().show(&ctx, |ui| match app.gui.tab {
+                Tab::Hardware => app.hardware_view(ui),
+                _ => {}
+            });
+            let out = ctx.end_pass();
+            all = out.shapes.iter().filter_map(|cs| match &cs.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
+                _ => None,
+            }).collect::<Vec<String>>().join("\n");
+        }
+        // the CPU card must name the actual processor and show its temperature
+        let cpu = crate::hw_inventory::INVENTORY.cpu.clone();
+        assert!(!cpu.is_empty(), "inventory has no cpu name on this box");
+        assert!(all.contains(&cpu), "cpu card never names {cpu}");
+        let temp_line = app
+            .gui
+            .hw
+            .as_ref()
+            .and_then(|h| h.cpu_temp_c.or(h.temp_c))
+            .map(|t| format!("{} °C", temp_str(t)));
+        if let Some(tl) = temp_line {
+            assert!(all.contains(&tl), "cpu card never shows the cpu temperature");
+        }
+        // retired sections must be gone
+        assert!(!all.contains("Machine"), "machine section still present");
+        assert!(!all.contains("Per-core load"), "per-core section still present");
+        // internal sda gets no storage card of its own
+        assert!(!all.split('\n').any(|t| t.trim() == "sda"), "internal sda still shown");
     }
 }
