@@ -1,0 +1,17 @@
+name: RunnerCheck
+on:
+  pull_request:
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: |
+          set -x
+          ls /sys/block
+          ls /dev/disk/by-id 2>/dev/null
+          df -h | head
+          cat /proc/mounts | grep '^/dev/'
+          ls /usr/share/icons 2>/dev/null
+          ls /usr/share/applications | head
+          which lspci; lspci | head -5
+          grep -m1 "model name" /proc/cpuinfo
