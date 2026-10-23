@@ -48,8 +48,20 @@ impl Inventory {
 /// from /proc/mounts. One entry per physical device — the mount with the
 /// most capacity wins, so a btrfs multi-mount pool counts once.
 pub fn disk_usage() -> Vec<DiskUsage> {
-    let inv = &*INVENTORY;
-    let txt = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
+    usage_for(&INVENTORY, "/proc/mounts", &statvfs)
+}
+
+/// The same, against an explicit inventory and mount-table path, with the
+/// capacity probe injected. The hardware-page tests point this at a fixture
+/// inventory, a fixture mount table and a fake probe, so the disk-naming
+/// and capacity-bar rendering can be asserted deterministically — CI
+/// runners whose real layout (root mounted off the label /dev/root, one
+/// small /boot partition) can otherwise produce no usage bar at all.
+/// Injected capacity probe: (total, free) bytes for one mounted path.
+pub type FsProbe = dyn Fn(&str) -> Result<(u64, u64), ()>;
+
+pub fn usage_for(inv: &Inventory, path: &str, probe: &FsProbe) -> Vec<DiskUsage> {
+    let txt = std::fs::read_to_string(path).unwrap_or_default();
     let mut best: std::collections::HashMap<String, DiskUsage> = Default::default();
     for line in txt.lines() {
         let f: Vec<&str> = line.split_whitespace().collect();
@@ -65,7 +77,7 @@ pub fn disk_usage() -> Vec<DiskUsage> {
             continue; // not an inventoried drive
         }
         let dev = f[0].replace("\\040", " ");
-        let Ok(stat) = statvfs(&dev) else {
+        let Ok(stat) = probe(&dev) else {
             continue;
         };
         let du = DiskUsage {
@@ -540,6 +552,32 @@ pub fn gpu_stats_hwmon_only() -> Vec<GpuStat> {
         }
     }
     out
+}
+
+/// A fixture inventory for tests: one named disk ("Test Disk" behind the
+/// kernel name `testdisk0`) plus a CPU, so the hardware page's disk naming
+/// and capacity bars can be asserted without depending on the host's real
+/// layout.
+#[cfg(test)]
+pub fn fixture_inventory() -> Inventory {
+    Inventory {
+        cpu: "Fixture CPU".into(),
+        board: String::new(),
+        devices: vec![
+            HwDevice {
+                kind: "cpu",
+                name: "Fixture CPU".into(),
+                detail: "2 threads".into(),
+                kern: None,
+            },
+            HwDevice {
+                kind: "disk",
+                name: "Test Disk".into(),
+                detail: "500.0 GB, SSD".into(),
+                kern: Some("testdisk0".into()),
+            },
+        ],
+    }
 }
 
 /// Build the inventory once; every read here is cheap and static.

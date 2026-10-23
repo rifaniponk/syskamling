@@ -764,11 +764,18 @@ impl SysKamlingApp {
         let mut raw = egui::RawInput::default();
         raw.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size));
         hw_scroll_probe::reset();
+        let inv = crate::hw_inventory::fixture_inventory();
+        let usage = [crate::hw_inventory::DiskUsage {
+            kern: "testdisk0".into(),
+            mount: "/".into(),
+            total: 1000,
+            used: 400,
+        }];
         for _ in 0..3 {
             ctx.begin_pass(raw.clone());
             egui::CentralPanel::default().show(&ctx, |ui| {
                 if app.gui.tab == Tab::Hardware {
-                    app.hardware_view(ui)
+                    app.hardware_view(ui, &inv, &usage)
                 }
             });
             let _ = ctx.end_pass();
@@ -2930,7 +2937,10 @@ impl SysKamlingApp {
                     Tab::Images => self.image_detail(ui),
                     Tab::Volumes => self.volume_detail(ui),
                     Tab::Agents => self.agent_detail(ui),
-                    Tab::Hardware => self.hardware_view(ui),
+                    Tab::Hardware => {
+                        let usage = hwinv::disk_usage();
+                        self.hardware_view(ui, &hwinv::INVENTORY, &usage)
+                    }
                     Tab::Ports => self.port_detail(ui),
                     Tab::Processes => {
                         self.proc_search(ui);
@@ -4381,7 +4391,7 @@ impl SysKamlingApp {
     // Hardware tab: host vitals, Task-Manager style
     // ------------------------------------------------------------------
 
-    fn hardware_view(&mut self, ui: &mut Ui) {
+    fn hardware_view(&mut self, ui: &mut Ui, inv: &hwinv::Inventory, usage: &[hwinv::DiskUsage]) {
         let Some(s) = self.gui.hw.clone() else {
             empty_state(
                 ui,
@@ -4395,10 +4405,10 @@ impl SysKamlingApp {
             "Hardware",
             &format!(
                 "{} · {} cores · {} RAM · up {}",
-                if hwinv::INVENTORY.board.is_empty() {
-                    hwinv::INVENTORY.cpu.as_str()
+                if inv.board.is_empty() {
+                    inv.cpu.as_str()
                 } else {
-                    hwinv::INVENTORY.board.as_str()
+                    inv.board.as_str()
                 },
                 s.ncpu,
                 human_size(s.mem_total as i64),
@@ -4428,20 +4438,20 @@ impl SysKamlingApp {
 
                 // per-card device identity from the inventory: the cards themselves
                 // say WHICH cpu/ram/ssd/nic this is — no separate machine section
-                let cpu_name = hwinv::INVENTORY.cpu.clone();
-                let mem_name = hwinv::INVENTORY
+                let cpu_name = inv.cpu.clone();
+                let mem_name = inv
                     .devices
                     .iter()
                     .find(|d| d.kind == "memory")
                     .map(|d| format!("{} RAM", d.detail))
                     .unwrap_or_default();
-                let disk_name = hwinv::INVENTORY
+                let disk_name = inv
                     .disk_kerns()
                     .first()
-                    .and_then(|k| hwinv::INVENTORY.disk_name(k))
+                    .and_then(|k| inv.disk_name(k))
                     .unwrap_or_default()
                     .to_string();
-                let nic_name = hwinv::INVENTORY
+                let nic_name = inv
                     .devices
                     .iter()
                     .find(|d| d.kind == "nic")
@@ -4549,10 +4559,7 @@ impl SysKamlingApp {
                 {
                     kpis.push(Kpi {
                         label: "SSD",
-                        device: hwinv::INVENTORY
-                            .disk_name(&dname)
-                            .map(String::from)
-                            .unwrap_or(dname),
+                        device: inv.disk_name(&dname).map(String::from).unwrap_or(dname),
                         value: format!("{} °C", temp_str(t)),
                         sub: "drive temperature".into(),
                         color: if t > 70.0 {
@@ -4722,11 +4729,8 @@ impl SysKamlingApp {
                     ui.add_space(6.0);
                     // only drives we actually inventoried: internal SATA/OEM disks
                     // (sda…) and anything not named by the inventory are skipped
-                    let inv_disks: Vec<&hwinv::HwDevice> = hwinv::INVENTORY
-                        .devices
-                        .iter()
-                        .filter(|d| d.kind == "disk")
-                        .collect();
+                    let inv_disks: Vec<&hwinv::HwDevice> =
+                        inv.devices.iter().filter(|d| d.kind == "disk").collect();
                     let named: Vec<(&crate::hw::DiskStat, Option<&hwinv::HwDevice>)> = s
                         .disks
                         .iter()
@@ -4752,12 +4756,12 @@ impl SysKamlingApp {
                             .filter(|d| !(d.name == "sda" || d.name == "sdb"))
                             .collect();
                         for d in fallback {
-                            disk_card(ui, d, None);
+                            disk_card(ui, d, None, usage);
                             ui.add_space(8.0);
                         }
                     }
                     for (d, inv) in &named {
-                        disk_card(ui, d, *inv);
+                        disk_card(ui, d, *inv, usage);
                         ui.add_space(8.0);
                     }
                 }
@@ -6649,7 +6653,12 @@ fn tab_label(tab: Tab) -> &'static str {
 
 /// Surface card with standard padding; fills the available width.
 /// One physical drive's stats card: named title, rates, lifetime counters.
-fn disk_card(ui: &mut Ui, d: &crate::hw::DiskStat, inv: Option<&hwinv::HwDevice>) {
+fn disk_card(
+    ui: &mut Ui,
+    d: &crate::hw::DiskStat,
+    inv: Option<&hwinv::HwDevice>,
+    usage: &[hwinv::DiskUsage],
+) {
     let title = inv.map(|x| x.name.as_str()).unwrap_or(&d.name);
     let temp = d
         .temp_c
@@ -6676,7 +6685,6 @@ fn disk_card(ui: &mut Ui, d: &crate::hw::DiskStat, inv: Option<&hwinv::HwDevice>
             }
         });
         // filesystem capacity on this drive (root, home, …), from /proc/mounts
-        let usage = hwinv::disk_usage();
         for u in usage.iter().filter(|u| u.kern == d.name) {
             let frac = u.used as f32 / u.total.max(1) as f32;
             let col = if frac > 0.9 {
@@ -10936,33 +10944,14 @@ pub mod hw_scroll_probe {
 mod hw_titles_tests {
     use super::*;
 
-    #[test]
-    fn hardware_page_names_devices_and_hides_internal_disks() {
-        let ctx = egui::Context::default();
-        let (tx, rx) = mpsc::unbounded_channel();
-        let rt = Arc::new(
-            tokio::runtime::Builder::new_current_thread()
-                .build()
-                .unwrap(),
-        );
-        let mut app = SysKamlingApp::new_offscreen(&ctx, tx, rx, rt);
-        app.gui.tab = Tab::Hardware;
-        app.sample_hardware();
-        app.sample_hardware();
-        let mut rich = app.gui.hw.clone().unwrap();
-        rich.disks.push(crate::hw::DiskStat {
-            name: "sda".into(),
-            reads: 1,
-            writes: 1,
-            total_read: 1,
-            total_write: 1,
-            ms_weighted: 0,
-            uptime: 3600.0,
-            temp_c: None,
-            read_bps: 0.0,
-            write_bps: 0.0,
-        });
-        app.gui.hw = Some(rich);
+    /// Paint the hardware page against a fixture inventory and a fixture
+    /// usage table, and return every galley the pass produced.
+    fn paint_hw_page(
+        ctx: &egui::Context,
+        app: &mut SysKamlingApp,
+        inv: &hwinv::Inventory,
+        usage: &[hwinv::DiskUsage],
+    ) -> String {
         let mut raw = egui::RawInput::default();
         raw.screen_rect = Some(egui::Rect::from_min_size(
             egui::Pos2::ZERO,
@@ -10971,9 +10960,9 @@ mod hw_titles_tests {
         let mut all = String::new();
         for _ in 0..3 {
             ctx.begin_pass(raw.clone());
-            egui::CentralPanel::default().show(&ctx, |ui| {
+            egui::CentralPanel::default().show(ctx, |ui| {
                 if app.gui.tab == Tab::Hardware {
-                    app.hardware_view(ui)
+                    app.hardware_view(ui, inv, usage)
                 }
             });
             let out = ctx.end_pass();
@@ -10987,39 +10976,82 @@ mod hw_titles_tests {
                 .collect::<Vec<String>>()
                 .join("\n");
         }
-        // retired sections must be gone (checked before the disk skip:
-        // they must vanish even on a runner with no inventoried disks)
+        all
+    }
+
+    fn hw_app(ctx: &egui::Context) -> SysKamlingApp {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap(),
+        );
+        let mut app = SysKamlingApp::new_offscreen(ctx, tx, rx, rt);
+        app.gui.tab = Tab::Hardware;
+        app.sample_hardware();
+        app.sample_hardware();
+        app
+    }
+
+    #[test]
+    fn hardware_page_names_devices_and_hides_internal_disks() {
+        // fixture-driven: the naming and hiding rules must hold on any box,
+        // including headless CI runners with no inventoried disks at all
+        let inv = hwinv::fixture_inventory();
+        let usage = [hwinv::DiskUsage {
+            kern: "testdisk0".into(),
+            mount: "/".into(),
+            total: 1000,
+            used: 400,
+        }];
+        let ctx = egui::Context::default();
+        let mut app = hw_app(&ctx);
+        let mut rich = app.gui.hw.clone().unwrap();
+        // the fixture drive plus an internal OEM disk the inventory never
+        // named — the storage section must show the first, hide the second
+        rich.disks = vec![
+            crate::hw::DiskStat {
+                name: "testdisk0".into(),
+                reads: 1,
+                writes: 1,
+                total_read: 1,
+                total_write: 1,
+                ms_weighted: 0,
+                uptime: 3600.0,
+                temp_c: Some(41.0),
+                read_bps: 0.0,
+                write_bps: 0.0,
+            },
+            crate::hw::DiskStat {
+                name: "sda".into(),
+                reads: 1,
+                writes: 1,
+                total_read: 1,
+                total_write: 1,
+                ms_weighted: 0,
+                uptime: 3600.0,
+                temp_c: None,
+                read_bps: 0.0,
+                write_bps: 0.0,
+            },
+        ];
+        app.gui.hw = Some(rich);
+        let all = paint_hw_page(&ctx, &mut app, &inv, &usage);
+        // retired sections must be gone
         assert!(!all.contains("Machine"), "machine section still present");
         assert!(
             !all.contains("Per-core load"),
             "per-core section still present"
         );
-        // a headless runner (CI) has no real disks behind /sys/block: the
-        // inventory is empty and there is nothing to name — skip
-        if crate::hw_inventory::INVENTORY
-            .devices
-            .iter()
-            .all(|d| d.kind != "disk")
-        {
-            eprintln!("skip: no physical disks inventoried on this box");
-            return;
-        }
-        // the CPU card must name the actual processor and show its temperature
-        let cpu = crate::hw_inventory::INVENTORY.cpu.clone();
-        assert!(!cpu.is_empty(), "inventory has no cpu name on this box");
-        assert!(all.contains(&cpu), "cpu card never names {cpu}");
-        let temp_line = app
-            .gui
-            .hw
-            .as_ref()
-            .and_then(|h| h.cpu_temp_c.or(h.temp_c))
-            .map(|t| format!("{} °C", temp_str(t)));
-        if let Some(tl) = temp_line {
-            assert!(
-                all.contains(&tl),
-                "cpu card never shows the cpu temperature"
-            );
-        }
+        // the CPU card names the inventory's processor
+        assert!(all.contains(&inv.cpu), "cpu card never names {}", inv.cpu);
+        // the fixture drive renders its card under its inventory name
+        // ("Test Disk"), never the bare kernel name
+        assert!(all.contains("Test Disk"), "fixture disk card never named");
+        assert!(
+            !all.split('\n').any(|t| t.trim() == "testdisk0"),
+            "kernel name leaked as a card title"
+        );
         // internal sda gets no storage card of its own
         assert!(
             !all.split('\n').any(|t| t.trim() == "sda"),
@@ -11029,54 +11061,41 @@ mod hw_titles_tests {
 
     #[test]
     fn storage_cards_show_capacity_bars_and_swap_card_stands_alone() {
+        // fixture usage: one filesystem on the fixture drive, so the bar
+        // and its mount label render deterministically on any runner
+        let inv = hwinv::fixture_inventory();
+        let usage = [hwinv::DiskUsage {
+            kern: "testdisk0".into(),
+            mount: "/data".into(),
+            total: 1000,
+            used: 400,
+        }];
         let ctx = egui::Context::default();
-        let (tx, rx) = mpsc::unbounded_channel();
-        let rt = Arc::new(
-            tokio::runtime::Builder::new_current_thread()
-                .build()
-                .unwrap(),
+        let mut app = hw_app(&ctx);
+        let mut rich = app.gui.hw.clone().unwrap();
+        rich.disks = vec![crate::hw::DiskStat {
+            name: "testdisk0".into(),
+            reads: 1,
+            writes: 1,
+            total_read: 1,
+            total_write: 1,
+            ms_weighted: 0,
+            uptime: 3600.0,
+            temp_c: None,
+            read_bps: 0.0,
+            write_bps: 0.0,
+        }];
+        app.gui.hw = Some(rich);
+        let all = paint_hw_page(&ctx, &mut app, &inv, &usage);
+        // the fixture drive's card carries its mounted filesystem's usage
+        assert!(
+            all.contains("/data"),
+            "storage card never shows /data usage"
         );
-        let mut app = SysKamlingApp::new_offscreen(&ctx, tx, rx, rt);
-        app.gui.tab = Tab::Hardware;
-        app.sample_hardware();
-        app.sample_hardware();
-        let mut raw = egui::RawInput::default();
-        raw.screen_rect = Some(egui::Rect::from_min_size(
-            egui::Pos2::ZERO,
-            egui::Vec2::new(1200.0, 900.0),
-        ));
-        let mut all = String::new();
-        for _ in 0..3 {
-            ctx.begin_pass(raw.clone());
-            egui::CentralPanel::default().show(&ctx, |ui| {
-                if app.gui.tab == Tab::Hardware {
-                    app.hardware_view(ui)
-                }
-            });
-            let out = ctx.end_pass();
-            all = out
-                .shapes
-                .iter()
-                .filter_map(|cs| match &cs.shape {
-                    egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
-                    _ => None,
-                })
-                .collect::<Vec<String>>()
-                .join("\n");
-        }
-        // every inventoried disk card carries its mounted filesystems' usage
-        let usage = crate::hw_inventory::disk_usage();
-        if usage.is_empty() {
-            eprintln!("skip: no inventoried filesystems on this box");
-            return;
-        }
-        for u in &usage {
-            assert!(
-                all.contains(&u.mount),
-                "storage card never shows {} usage",
-                u.mount
-            );
-        }
+        assert!(
+            all.contains("400 B of 1000 B"),
+            "capacity bar never shows its fill"
+        );
         // the retired bits stay retired
         assert!(!all.contains("Active"), "utilization bar still rendered");
         assert!(

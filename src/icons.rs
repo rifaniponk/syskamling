@@ -268,6 +268,206 @@ fn premultiply(px: &[u8]) -> Vec<u8> {
 #[derive(Clone, Copy)]
 struct Rgba(f32, f32, f32, f32);
 
+/// `url(#id)` -> the gradient's representative colour.
+fn gradient_ref(v: &str, grads: &HashMap<String, Rgba>) -> Option<Rgba> {
+    let id = v.trim().strip_prefix("url(#")?.strip_suffix(')')?;
+    grads.get(id).copied()
+}
+
+/// Gradient coordinate spans: id -> (x0, y0, x1, y1) in userSpaceOnUse
+/// coordinates, following xlink:href inheritance. Those let a fit matrix be
+/// derived for shapes drawn in the gradient's space (kate-style icons).
+fn gradient_spans(svg: &str) -> HashMap<String, (f32, f32, f32, f32)> {
+    let mut raw: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let bytes: Vec<char> = svg.chars().collect();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == '<'
+            && i + 1 < bytes.len()
+            && bytes[i + 1] != '!'
+            && bytes[i + 1] != '?'
+            && bytes[i + 1] != '/'
+        {
+            let end = i + 1;
+            let gt = match bytes[end..].iter().position(|c| *c == '>') {
+                Some(p) => p + end,
+                None => break,
+            };
+            let inner: String = bytes[end..gt].iter().collect();
+            let name: String = inner
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            if name == "linearGradient" || name == "radialGradient" {
+                let rest: String = inner.chars().skip(name.len()).collect();
+                if let (Some(id), Some(a)) = (get(&attrs(&rest), "id"), Some(attrs(&rest))) {
+                    raw.insert(id.to_string(), a);
+                }
+            }
+            i = gt + 1;
+        } else {
+            i += 1;
+        }
+    }
+    let mut out = HashMap::new();
+    for id in raw.keys().cloned() {
+        // merge own attrs over the referenced gradient's, up to a short chain
+        let mut merged: Vec<(String, String)> = Vec::new();
+        let mut seen: Vec<String> = Vec::new();
+        let mut cur = id.clone();
+        for _ in 0..4 {
+            let Some(a) = raw.get(&cur) else { break };
+            for (k, v) in a {
+                if !k.starts_with("id") && !merged.iter().any(|(mk, _)| mk == k) {
+                    merged.push((k.clone(), v.clone()));
+                }
+            }
+            let href = get(a, "xlink:href")
+                .or_else(|| get(a, "href"))
+                .and_then(|h| h.strip_prefix('#').map(str::to_string));
+            match href {
+                Some(h) if !seen.contains(&h) => {
+                    seen.push(cur);
+                    cur = h;
+                }
+                _ => break,
+            }
+        }
+        if get(&merged, "gradientUnits") != Some("userSpaceOnUse") {
+            continue;
+        }
+        let coords = match (
+            fnum(&merged, "x1"),
+            fnum(&merged, "y1"),
+            fnum(&merged, "x2"),
+            fnum(&merged, "y2"),
+        ) {
+            (Some(x0), Some(y0), Some(x1), Some(y1)) => Some((x0, y0, x1, y1)),
+            _ => match (fnum(&merged, "cx"), fnum(&merged, "cy"), fnum(&merged, "r")) {
+                (Some(cx), Some(cy), Some(r)) => Some((cx - r, cy - r, cx + r, cy + r)),
+                _ => None,
+            },
+        };
+        if let Some((x0, y0, x1, y1)) = coords {
+            let (lo_x, hi_x) = if x0 <= x1 { (x0, x1) } else { (x1, x0) };
+            let (lo_y, hi_y) = if y0 <= y1 { (y0, y1) } else { (y1, y0) };
+            out.insert(id, (lo_x, lo_y, hi_x, hi_y));
+        }
+    }
+    out
+}
+
+/// `transform="matrix(a b c d e f)"` -> (a, d, e, f) for axis-aligned scales.
+fn matrix_adef(rest: &str) -> Option<(f32, f32, f32, f32)> {
+    let at = attrs(rest);
+    let t = get(&at, "transform")?;
+    let m = t.find("matrix(")? + 7;
+    let nums: Vec<f32> = t[m..]
+        .split([' ', ','])
+        .filter_map(|p| p.trim().trim_end_matches(')').parse().ok())
+        .collect();
+    (nums.len() >= 6).then(|| (nums[0], nums[3], nums[4], nums[5]))
+}
+
+/// kate-style icons draw their art in the coordinate space of a named
+/// gradient and only fit the viewBox through nested
+/// `<g transform="matrix(…)">` wrappers. When the raw geometry lands
+/// outside the viewBox, derive the missing matrix from the shape's fill
+/// gradient span (start/end along x) and the viewBox extent.
+fn fit_matrix_for(
+    fill_ref: &str,
+    spans: &HashMap<String, (f32, f32, f32, f32)>,
+    vb_x: f32,
+    vb_y: f32,
+    vb_w: f32,
+    vb_h: f32,
+) -> Option<(f32, f32, f32, f32)> {
+    let id = fill_ref.trim().strip_prefix("url(#")?.strip_suffix(')')?;
+    let (x0, y0, x1, y1) = *spans.get(id)?;
+    if x1 - x0 <= 0.0 || y1 - y0 <= 0.0 {
+        return None;
+    }
+    let a = vb_w / (x1 - x0);
+    let d = vb_h / (y1 - y0);
+    Some((a, d, vb_x - x0 * a, vb_y - y0 * d))
+}
+
+/// Scan `<linearGradient>`/`<radialGradient>` defs for their stop colours;
+/// each gradient is represented by the average of its opaque stops.
+fn gradient_fills(svg: &str) -> HashMap<String, Rgba> {
+    let mut out: HashMap<String, Vec<Rgba>> = HashMap::new();
+    let bytes: Vec<char> = svg.chars().collect();
+    let mut i = 0;
+    // current gradient id while walking, so <stop> children see their parent
+    let mut cur: Option<String> = None;
+    while i < bytes.len() {
+        if bytes[i] == '<' && i + 1 < bytes.len() && bytes[i + 1] != '!' && bytes[i + 1] != '?' {
+            let end = i + 1;
+            let gt = match bytes[end..].iter().position(|c| *c == '>') {
+                Some(p) => p + end,
+                None => break,
+            };
+            let inner: String = bytes[end..gt].iter().collect();
+            let closing = inner.starts_with('/');
+            // `<g/>` closes itself; `<g ...>` does not
+            let selfclose = inner.ends_with('/') && !inner.ends_with("=\"/");
+            let name: String = inner
+                .chars()
+                .skip(if closing { 1 } else { 0 })
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                .collect();
+            let rest: String = inner
+                .chars()
+                .skip(if closing { 1 } else { 0 } + name.len())
+                .collect();
+            let a = attrs(&rest);
+            match name.as_str() {
+                "linearGradient" | "radialGradient" => {
+                    if closing || selfclose {
+                        cur = None;
+                    } else {
+                        cur = get(&a, "id").filter(|s| !s.is_empty()).map(str::to_string);
+                    }
+                }
+                "stop" => {
+                    if let Some(id) = &cur {
+                        let col = get(&a, "stop-color").and_then(parse_color).or_else(|| {
+                            get(&a, "style").and_then(|st| {
+                                st.split(';').find_map(|p| {
+                                    parse_color(p.trim().strip_prefix("stop-color:")?)
+                                })
+                            })
+                        });
+                        let opaque = get(&a, "stop-opacity")
+                            .and_then(|v| v.parse::<f32>().ok())
+                            .unwrap_or(1.0)
+                            > 0.0;
+                        if let (Some(c), true) = (col, opaque) {
+                            out.entry(id.clone()).or_default().push(c);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            i = gt + 1;
+        } else {
+            i += 1;
+        }
+    }
+    out.into_iter()
+        .map(|(id, stops)| {
+            let n = stops.len() as f32;
+            let (mut r, mut g, mut b) = (0.0f32, 0.0f32, 0.0f32);
+            for c in &stops {
+                r += c.0;
+                g += c.1;
+                b += c.2;
+            }
+            (id, Rgba(r / n, g / n, b / n, 1.0))
+        })
+        .collect()
+}
+
 fn parse_color(s: &str) -> Option<Rgba> {
     let s = s.trim();
     if let Some(hex) = s.strip_prefix('#') {
@@ -325,6 +525,10 @@ fn parse_color(s: &str) -> Option<Rgba> {
 
 /// One shape in scanline order: a list of spans per y-band is computed at
 /// raster time; here we keep the primitives.
+/// Axis-aligned transform inherited from ancestor <g transform="matrix(…)">.
+#[derive(Clone, Copy)]
+struct Xf(f32, f32, f32, f32); // a, d, e, f
+
 enum Shape {
     Rect {
         x: f32,
@@ -334,6 +538,7 @@ enum Shape {
         rx: f32,
         fill: Rgba,
         op: f32,
+        xf: Option<Xf>,
     },
     Ellipse {
         cx: f32,
@@ -342,6 +547,7 @@ enum Shape {
         ry: f32,
         fill: Rgba,
         op: f32,
+        xf: Option<Xf>,
     },
     Poly {
         pts: Vec<(f32, f32)>,
@@ -349,6 +555,7 @@ enum Shape {
         fill: Option<Rgba>,
         stroke: Option<(f32, Rgba)>,
         op: f32,
+        xf: Option<Xf>,
     },
 }
 
@@ -393,13 +600,17 @@ fn fnum(a: &[(String, String)], k: &str) -> Option<f32> {
     get(a, k).and_then(|v| v.trim().trim_end_matches("px").trim().parse().ok())
 }
 
-/// CSS-ish fill resolution: fill attr, then style="fill:…".
-fn fill_of(a: &[(String, String)]) -> Option<Rgba> {
+/// CSS-ish fill resolution: fill attr (solid or url(#gradient)), then
+/// style="fill:…".
+fn fill_of(a: &[(String, String)], grads: &HashMap<String, Rgba>) -> Option<Rgba> {
     if let Some(v) = get(a, "fill") {
         if v.trim() == "none" {
             return None;
         }
         if let Some(c) = parse_color(v) {
+            return Some(c);
+        }
+        if let Some(c) = gradient_ref(v, grads) {
             return Some(c);
         }
     }
@@ -696,6 +907,9 @@ pub fn raster_svg(svg: &str, target: u32) -> Option<IconRgba> {
     {
         return None;
     }
+    // linearGradient ids -> mid stop colour: fill="url(#id)" is flattened to
+    // a representative solid so gradient-heavy icons (kate…) still rasterize
+    let grads = gradient_fills(svg);
     // viewBox
     let open = svg.find("<svg")?;
     let open_end = svg[open..].find('>')? + open;
@@ -725,30 +939,49 @@ pub fn raster_svg(svg: &str, target: u32) -> Option<IconRgba> {
 
     // collect shapes
     let mut shapes: Vec<Shape> = Vec::new();
-    let tags: Vec<(String, String, bool)> = {
+    // (tag, attrs-text, self-closing, cumulative ancestor matrix (a,d,e,f))
+    type Tag = (String, String, bool, Option<(f32, f32, f32, f32)>);
+    let tags: Vec<Tag> = {
         let mut out = Vec::new();
         let bytes: Vec<char> = svg.chars().collect();
         let mut i = 0;
+        // stack of cumulative matrices from ancestor <g transform=…>
+        let mut stack: Vec<(f32, f32, f32, f32)> = Vec::new();
         while i < bytes.len() {
-            if bytes[i] == '<'
-                && i + 1 < bytes.len()
-                && bytes[i + 1] != '!'
-                && bytes[i + 1] != '?'
-                && bytes[i + 1] != '/'
+            if bytes[i] == '<' && i + 1 < bytes.len() && bytes[i + 1] != '!' && bytes[i + 1] != '?'
             {
-                let end = i + 1;
+                let closing = bytes[i + 1] == '/';
+                let end = i + if closing { 2 } else { 1 };
                 let gt = match bytes[end..].iter().position(|c| *c == '>') {
                     Some(p) => p + end,
                     None => break,
                 };
                 let inner: String = bytes[end..gt].iter().collect();
-                let selfclose = inner.ends_with('/');
+                let selfclose = !closing && inner.ends_with('/');
                 let name: String = inner
                     .chars()
                     .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
                     .collect();
                 let rest: String = inner.chars().skip(name.len()).collect();
-                out.push((name, rest, selfclose));
+                if closing {
+                    stack.pop();
+                } else {
+                    if matches!(name.as_str(), "g" | "svg") {
+                        if let Some((a, d, e, f)) = matrix_adef(&rest) {
+                            let (pa, pd, pe, pf) =
+                                stack.last().copied().unwrap_or((1.0, 1.0, 0.0, 0.0));
+                            stack.push((pa * a, pd * d, pe * a + e, pf * d + f));
+                        } else if let Some(&top) = stack.last() {
+                            // child <g> without its own transform: inherit
+                            stack.push(top);
+                        }
+                    }
+                    let m = stack.last().copied();
+                    if selfclose && matches!(name.as_str(), "g" | "svg") {
+                        stack.pop();
+                    }
+                    out.push((name, rest, selfclose, m));
+                }
                 i = gt + 1;
             } else {
                 i += 1;
@@ -756,8 +989,18 @@ pub fn raster_svg(svg: &str, target: u32) -> Option<IconRgba> {
         }
         out
     };
-    for (name, rest, _sc) in tags {
+    let spans = gradient_spans(svg);
+    for (name, rest, _sc, m) in tags {
         let a = attrs(&rest);
+        // the cumulative <g> matrix, or one derived from the fill gradient's
+        // userSpaceOnUse span when the raw geometry lands outside the viewBox
+        let xf = |fill_attr: Option<&str>| -> Option<Xf> {
+            if let Some((sa, sd, se, sf)) = m {
+                return Some(Xf(sa, sd, se, sf));
+            }
+            let f = fill_attr?;
+            fit_matrix_for(f, &spans, vb_x, vb_y, vb_w, vb_h).map(|(a, d, e, f)| Xf(a, d, e, f))
+        };
         let op = opacity_of(&a);
         let stroke: Option<(f32, Rgba)> = get(&a, "stroke").and_then(parse_color).map(|c| {
             (
@@ -769,9 +1012,11 @@ pub fn raster_svg(svg: &str, target: u32) -> Option<IconRgba> {
         });
         match name.as_str() {
             "rect" => {
-                let fill = fill_of(&a);
+                let fill_attr = get(&a, "fill");
+                let fill = fill_of(&a, &grads);
                 if let Some(f) = fill {
                     shapes.push(Shape::Rect {
+                        xf: xf(fill_attr),
                         x: fnum(&a, "x").unwrap_or(0.0),
                         y: fnum(&a, "y").unwrap_or(0.0),
                         w: match fnum(&a, "width") {
@@ -789,13 +1034,15 @@ pub fn raster_svg(svg: &str, target: u32) -> Option<IconRgba> {
                 }
             }
             "circle" => {
-                let fill = fill_of(&a);
+                let fill_attr = get(&a, "fill");
+                let fill = fill_of(&a, &grads);
                 if let Some(f) = fill {
                     let r = match fnum(&a, "r") {
                         Some(v) => v,
                         None => continue,
                     };
                     shapes.push(Shape::Ellipse {
+                        xf: xf(fill_attr),
                         cx: fnum(&a, "cx").unwrap_or(0.0),
                         cy: fnum(&a, "cy").unwrap_or(0.0),
                         rx: r,
@@ -806,13 +1053,15 @@ pub fn raster_svg(svg: &str, target: u32) -> Option<IconRgba> {
                 }
             }
             "ellipse" => {
-                let fill = fill_of(&a);
+                let fill_attr = get(&a, "fill");
+                let fill = fill_of(&a, &grads);
                 if let Some(f) = fill {
                     let (rx, ry) = match (fnum(&a, "rx"), fnum(&a, "ry")) {
                         (Some(x), Some(y)) => (x, y),
                         _ => continue,
                     };
                     shapes.push(Shape::Ellipse {
+                        xf: xf(fill_attr),
                         cx: fnum(&a, "cx").unwrap_or(0.0),
                         cy: fnum(&a, "cy").unwrap_or(0.0),
                         rx,
@@ -823,7 +1072,8 @@ pub fn raster_svg(svg: &str, target: u32) -> Option<IconRgba> {
                 }
             }
             "polygon" | "polyline" | "path" => {
-                let fill = fill_of(&a);
+                let fill_attr = get(&a, "fill");
+                let fill = fill_of(&a, &grads);
                 let pts = if name == "path" {
                     get(&a, "d").map(flatten).unwrap_or_default()
                 } else {
@@ -851,6 +1101,7 @@ pub fn raster_svg(svg: &str, target: u32) -> Option<IconRgba> {
                         fill,
                         stroke,
                         op,
+                        xf: xf(fill_attr),
                     });
                 }
             }
@@ -873,10 +1124,17 @@ pub fn raster_svg(svg: &str, target: u32) -> Option<IconRgba> {
                 rx,
                 fill,
                 op,
+                xf,
             } => {
-                let (x0, y0) = tf(*x, *y);
-                let (x1, y1) = tf(*x + w, *y + h);
-                let r = rx * scale;
+                let (x0, y0) = tf(
+                    xf.map(|Xf(a, _, e, _)| x * a + e).unwrap_or(*x),
+                    xf.map(|Xf(_, d, _, f)| y * d + f).unwrap_or(*y),
+                );
+                let (x1, y1) = tf(
+                    xf.map(|Xf(a, _, e, _)| (x + w) * a + e).unwrap_or(*x + w),
+                    xf.map(|Xf(_, d, _, f)| (y + h) * d + f).unwrap_or(*y + h),
+                );
+                let r = rx * scale * xf.map(|Xf(a, _, _, _)| a).unwrap_or(1.0);
                 for py in (y0.floor() as i32).max(0)..(y1.ceil() as i32).min(n as i32) {
                     for px in (x0.floor() as i32).max(0)..(x1.ceil() as i32).min(n as i32) {
                         let (fx, fy) = (px as f32 + 0.5, py as f32 + 0.5);
@@ -912,9 +1170,14 @@ pub fn raster_svg(svg: &str, target: u32) -> Option<IconRgba> {
                 ry,
                 fill,
                 op,
+                xf,
             } => {
-                let (ccx, ccy) = tf(*cx, *cy);
-                let (rx, ry) = (*rx * scale, *ry * scale);
+                let (sa, sd) = xf.map(|Xf(a, d, _, _)| (a, d)).unwrap_or((1.0, 1.0));
+                let (ccx, ccy) = tf(
+                    xf.map(|Xf(a, _, e, _)| cx * a + e).unwrap_or(*cx),
+                    xf.map(|Xf(_, d, _, f)| cy * d + f).unwrap_or(*cy),
+                );
+                let (rx, ry) = (*rx * sa * scale, *ry * sd * scale);
                 for py in
                     ((ccy - ry).floor() as i32).max(0)..((ccy + ry).ceil() as i32).min(n as i32)
                 {
@@ -935,8 +1198,17 @@ pub fn raster_svg(svg: &str, target: u32) -> Option<IconRgba> {
                 fill,
                 stroke,
                 op,
+                xf,
             } => {
-                let t: Vec<(f32, f32)> = pts.iter().map(|(x, y)| tf(*x, *y)).collect();
+                let t: Vec<(f32, f32)> = pts
+                    .iter()
+                    .map(|(x, y)| {
+                        tf(
+                            xf.map(|Xf(a, _, e, _)| x * a + e).unwrap_or(*x),
+                            xf.map(|Xf(_, d, _, f)| y * d + f).unwrap_or(*y),
+                        )
+                    })
+                    .collect();
                 if let Some(f) = fill {
                     if *closed {
                         let mut ys: Vec<f32> = t.iter().map(|p| p.1).collect();
@@ -1231,5 +1503,50 @@ mod tests {
         for n in &ok {
             assert!(tint_cached(n).is_some(), "{n} decoded but has no tint");
         }
+    }
+
+    #[test]
+    fn raster_svg_resolves_gradient_fills_and_g_transforms() {
+        // gradient fills flatten to their opaque-stop average…
+        let svg = r##"<svg viewBox="0 0 32 32">
+            <linearGradient id="q"><stop stop-color="#2a7fff" offset="0"/><stop stop-color="#0cf" offset="1"/></linearGradient>
+            <circle cx="16" cy="16" r="10" fill="url(#q)"/></svg>"##;
+        let img = raster_svg(svg, 32).expect("gradient circle rasterizes");
+        let solid = img
+            .px
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| p[3] > 200)
+            .count();
+        assert!(solid > 200, "gradient circle painted {solid} px");
+        // …and art drawn in a gradient's userSpaceOnUse space outside the
+        // viewBox (kate's layout) still lands inside via a derived matrix
+        let katey = r##"<svg viewBox="0 0 48 48">
+            <linearGradient id="g" x1="100" x2="200" y1="100" y2="200" gradientUnits="userSpaceOnUse">
+                <stop stop-color="#f00" offset="0"/><stop stop-color="#00f" offset="1"/></linearGradient>
+            <circle cx="150" cy="150" r="40" fill="url(#g)"/></svg>"##;
+        let img = raster_svg(katey, 48).expect("off-viewBox art rasterizes");
+        let solid = img
+            .px
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| p[3] > 200)
+            .count();
+        assert!(solid > 1000, "off-viewBox art painted {solid} px");
+        // an explicit <g transform="matrix(…)"> is honoured too
+        let gsvg = r##"<svg viewBox="0 0 48 48">
+            <g transform="matrix(0.5 0 0 0.5 0 0)">
+                <rect x="0" y="0" width="96" height="96" fill="#0f0"/></g></svg>"##;
+        let img = raster_svg(gsvg, 48).expect("g-transformed rect rasterizes");
+        let solid = img
+            .px
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| p[3] > 200)
+            .count();
+        assert!(solid > 2000, "g-scaled rect painted {solid} px");
     }
 }
