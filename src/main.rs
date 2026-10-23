@@ -71,7 +71,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if v.is_empty() { "OK".to_string() } else { v }
         ),
         Err(e) => {
-            eprintln!("warning: cannot reach Docker daemon at {}: {}", cli.socket, e);
+            eprintln!(
+                "warning: cannot reach Docker daemon at {}: {}",
+                cli.socket, e
+            );
         }
     }
 

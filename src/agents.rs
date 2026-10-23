@@ -124,54 +124,222 @@ use Match::*;
 /// generic ones (e.g. `code` with the Copilot extension before bare `code`).
 const SIGNATURES: &[Sig] = &[
     // --- terminal / CLI agents -------------------------------------------
-    Sig { agent: "Claude Code", vendor: "Anthropic", need: None, reject: None, m: Exe("claude") },
-    Sig { agent: "Codex CLI", vendor: "OpenAI", need: None, reject: None, m: Exe("codex") },
+    Sig {
+        agent: "Claude Code",
+        vendor: "Anthropic",
+        need: None,
+        reject: None,
+        m: Exe("claude"),
+    },
+    Sig {
+        agent: "Codex CLI",
+        vendor: "OpenAI",
+        need: None,
+        reject: None,
+        m: Exe("codex"),
+    },
     // Codex desktop (ships as a ChatGPT-branded Electron shell): group the
     // GUI main processes only; renderers/gpu/zygotes are noise.
-    Sig { agent: "Codex Desktop", vendor: "OpenAI", need: Some("/.config/codex"), reject: Some("--type="), m: Exe("chatgpt") },
-    Sig { agent: "Gemini CLI", vendor: "Google", need: None, reject: None, m: Exe("gemini") },
-    Sig { agent: "OpenCode", vendor: "SST", need: None, reject: None, m: Exe("opencode") },
-    Sig { agent: "Aider", vendor: "Aider", need: None, reject: None, m: ArgToken("aider") },
-    Sig { agent: "Aider", vendor: "Aider", need: None, reject: None, m: ArgContains("/aider/") },
-    Sig { agent: "Goose", vendor: "Block", need: None, reject: None, m: Exe("goose") },
-    Sig { agent: "Amp", vendor: "Sourcegraph", need: None, reject: None, m: Exe("amp") },
-    Sig { agent: "OpenClaw", vendor: "OpenClaw", need: None, reject: None, m: Exe("openclaw") },
-    Sig { agent: "Hermes", vendor: "Nous", need: None, reject: None, m: ExePrefix("hermes") },
+    Sig {
+        agent: "Codex Desktop",
+        vendor: "OpenAI",
+        need: Some("/.config/codex"),
+        reject: Some("--type="),
+        m: Exe("chatgpt"),
+    },
+    Sig {
+        agent: "Gemini CLI",
+        vendor: "Google",
+        need: None,
+        reject: None,
+        m: Exe("gemini"),
+    },
+    Sig {
+        agent: "OpenCode",
+        vendor: "SST",
+        need: None,
+        reject: None,
+        m: Exe("opencode"),
+    },
+    Sig {
+        agent: "Aider",
+        vendor: "Aider",
+        need: None,
+        reject: None,
+        m: ArgToken("aider"),
+    },
+    Sig {
+        agent: "Aider",
+        vendor: "Aider",
+        need: None,
+        reject: None,
+        m: ArgContains("/aider/"),
+    },
+    Sig {
+        agent: "Goose",
+        vendor: "Block",
+        need: None,
+        reject: None,
+        m: Exe("goose"),
+    },
+    Sig {
+        agent: "Amp",
+        vendor: "Sourcegraph",
+        need: None,
+        reject: None,
+        m: Exe("amp"),
+    },
+    Sig {
+        agent: "OpenClaw",
+        vendor: "OpenClaw",
+        need: None,
+        reject: None,
+        m: Exe("openclaw"),
+    },
+    Sig {
+        agent: "Hermes",
+        vendor: "Nous",
+        need: None,
+        reject: None,
+        m: ExePrefix("hermes"),
+    },
     // omp and its fork names; `omp` is also a common word, so argv[0]/exe
     // basename only — never a substring match.
-    Sig { agent: "omp", vendor: "omp", need: None, reject: None, m: Exe("omp") },
+    Sig {
+        agent: "omp",
+        vendor: "omp",
+        need: None,
+        reject: None,
+        m: Exe("omp"),
+    },
     // --- agent hosts / gateways ------------------------------------------
-    Sig { agent: "Agent Client Protocol", vendor: "ACP host", need: None, reject: None, m: ArgToken("agent-client-protocol") },
-    Sig { agent: "MCP server", vendor: "Model Context Protocol", need: None, reject: None, m: ArgContains("mcp-server") },
-    Sig { agent: "MCP server", vendor: "Model Context Protocol", need: None, reject: None, m: ArgPrefix("mcp-") },
+    Sig {
+        agent: "Agent Client Protocol",
+        vendor: "ACP host",
+        need: None,
+        reject: None,
+        m: ArgToken("agent-client-protocol"),
+    },
+    Sig {
+        agent: "MCP server",
+        vendor: "Model Context Protocol",
+        need: None,
+        reject: None,
+        m: ArgContains("mcp-server"),
+    },
+    Sig {
+        agent: "MCP server",
+        vendor: "Model Context Protocol",
+        need: None,
+        reject: None,
+        m: ArgPrefix("mcp-"),
+    },
     // --- IDE-based agents -------------------------------------------------
     // Cursor: binary is `cursor`; also catch extension-host helpers.
-    Sig { agent: "Cursor", vendor: "Anysphere", need: None, reject: Some("--type="), m: Exe("cursor") },
+    Sig {
+        agent: "Cursor",
+        vendor: "Anysphere",
+        need: None,
+        reject: Some("--type="),
+        m: Exe("cursor"),
+    },
     // Windsurf (Codeium): binary `codeium` or Code - OSS fork paths.
-    Sig { agent: "Windsurf", vendor: "Codeium", need: None, reject: Some("--type="), m: Exe("codeium") },
-    Sig { agent: "Windsurf", vendor: "Codeium", need: None, reject: Some("--type="), m: Exe("windsurf") },
+    Sig {
+        agent: "Windsurf",
+        vendor: "Codeium",
+        need: None,
+        reject: Some("--type="),
+        m: Exe("codeium"),
+    },
+    Sig {
+        agent: "Windsurf",
+        vendor: "Codeium",
+        need: None,
+        reject: Some("--type="),
+        m: Exe("windsurf"),
+    },
     // VS Code Copilot agent: `code` process whose extensions mention copilot,
     // or the standalone copilot-runtime / copilot-language-server binaries.
-    Sig { agent: "Copilot", vendor: "GitHub/Microsoft", need: Some("copilot"), reject: Some("--type="), m: Exe("code") },
+    Sig {
+        agent: "Copilot",
+        vendor: "GitHub/Microsoft",
+        need: Some("copilot"),
+        reject: Some("--type="),
+        m: Exe("code"),
+    },
     // copilot-runtime / copilot-language-server binaries; reject the VS Code
     // main process (its argv mentions copilot via extensions) so it groups
     // with the `code` rule above instead of forming its own session.
-    Sig { agent: "Copilot", vendor: "GitHub/Microsoft", need: None, reject: Some("--user-data-dir"), m: ExePrefix("copilot") },
-    Sig { agent: "Copilot", vendor: "GitHub/Microsoft", need: Some("copilot"), reject: None, m: ArgContains("copilot") },
+    Sig {
+        agent: "Copilot",
+        vendor: "GitHub/Microsoft",
+        need: None,
+        reject: Some("--user-data-dir"),
+        m: ExePrefix("copilot"),
+    },
+    Sig {
+        agent: "Copilot",
+        vendor: "GitHub/Microsoft",
+        need: Some("copilot"),
+        reject: None,
+        m: ArgContains("copilot"),
+    },
     // JetBrains AI Assistant / Junie: idea processes with the ai extension.
-    Sig { agent: "JetBrains AI", vendor: "JetBrains", need: Some("aiassistant"), reject: Some("--type="), m: ExePrefix("idea") },
-    Sig { agent: "JetBrains AI", vendor: "JetBrains", need: Some("junie"), reject: Some("--type="), m: ExePrefix("idea") },
+    Sig {
+        agent: "JetBrains AI",
+        vendor: "JetBrains",
+        need: Some("aiassistant"),
+        reject: Some("--type="),
+        m: ExePrefix("idea"),
+    },
+    Sig {
+        agent: "JetBrains AI",
+        vendor: "JetBrains",
+        need: Some("junie"),
+        reject: Some("--type="),
+        m: ExePrefix("idea"),
+    },
     // Zed with agent panel: zed binary plus assistant token in args.
-    Sig { agent: "Zed AI", vendor: "Zed", need: Some("assistant"), reject: None, m: Exe("zed") },
+    Sig {
+        agent: "Zed AI",
+        vendor: "Zed",
+        need: Some("assistant"),
+        reject: None,
+        m: Exe("zed"),
+    },
     // --- local model runtimes that serve agents ---------------------------
     // ollama serve is the runtime; `ollama run` is the client side of a
     // session, so any ollama process counts.
-    Sig { agent: "ollama", vendor: "ollama", need: None, reject: None, m: Exe("ollama") },
-    Sig { agent: "ollama", vendor: "ollama", need: None, reject: None, m: ArgToken("ollama") },
-    Sig { agent: "llama.cpp server", vendor: "llama.cpp", need: None, reject: None, m: Exe("llama-server") },
+    Sig {
+        agent: "ollama",
+        vendor: "ollama",
+        need: None,
+        reject: None,
+        m: Exe("ollama"),
+    },
+    Sig {
+        agent: "ollama",
+        vendor: "ollama",
+        need: None,
+        reject: None,
+        m: ArgToken("ollama"),
+    },
+    Sig {
+        agent: "llama.cpp server",
+        vendor: "llama.cpp",
+        need: None,
+        reject: None,
+        m: Exe("llama-server"),
+    },
     // vLLM runs as `python -m vllm...` or inside a venv: match any path
     // component or module prefix, not a bare argv token.
-    Sig { agent: "vLLM", vendor: "vLLM", need: None, reject: None, m: ArgContains("vllm") },
+    Sig {
+        agent: "vLLM",
+        vendor: "vLLM",
+        need: None,
+        reject: None,
+        m: ArgContains("vllm"),
+    },
 ];
 
 /// Raw per-process hit before grouping.
@@ -226,7 +394,10 @@ impl AgentScanner {
         let btime = wall_now_secs();
         let ticks = clock_ticks();
         let now = Instant::now();
-        let elapsed = self.prev_at.map(|t| now.duration_since(t)).unwrap_or(Duration::ZERO);
+        let elapsed = self
+            .prev_at
+            .map(|t| now.duration_since(t))
+            .unwrap_or(Duration::ZERO);
 
         let mut hits: Vec<Hit> = Vec::new();
         // every process's parent, so hits can be grouped by process tree
@@ -238,7 +409,9 @@ impl AgentScanner {
         for entry in dir.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            let Ok(pid): Result<u32, _> = name.parse() else { continue };
+            let Ok(pid): Result<u32, _> = name.parse() else {
+                continue;
+            };
 
             let stat = match fs::read(format!("/proc/{pid}/stat")) {
                 Ok(b) => String::from_utf8_lossy(&b).into_owned(),
@@ -246,7 +419,9 @@ impl AgentScanner {
             };
             // comm is in parentheses and may contain spaces/parens: find the
             // LAST ')' then parse the fields after it.
-            let Some(close) = stat.rfind(')') else { continue };
+            let Some(close) = stat.rfind(')') else {
+                continue;
+            };
             let rest: Vec<&str> = stat[close + 1..].split_whitespace().collect();
             // rest[0]=state rest[1]=ppid ... rest[11]=utime rest[12]=stime
             // rest[19]=starttime (fields 14,15,22 overall)
@@ -287,7 +462,9 @@ impl AgentScanner {
                 .ok()
                 .map(|p| p.to_string_lossy().into_owned());
 
-            let Some(sig) = classify(exe_base.as_deref(), &cmdline) else { continue };
+            let Some(sig) = classify(exe_base.as_deref(), &cmdline) else {
+                continue;
+            };
 
             let mem_bytes = read_rss_kb(pid).saturating_mul(1024);
             let joined = cmdline.join(" ");
@@ -300,7 +477,11 @@ impl AgentScanner {
                 cpu_ticks,
                 mem_bytes,
                 start_ticks,
-                cmdline: if joined.len() > 160 { joined.chars().take(157).collect::<String>() + "…" } else { joined },
+                cmdline: if joined.len() > 160 {
+                    joined.chars().take(157).collect::<String>() + "…"
+                } else {
+                    joined
+                },
             });
         }
 
@@ -348,7 +529,10 @@ impl AgentScanner {
                     cwd: lead.cwd.clone(),
                     lead_pid: lead.pid,
                     pids: hs.iter().map(|h| h.pid).collect(),
-                    cpu_pct: hs.iter().map(|h| pct.get(&h.pid).copied().unwrap_or(0.0)).sum(),
+                    cpu_pct: hs
+                        .iter()
+                        .map(|h| pct.get(&h.pid).copied().unwrap_or(0.0))
+                        .sum(),
                     mem_bytes: hs.iter().map(|h| h.mem_bytes).sum(),
                     started,
                     cmdline,
@@ -361,9 +545,7 @@ impl AgentScanner {
             s.activity = self.claude_activity(&s.pids, &mut seen);
         }
         self.transcripts.retain(|p, _| seen.contains(p));
-        sessions.sort_by(|a, b| {
-            a.agent.cmp(b.agent).then(a.lead_pid.cmp(&b.lead_pid))
-        });
+        sessions.sort_by(|a, b| a.agent.cmp(b.agent).then(a.lead_pid.cmp(&b.lead_pid)));
         sessions
     }
 
@@ -403,15 +585,20 @@ impl AgentScanner {
 
     /// Parsed transcript tail, cached until the file's size or mtime moves.
     fn transcript(&mut self, path: &Path, cwd: &str) -> Activity {
-        let Ok(md) = fs::metadata(path) else { return Activity::default() };
+        let Ok(md) = fs::metadata(path) else {
+            return Activity::default();
+        };
         let (len, mtime) = (md.len(), md.modified().unwrap_or(SystemTime::UNIX_EPOCH));
         if let Some((l, m, act)) = self.transcripts.get(path) {
             if *l == len && *m == mtime {
                 return act.clone();
             }
         }
-        let act = read_tail(path, len).map(|t| parse_transcript(&t, Some(cwd))).unwrap_or_default();
-        self.transcripts.insert(path.to_path_buf(), (len, mtime, act.clone()));
+        let act = read_tail(path, len)
+            .map(|t| parse_transcript(&t, Some(cwd)))
+            .unwrap_or_default();
+        self.transcripts
+            .insert(path.to_path_buf(), (len, mtime, act.clone()));
         act
     }
 }
@@ -445,7 +632,10 @@ fn session_root(
 /// falling back to a search of every project dir for the session id.
 fn transcript_path(projects: &Path, cwd: &str, id: &str) -> Option<PathBuf> {
     let file = format!("{id}.jsonl");
-    let enc: String = cwd.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    let enc: String = cwd
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
     let direct = projects.join(enc).join(&file);
     if direct.is_file() {
         return Some(direct);
@@ -479,12 +669,21 @@ pub fn parse_transcript(text: &str, cwd: Option<&str>) -> Activity {
     // tool_use id -> index in `steps`, to attach results to their call
     let mut calls: HashMap<String, usize> = HashMap::new();
     for line in text.lines() {
-        let Ok(d) = serde_json::from_str::<Value>(line) else { continue };
-        let at = d.get("timestamp").and_then(|v| v.as_str()).and_then(parse_iso);
+        let Ok(d) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let at = d
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .and_then(parse_iso);
         if at.is_some() {
             act.last_active = at.max(act.last_active);
         }
-        if let Some(b) = d.get("gitBranch").and_then(|v| v.as_str()).filter(|b| !b.is_empty()) {
+        if let Some(b) = d
+            .get("gitBranch")
+            .and_then(|v| v.as_str())
+            .filter(|b| !b.is_empty())
+        {
             act.branch = Some(b.to_string());
         }
         // subagent and harness-injected entries aren't the session's own steps
@@ -505,14 +704,18 @@ pub fn parse_transcript(text: &str, cwd: Option<&str>) -> Activity {
                 Some(Value::Array(items)) => {
                     for it in items {
                         match it.get("type").and_then(|v| v.as_str()) {
-                            Some("text") => {
-                                push_prompt(&mut steps, at, it.get("text").and_then(|v| v.as_str()).unwrap_or(""))
-                            }
+                            Some("text") => push_prompt(
+                                &mut steps,
+                                at,
+                                it.get("text").and_then(|v| v.as_str()).unwrap_or(""),
+                            ),
                             Some("tool_result") => {
-                                let id = it.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("");
+                                let id =
+                                    it.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("");
                                 if let Some(&i) = calls.get(id) {
                                     steps[i].pending = false;
-                                    steps[i].failed = it.get("is_error").and_then(|v| v.as_bool()) == Some(true);
+                                    steps[i].failed =
+                                        it.get("is_error").and_then(|v| v.as_bool()) == Some(true);
                                 }
                             }
                             _ => {}
@@ -523,12 +726,18 @@ pub fn parse_transcript(text: &str, cwd: Option<&str>) -> Activity {
             },
             Some("assistant") => {
                 let m = msg.unwrap_or(&Value::Null);
-                if let Some(model) = m.get("model").and_then(|v| v.as_str()).filter(|s| !s.starts_with('<')) {
+                if let Some(model) = m
+                    .get("model")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.starts_with('<'))
+                {
                     act.model = Some(model.to_string());
                 }
                 if let Some(u) = m.get("usage") {
                     let n = |k: &str| u.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
-                    let ctx = n("input_tokens") + n("cache_creation_input_tokens") + n("cache_read_input_tokens");
+                    let ctx = n("input_tokens")
+                        + n("cache_creation_input_tokens")
+                        + n("cache_read_input_tokens");
                     if ctx > 0 {
                         act.context_tokens = Some(ctx);
                     }
@@ -538,7 +747,14 @@ pub fn parse_transcript(text: &str, cwd: Option<&str>) -> Activity {
                         Some("text") => {
                             let t = one_line(it.get("text").and_then(|v| v.as_str()).unwrap_or(""));
                             if !t.is_empty() {
-                                steps.push(Step { at, kind: StepKind::Reply, tool: String::new(), text: t, pending: false, failed: false });
+                                steps.push(Step {
+                                    at,
+                                    kind: StepKind::Reply,
+                                    tool: String::new(),
+                                    text: t,
+                                    pending: false,
+                                    failed: false,
+                                });
                             }
                         }
                         Some("tool_use") => {
@@ -564,7 +780,11 @@ pub fn parse_transcript(text: &str, cwd: Option<&str>) -> Activity {
         }
     }
     if act.last_prompt.is_none() {
-        act.last_prompt = steps.iter().rev().find(|s| s.kind == StepKind::Prompt).map(|s| s.text.clone());
+        act.last_prompt = steps
+            .iter()
+            .rev()
+            .find(|s| s.kind == StepKind::Prompt)
+            .map(|s| s.text.clone());
     }
     let skip = steps.len().saturating_sub(MAX_STEPS);
     act.steps = steps.split_off(skip);
@@ -576,13 +796,23 @@ pub fn parse_transcript(text: &str, cwd: Option<&str>) -> Activity {
 fn push_prompt(steps: &mut Vec<Step>, at: Option<i64>, raw: &str) {
     let t = raw.trim();
     let text = if let Some(rest) = t.strip_prefix("<command-name>") {
-        rest.split("</command-name>").next().unwrap_or("").to_string()
+        rest.split("</command-name>")
+            .next()
+            .unwrap_or("")
+            .to_string()
     } else if t.starts_with('<') || t.is_empty() {
         return;
     } else {
         one_line(t)
     };
-    steps.push(Step { at, kind: StepKind::Prompt, tool: String::new(), text, pending: false, failed: false });
+    steps.push(Step {
+        at,
+        kind: StepKind::Prompt,
+        tool: String::new(),
+        text,
+        pending: false,
+        failed: false,
+    });
 }
 
 /// "mcp__claude_ai_Atlassian__getJiraIssue" -> "Atlassian · getJiraIssue".
@@ -617,13 +847,23 @@ fn tool_summary(name: &str, input: &Value, cwd: Option<&str>) -> String {
         _ => None,
     };
     // unknown tools: the first string field is usually the interesting one
-    let text = text.or_else(|| input.as_object()?.values().find_map(|v| v.as_str()).map(str::to_string));
+    let text = text.or_else(|| {
+        input
+            .as_object()?
+            .values()
+            .find_map(|v| v.as_str())
+            .map(str::to_string)
+    });
     one_line(&text.unwrap_or_default())
 }
 
 /// First non-empty line, capped at 200 chars.
 fn one_line(s: &str) -> String {
-    let line = s.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    let line = s
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
     if line.chars().count() > 200 {
         line.chars().take(199).collect::<String>() + "…"
     } else {
@@ -658,7 +898,9 @@ fn read_rss_kb(pid: u32) -> u64 {
         .ok()
         .and_then(|s| {
             // statm fields are in pages: size resident shared ...
-            s.split_whitespace().nth(1).and_then(|w| w.parse::<u64>().ok())
+            s.split_whitespace()
+                .nth(1)
+                .and_then(|w| w.parse::<u64>().ok())
         })
         .map(|pages| pages * (page_size_kb()))
         .unwrap_or(0)
@@ -673,7 +915,7 @@ fn page_size_kb() -> u64 {
 /// Classify one process; first matching signature wins.
 fn classify<'a>(exe_base: Option<&str>, cmdline: &[String]) -> Option<&'a Sig> {
     let joined = cmdline.join(" ").to_lowercase();
-    let argv0_base = Path::new(cmdline.get(0).map(|s| s.as_str()).unwrap_or(""))
+    let argv0_base = Path::new(cmdline.first().map(|s| s.as_str()).unwrap_or(""))
         .file_name()
         .map(|f| f.to_string_lossy().into_owned())
         .unwrap_or_default();
@@ -682,10 +924,9 @@ fn classify<'a>(exe_base: Option<&str>, cmdline: &[String]) -> Option<&'a Sig> {
     for sig in SIGNATURES {
         let hit = match &sig.m {
             Exe(e) => exe_base == Some(e) || argv0_base == *e,
-            ExePrefix(e) => exe_base
-                .map(|b| b.starts_with(e))
-                .unwrap_or(false)
-                || argv0_base.starts_with(e),
+            ExePrefix(e) => {
+                exe_base.map(|b| b.starts_with(e)).unwrap_or(false) || argv0_base.starts_with(e)
+            }
             ArgToken(t) => tokens.iter().any(|a| a == t),
             ArgContains(t) => joined.contains(t),
             ArgPrefix(t) => tokens.iter().any(|a| a.starts_with(t)),
@@ -724,8 +965,18 @@ mod tests {
 
     #[test]
     fn detects_codex_and_cursor_and_omp() {
-        assert_eq!(classify(Some("codex"), &cl("codex --model gpt-5")).unwrap().agent, "Codex CLI");
-        assert_eq!(classify(Some("cursor"), &cl("/usr/bin/cursor --user-data-dir=x")).unwrap().agent, "Cursor");
+        assert_eq!(
+            classify(Some("codex"), &cl("codex --model gpt-5"))
+                .unwrap()
+                .agent,
+            "Codex CLI"
+        );
+        assert_eq!(
+            classify(Some("cursor"), &cl("/usr/bin/cursor --user-data-dir=x"))
+                .unwrap()
+                .agent,
+            "Cursor"
+        );
         assert_eq!(classify(Some("omp"), &cl("omp tui")).unwrap().agent, "omp");
     }
 
@@ -740,19 +991,27 @@ mod tests {
     #[test]
     fn rejects_electron_helpers_and_geoclue() {
         // ChatGPT/Codex desktop helper processes: skipped via --type=
-        let helper = cl("/usr/lib/chatgpt/ChatGPT --type=renderer --user-data-dir=/home/u/.config/Codex");
+        let helper =
+            cl("/usr/lib/chatgpt/ChatGPT --type=renderer --user-data-dir=/home/u/.config/Codex");
         assert!(classify(Some("ChatGPT"), &helper).is_none());
         // geoclue's binary is literally named "agent": must NOT match
         assert!(classify(Some("agent"), &cl("/usr/libexec/geoclue-2.0/demos/agent")).is_none());
         // crashpad handlers must not match anything
-        assert!(classify(Some("chrome_crashpad"), &cl("/usr/share/code/chrome_crashpad_handler --monitor-self")).is_none());
+        assert!(classify(
+            Some("chrome_crashpad"),
+            &cl("/usr/share/code/chrome_crashpad_handler --monitor-self")
+        )
+        .is_none());
     }
 
     #[test]
     fn detects_mcp_servers_and_local_models() {
         let c = cl("node /usr/lib/node_modules/mcp-server-filesystem/index.js");
         assert_eq!(classify(Some("node"), &c).unwrap().agent, "MCP server");
-        assert_eq!(classify(Some("ollama"), &cl("ollama serve")).unwrap().agent, "ollama");
+        assert_eq!(
+            classify(Some("ollama"), &cl("ollama serve")).unwrap().agent,
+            "ollama"
+        );
         let c = cl("python3 -m vllm.entrypoints.openai.api_server");
         assert_eq!(classify(Some("python3"), &c).unwrap().agent, "vLLM");
     }
@@ -774,9 +1033,15 @@ mod tests {
     fn groups_by_process_tree_not_directory() {
         // 10 and 20 are two claude launches in one repo; 11 is 10's child
         // via a non-agent shell (15)
-        let parents: HashMap<u32, u32> = [(10, 5), (15, 10), (11, 15), (20, 5)].into_iter().collect();
-        let agent_of: HashMap<u32, &'static str> =
-            [(10, "Claude Code"), (11, "Claude Code"), (20, "Claude Code")].into_iter().collect();
+        let parents: HashMap<u32, u32> =
+            [(10, 5), (15, 10), (11, 15), (20, 5)].into_iter().collect();
+        let agent_of: HashMap<u32, &'static str> = [
+            (10, "Claude Code"),
+            (11, "Claude Code"),
+            (20, "Claude Code"),
+        ]
+        .into_iter()
+        .collect();
         assert_eq!(session_root(11, 15, "Claude Code", &parents, &agent_of), 10);
         assert_eq!(session_root(10, 5, "Claude Code", &parents, &agent_of), 10);
         assert_eq!(session_root(20, 5, "Claude Code", &parents, &agent_of), 20);
@@ -804,16 +1069,39 @@ mod tests {
         assert_eq!(a.model.as_deref(), Some("claude-opus-5-5"));
         assert_eq!(a.context_tokens, Some(1100));
         assert_eq!(a.last_active, parse_iso("2026-10-22T10:00:10Z"));
-        let st: Vec<(StepKind, &str, &str, bool, bool)> =
-            a.steps.iter().map(|s| (s.kind, s.tool.as_str(), s.text.as_str(), s.pending, s.failed)).collect();
+        let st: Vec<(StepKind, &str, &str, bool, bool)> = a
+            .steps
+            .iter()
+            .map(|s| {
+                (
+                    s.kind,
+                    s.tool.as_str(),
+                    s.text.as_str(),
+                    s.pending,
+                    s.failed,
+                )
+            })
+            .collect();
         assert_eq!(
             st,
             vec![
                 (StepKind::Prompt, "", "fix the login bug", false, false),
-                (StepKind::Reply, "", "Looking at the auth module.", false, false),
+                (
+                    StepKind::Reply,
+                    "",
+                    "Looking at the auth module.",
+                    false,
+                    false
+                ),
                 (StepKind::Tool, "Read", "src/auth.rs", false, false),
                 (StepKind::Tool, "Bash", "Run tests", false, true),
-                (StepKind::Tool, "Atlassian · getJiraIssue", "AB-1", true, false),
+                (
+                    StepKind::Tool,
+                    "Atlassian · getJiraIssue",
+                    "AB-1",
+                    true,
+                    false
+                ),
             ]
         );
     }

@@ -61,7 +61,9 @@ impl UnixClient {
         for (k, v) in headers {
             b = b.header(*k, v.clone());
         }
-        let req = b.body(EmptyBody).map_err(|e| DockerError::Request(e.to_string()))?;
+        let req = b
+            .body(EmptyBody)
+            .map_err(|e| DockerError::Request(e.to_string()))?;
         let res = self.client().request(req).await.map_err(map_hyper_err)?;
         let status = res.status();
         let body = res
@@ -108,7 +110,9 @@ impl UnixClient {
         if !version.is_empty() {
             b = b.header("Api-Version", version.to_string());
         }
-        let req = b.body(EmptyBody).map_err(|e| DockerError::Request(e.to_string()))?;
+        let req = b
+            .body(EmptyBody)
+            .map_err(|e| DockerError::Request(e.to_string()))?;
         let res = self.client().request(req).await.map_err(map_hyper_err)?;
         let status = res.status();
         let headers = res.headers().clone();
@@ -175,9 +179,8 @@ impl UnixClient {
         } else {
             format!("Api-Version: {version}\r\n")
         };
-        let req = format!(
-            "GET {path} HTTP/1.1\r\nHost: localhost\r\nAccept: {accept}\r\n{vhead}\r\n"
-        );
+        let req =
+            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nAccept: {accept}\r\n{vhead}\r\n");
         stream
             .write_all(req.as_bytes())
             .await

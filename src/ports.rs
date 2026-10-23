@@ -27,7 +27,9 @@ pub struct PortEntry {
 impl PortEntry {
     /// Bound to loopback only, so unreachable from other hosts.
     pub fn is_loopback(&self) -> bool {
-        self.addr.starts_with("127.") || self.addr == "[::1]" || self.addr.starts_with("[::ffff:127.")
+        self.addr.starts_with("127.")
+            || self.addr == "[::1]"
+            || self.addr.starts_with("[::ffff:127.")
     }
 }
 
@@ -40,7 +42,9 @@ fn parse_net_table(txt: &str, proto: &'static str, family: u8) -> Vec<PortEntry>
         if f.len() < 10 {
             continue;
         }
-        let Some((local, _remote)) = f[1].split_once(':') else { continue };
+        let Some((local, _remote)) = f[1].split_once(':') else {
+            continue;
+        };
         let port = u16::from_str_radix(f[1].rsplit(':').next().unwrap_or("0"), 16).unwrap_or(0);
         let addr = decode_addr(local, family);
         // tcp state is field 3; udp has no state but the column exists.
@@ -92,7 +96,13 @@ fn decode_addr(hex: &str, family: u8) -> String {
             return "0.0.0.0".into();
         }
         if let Ok(w) = u32::from_str_radix(hex, 16) {
-            return format!("{}.{}.{}.{}", w & 0xFF, (w >> 8) & 0xFF, (w >> 16) & 0xFF, (w >> 24) & 0xFF);
+            return format!(
+                "{}.{}.{}.{}",
+                w & 0xFF,
+                (w >> 8) & 0xFF,
+                (w >> 16) & 0xFF,
+                (w >> 24) & 0xFF
+            );
         }
         return hex.into();
     }
@@ -107,7 +117,12 @@ fn decode_addr(hex: &str, family: u8) -> String {
     for i in 0..4 {
         let chunk = &hex[i * 8..(i + 1) * 8];
         let w = u32::from_str_radix(chunk, 16).unwrap_or(0);
-        words.push([w & 0xFF, (w >> 8) & 0xFF, (w >> 16) & 0xFF, (w >> 24) & 0xFF]);
+        words.push([
+            w & 0xFF,
+            (w >> 8) & 0xFF,
+            (w >> 16) & 0xFF,
+            (w >> 24) & 0xFF,
+        ]);
     }
     let bytes: Vec<u8> = words.iter().flatten().map(|b| *b as u8).collect();
     let ip = std::net::Ipv6Addr::from(<[u8; 16]>::try_from(bytes).unwrap_or([0; 16]));
@@ -117,13 +132,21 @@ fn decode_addr(hex: &str, family: u8) -> String {
 /// Map socket inode -> (pid, fd) by scanning /proc/[pid]/fd/* socket links.
 fn inode_to_pid() -> HashMap<u64, u32> {
     let mut map = HashMap::new();
-    let Ok(procs) = fs::read_dir("/proc") else { return map };
+    let Ok(procs) = fs::read_dir("/proc") else {
+        return map;
+    };
     for p in procs.flatten() {
         let name = p.file_name();
-        let Ok(pid): Result<u32, _> = name.to_string_lossy().parse() else { continue };
-        let Ok(fds) = fs::read_dir(format!("/proc/{pid}/fd")) else { continue };
+        let Ok(pid): Result<u32, _> = name.to_string_lossy().parse() else {
+            continue;
+        };
+        let Ok(fds) = fs::read_dir(format!("/proc/{pid}/fd")) else {
+            continue;
+        };
         for fd in fds.flatten() {
-            let Ok(link) = fs::read_link(fd.path()) else { continue };
+            let Ok(link) = fs::read_link(fd.path()) else {
+                continue;
+            };
             let l = link.to_string_lossy();
             if let Some(rest) = l.strip_prefix("socket:[") {
                 if let Some(inum) = rest.strip_suffix(']') {
@@ -166,9 +189,7 @@ pub fn scan() -> Vec<PortEntry> {
     for e in &mut entries {
         if let Some(&pid) = owners.get(&e.inode) {
             e.pid = Some(pid);
-            let (name, cwd) = cache
-                .entry(pid)
-                .or_insert_with(|| proc_basics(pid));
+            let (name, cwd) = cache.entry(pid).or_insert_with(|| proc_basics(pid));
             e.proc_name = name.clone();
             e.cwd = cwd.clone();
         }

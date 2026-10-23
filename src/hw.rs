@@ -74,8 +74,8 @@ pub struct DiskStat {
 /// Full /proc/diskstats row for one whole physical device.
 pub struct DiskRow {
     pub name: String,
-    pub reads: u64,          // completed read IOs
-    pub reads_sectors: u64,  // 512 B sectors
+    pub reads: u64,         // completed read IOs
+    pub reads_sectors: u64, // 512 B sectors
     pub writes: u64,
     pub writes_sectors: u64,
     pub ms_weighted: u64,
@@ -174,7 +174,9 @@ impl Sampler {
         let mi = fs::read_to_string("/proc/meminfo").unwrap_or_default();
         for line in mi.lines() {
             let mut it = line.split_whitespace();
-            let (Some(key), Some(val)) = (it.next(), it.next()) else { continue };
+            let (Some(key), Some(val)) = (it.next(), it.next()) else {
+                continue;
+            };
             let kb: u64 = val.parse().unwrap_or(0);
             match key {
                 "MemTotal:" => s.mem_total = kb * 1024,
@@ -187,7 +189,10 @@ impl Sampler {
 
         // ---- temperatures (millidegrees from hwmon, named per device) ----
         let sensors = hwmon_sensors();
-        s.temp_c = sensors.iter().map(|x| x.c).fold(None::<f64>, |a, b| Some(a.map_or(b, |a| a.max(b))));
+        s.temp_c = sensors
+            .iter()
+            .map(|x| x.c)
+            .fold(None::<f64>, |a, b| Some(a.map_or(b, |a| a.max(b))));
         s.cpu_temp_c = sensors
             .iter()
             .filter(|x| x.group == "cpu")
@@ -201,12 +206,19 @@ impl Sampler {
         for d in &mut s.disks {
             // NVMe hwmon dirs live under the controller, e.g. /sys/class/nvme/nvme0/hwmon1
             if let Some(n) = d.name.strip_prefix("nvme") {
-                let idx: usize = n.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap_or(0);
+                let idx: usize = n
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>()
+                    .parse()
+                    .unwrap_or(0);
                 let ctrl = format!("/sys/class/nvme/nvme{idx}");
                 if let Ok(entries) = fs::read_dir(&ctrl) {
                     for e in entries.flatten() {
                         let p = e.path();
-                        if p.file_name().is_some_and(|f| f.to_string_lossy().starts_with("hwmon")) {
+                        if p.file_name()
+                            .is_some_and(|f| f.to_string_lossy().starts_with("hwmon"))
+                        {
                             if let Ok(v) = fs::read_to_string(p.join("temp1_input")) {
                                 if let Ok(m) = v.trim().parse::<f64>() {
                                     d.temp_c = Some(m / 1000.0);
@@ -222,7 +234,12 @@ impl Sampler {
         // fallback for any NVMe disk whose controller dir exposed no hwmon:
         // the generic scan above already saw the drive's composite sensor
         if s.sensors.iter().any(|x| x.group == "nvme") {
-            let nvme_temp = s.sensors.iter().filter(|x| x.group == "nvme").map(|x| x.c).fold(None::<f64>, |a, b| Some(a.map_or(b, |a| a.max(b))));
+            let nvme_temp = s
+                .sensors
+                .iter()
+                .filter(|x| x.group == "nvme")
+                .map(|x| x.c)
+                .fold(None::<f64>, |a, b| Some(a.map_or(b, |a| a.max(b))));
             for d in &mut s.disks {
                 if d.temp_c.is_none() && d.name.starts_with("nvme") {
                     d.temp_c = nvme_temp;
@@ -249,9 +266,8 @@ fn read_cpu_times() -> ([u64; 8], Vec<[u64; 8]>) {
     for line in txt.lines() {
         let mut it = line.split_whitespace();
         let Some(name) = it.next() else { continue };
-        let vals: [u64; 8] = std::array::from_fn(|_i| {
-            it.next().and_then(|w| w.parse().ok()).unwrap_or(0)
-        });
+        let vals: [u64; 8] =
+            std::array::from_fn(|_i| it.next().and_then(|w| w.parse().ok()).unwrap_or(0));
         if name == "cpu" {
             all = vals;
         } else if name.starts_with("cpu") {
@@ -323,7 +339,10 @@ fn is_partition(name: &str) -> bool {
         let (base, tail) = (&name[..i], &name[i + 1..]);
         if !tail.is_empty()
             && tail.chars().all(|c| c.is_ascii_digit())
-            && base.chars().next_back().is_some_and(|c| c.is_ascii_alphanumeric())
+            && base
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric())
             && (base.contains('n') || base.contains("blk"))
         {
             return true;
@@ -339,7 +358,9 @@ fn s_netdev() -> Vec<(String, u64, u64)> {
     let txt = fs::read_to_string("/proc/net/dev").unwrap_or_default();
     let mut out = Vec::new();
     for line in txt.lines().skip(2) {
-        let Some((name, rest)) = line.split_once(':') else { continue };
+        let Some((name, rest)) = line.split_once(':') else {
+            continue;
+        };
         let f: Vec<&str> = rest.split_whitespace().collect();
         if f.len() < 9 {
             continue;
@@ -392,19 +413,27 @@ fn hwmon_sensors() -> Vec<TempSensor> {
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
         let group = sensor_group(&driver);
-        let Ok(files) = fs::read_dir(&dir) else { continue };
+        let Ok(files) = fs::read_dir(&dir) else {
+            continue;
+        };
         let mut named: Vec<(String, f64)> = Vec::new();
         let mut unnamed: Vec<f64> = Vec::new();
         for l in files.flatten() {
             let fname = l.file_name().to_string_lossy().into_owned();
-            let Some(rest) = fname.strip_prefix("temp") else { continue };
+            let Some(rest) = fname.strip_prefix("temp") else {
+                continue;
+            };
             let numeric = rest.chars().next().is_some_and(|c| c.is_ascii_digit());
             if !numeric || &rest[1..] != "input" {
                 continue;
             }
             let idx = &rest[..rest.len() - "input".len()];
-            let Ok(v) = fs::read_to_string(l.path()) else { continue };
-            let Ok(milli) = v.trim().parse::<f64>() else { continue };
+            let Ok(v) = fs::read_to_string(l.path()) else {
+                continue;
+            };
+            let Ok(milli) = v.trim().parse::<f64>() else {
+                continue;
+            };
             let c = milli / 1000.0;
             if c <= 0.0 || c > 150.0 {
                 continue;
@@ -424,8 +453,15 @@ fn hwmon_sensors() -> Vec<TempSensor> {
             continue;
         }
         if named.is_empty() {
-            if let Some(c) = unnamed.into_iter().fold(None::<f64>, |a, b| Some(a.map_or(b, |a| a.max(b)))) {
-                out.push(TempSensor { group, label: driver, c });
+            if let Some(c) = unnamed
+                .into_iter()
+                .fold(None::<f64>, |a, b| Some(a.map_or(b, |a| a.max(b))))
+            {
+                out.push(TempSensor {
+                    group,
+                    label: driver,
+                    c,
+                });
             }
             continue;
         }
@@ -463,7 +499,11 @@ mod tests {
     fn diskstats_skips_partitions_and_virtual() {
         let rows = diskstats_full();
         for d in &rows {
-            assert!(!d.name.starts_with("loop"), "loop device leaked in: {}", d.name);
+            assert!(
+                !d.name.starts_with("loop"),
+                "loop device leaked in: {}",
+                d.name
+            );
             assert!(!is_partition(&d.name), "partition leaked in: {}", d.name);
         }
     }
@@ -493,7 +533,11 @@ mod tests {
         assert!(b.mem_total > 0, "mem_total must be read");
         assert!(b.ncpu >= 1);
         assert!(b.uptime > 0.0);
-        assert!(b.cpu_pct >= 0.0 && b.cpu_pct <= 100.0, "cpu_pct out of range: {}", b.cpu_pct);
+        assert!(
+            b.cpu_pct >= 0.0 && b.cpu_pct <= 100.0,
+            "cpu_pct out of range: {}",
+            b.cpu_pct
+        );
         assert_eq!(b.per_core.len(), b.ncpu);
         // second sample has a real interval: rates are finite and non-negative
         assert!(b.disk_read_bps >= 0.0 && b.net_rx_bps >= 0.0);
@@ -509,13 +553,21 @@ mod tests {
         // on any Linux box with hwmon sensors there is at least one CPU temp;
         // on a bare VM there may be none, but groups must be consistent.
         for x in &b.sensors {
-            assert!(x.c > 0.0 && x.c < 150.0, "implausible sensor {}={}", x.label, x.c);
+            assert!(
+                x.c > 0.0 && x.c < 150.0,
+                "implausible sensor {}={}",
+                x.label,
+                x.c
+            );
             assert!(matches!(x.group, "cpu" | "gpu" | "nvme" | "other"));
             assert!(!x.label.is_empty());
         }
         // derived aggregates must agree with the sensor list
         if let Some(t) = b.cpu_temp_c {
-            assert!(b.sensors.iter().any(|x| x.group == "cpu" && (x.c - t).abs() < 0.01));
+            assert!(b
+                .sensors
+                .iter()
+                .any(|x| x.group == "cpu" && (x.c - t).abs() < 0.01));
         }
         if let Some(t) = b.temp_c {
             assert!(b.sensors.iter().any(|x| (x.c - t).abs() < 0.01));
@@ -539,7 +591,11 @@ mod tests {
         // NVMe drives expose hwmon temps on real hardware; if one is present
         // it must carry a temperature.
         if b.disks.iter().any(|d| d.name.starts_with("nvme")) {
-            assert!(b.disks.iter().filter(|d| d.name.starts_with("nvme")).all(|d| d.temp_c.is_some()));
+            assert!(b
+                .disks
+                .iter()
+                .filter(|d| d.name.starts_with("nvme"))
+                .all(|d| d.temp_c.is_some()));
         }
     }
 

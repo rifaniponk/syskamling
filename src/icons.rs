@@ -23,7 +23,8 @@ static PIXELS: LazyLock<Mutex<HashMap<String, Option<IconRgba>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Icon name -> on-disk file ("" = none).
-static PATHS: LazyLock<Mutex<HashMap<String, Option<Found>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static PATHS: LazyLock<Mutex<HashMap<String, Option<Found>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Clone, Debug)]
 pub struct Found {
@@ -85,7 +86,7 @@ pub fn theme_chain(roots: &[PathBuf], theme: &str) -> Vec<(PathBuf, String)> {
 pub fn find_icon(name: &str, want: u32) -> Option<Found> {
     if name.starts_with('/') {
         let p = PathBuf::from(name);
-        let f = p.is_file().then(|| Found { path: p });
+        let f = p.is_file().then_some(Found { path: p });
         PATHS
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -104,7 +105,13 @@ pub fn find_icon(name: &str, want: u32) -> Option<Found> {
     let theme = theme.split(':').next().unwrap_or("hicolor").to_string();
     let roots = theme_roots();
     let chain = theme_chain(&roots, &theme);
-    let base = name.rsplit('/').next().unwrap_or(name).rsplit('.').next().unwrap_or(name);
+    let base = name
+        .rsplit('/')
+        .next()
+        .unwrap_or(name)
+        .rsplit('.')
+        .next()
+        .unwrap_or(name);
     let mut best: Option<Found> = None;
     let mut best_score: i64 = i64::MIN;
     for (root, tname) in &chain {
@@ -140,7 +147,14 @@ pub fn find_icon(name: &str, want: u32) -> Option<Found> {
             }
         });
         for (n, sdir) in sizes {
-            for sub in ["apps", "categories", "places", "mimetypes", "actions", "status"] {
+            for sub in [
+                "apps",
+                "categories",
+                "places",
+                "mimetypes",
+                "actions",
+                "status",
+            ] {
                 let sd = sdir.join(sub);
                 for ext in ["svg", "svgz", "png"] {
                     let p = sd.join(format!("{base}.{ext}"));
@@ -210,27 +224,32 @@ pub fn pixels(name: &str, want: u32) -> Option<IconRgba> {
     out
 }
 
-
 fn load_pixels(name: &str, want: u32) -> Option<IconRgba> {
     let f = find_icon(name, want)?;
     let raw = fs::read(&f.path).ok()?;
     if f.path.extension().and_then(|e| e.to_str()) == Some("svgz") {
         use std::io::Read;
         let mut out = Vec::new();
-        flate2::read::GzDecoder::new(&raw[..]).read_to_end(&mut out).ok()?;
+        flate2::read::GzDecoder::new(&raw[..])
+            .read_to_end(&mut out)
+            .ok()?;
         raster_svg(&String::from_utf8_lossy(&out), want.max(48))
     } else if f.path.extension().and_then(|e| e.to_str()) == Some("svg") {
         raster_svg(&String::from_utf8_lossy(&raw), want.max(48))
     } else {
         let img = image::load_from_memory(&raw).ok()?.to_rgba8();
         let (w, h) = img.dimensions();
-        Some(IconRgba { w, h, px: premultiply(img.as_raw()) })
+        Some(IconRgba {
+            w,
+            h,
+            px: premultiply(img.as_raw()),
+        })
     }
 }
 
 fn premultiply(px: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(px.len());
-    for p in px.chunks_exact(4) {
+    for p in px.as_chunks::<4>().0 {
         let a = p[3] as u32;
         out.push((p[0] as u32 * a / 255) as u8);
         out.push((p[1] as u32 * a / 255) as u8);
@@ -252,7 +271,11 @@ struct Rgba(f32, f32, f32, f32);
 fn parse_color(s: &str) -> Option<Rgba> {
     let s = s.trim();
     if let Some(hex) = s.strip_prefix('#') {
-        let d = |a: &str, b: &str| u8::from_str_radix(a, 16).ok().zip(u8::from_str_radix(b, 16).ok());
+        let d = |a: &str, b: &str| {
+            u8::from_str_radix(a, 16)
+                .ok()
+                .zip(u8::from_str_radix(b, 16).ok())
+        };
         return match hex.len() {
             3 => Some(Rgba(
                 u8::from_str_radix(&hex[0..1], 16).ok()? as f32 / 15.0,
@@ -263,12 +286,22 @@ fn parse_color(s: &str) -> Option<Rgba> {
             6 => {
                 let (r, g) = d(&hex[0..2], &hex[2..4])?;
                 let (b, _) = d(&hex[4..6], "00")?;
-                Some(Rgba(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0))
+                Some(Rgba(
+                    r as f32 / 255.0,
+                    g as f32 / 255.0,
+                    b as f32 / 255.0,
+                    1.0,
+                ))
             }
             8 => {
                 let (r, g) = d(&hex[0..2], &hex[2..4])?;
                 let (b, a) = d(&hex[4..6], &hex[6..8])?;
-                Some(Rgba(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a as f32 / 255.0))
+                Some(Rgba(
+                    r as f32 / 255.0,
+                    g as f32 / 255.0,
+                    b as f32 / 255.0,
+                    a as f32 / 255.0,
+                ))
             }
             _ => None,
         };
@@ -293,9 +326,30 @@ fn parse_color(s: &str) -> Option<Rgba> {
 /// One shape in scanline order: a list of spans per y-band is computed at
 /// raster time; here we keep the primitives.
 enum Shape {
-    Rect { x: f32, y: f32, w: f32, h: f32, rx: f32, fill: Rgba, op: f32 },
-    Ellipse { cx: f32, cy: f32, rx: f32, ry: f32, fill: Rgba, op: f32 },
-    Poly { pts: Vec<(f32, f32)>, closed: bool, fill: Option<Rgba>, stroke: Option<(f32, Rgba)>, op: f32 },
+    Rect {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        rx: f32,
+        fill: Rgba,
+        op: f32,
+    },
+    Ellipse {
+        cx: f32,
+        cy: f32,
+        rx: f32,
+        ry: f32,
+        fill: Rgba,
+        op: f32,
+    },
+    Poly {
+        pts: Vec<(f32, f32)>,
+        closed: bool,
+        fill: Option<Rgba>,
+        stroke: Option<(f32, Rgba)>,
+        op: f32,
+    },
 }
 
 fn attrs(tag: &str) -> Vec<(String, String)> {
@@ -371,7 +425,9 @@ fn fill_of(a: &[(String, String)]) -> Option<Rgba> {
 }
 
 fn opacity_of(a: &[(String, String)]) -> f32 {
-    let mut o = get(a, "opacity").and_then(|v| v.parse::<f32>().ok()).unwrap_or(1.0f32);
+    let mut o = get(a, "opacity")
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(1.0f32);
     if let Some(v) = get(a, "fill-opacity").and_then(|v| v.parse::<f32>().ok()) {
         o *= v;
     }
@@ -411,7 +467,11 @@ fn path_tokens(d: &str) -> Vec<(char, Vec<f32>)> {
             cur = Some((c, Vec::new()));
         } else if c == ',' || c.is_whitespace() {
             flush_num(&mut num, &mut cur);
-        } else if (c == '-' || c == '.') && !num.is_empty() && !num.ends_with('e') && !num.ends_with('E') {
+        } else if (c == '-' || c == '.')
+            && !num.is_empty()
+            && !num.ends_with('e')
+            && !num.ends_with('E')
+        {
             flush_num(&mut num, &mut cur);
             num.push(c);
         } else if c.is_ascii_digit() || c == '+' || c == '-' || c == '.' || c == 'e' || c == 'E' {
@@ -492,8 +552,14 @@ fn flatten(d: &str) -> Vec<Vec<(f32, f32)>> {
                     for k in 1..=12 {
                         let t = k as f32 / 12.0;
                         let mt = 1.0 - t;
-                        let bx = mt * mt * mt * x0 + 3.0 * mt * mt * t * x1 + 3.0 * mt * t * t * x2 + t * t * t * x;
-                        let by = mt * mt * mt * y0 + 3.0 * mt * mt * t * y1 + 3.0 * mt * t * t * y2 + t * t * t * y;
+                        let bx = mt * mt * mt * x0
+                            + 3.0 * mt * mt * t * x1
+                            + 3.0 * mt * t * t * x2
+                            + t * t * t * x;
+                        let by = mt * mt * mt * y0
+                            + 3.0 * mt * mt * t * y1
+                            + 3.0 * mt * t * t * y2
+                            + t * t * t * y;
                         cur.push((bx, by));
                     }
                     cx = x;
@@ -513,8 +579,14 @@ fn flatten(d: &str) -> Vec<Vec<(f32, f32)>> {
                     for k in 1..=12 {
                         let t = k as f32 / 12.0;
                         let mt = 1.0 - t;
-                        let bx = mt * mt * mt * x0 + 3.0 * mt * mt * t * x1 + 3.0 * mt * t * t * x2 + t * t * t * x;
-                        let by = mt * mt * mt * y0 + 3.0 * mt * mt * t * y1 + 3.0 * mt * t * t * y2 + t * t * t * y;
+                        let bx = mt * mt * mt * x0
+                            + 3.0 * mt * mt * t * x1
+                            + 3.0 * mt * t * t * x2
+                            + t * t * t * x;
+                        let by = mt * mt * mt * y0
+                            + 3.0 * mt * mt * t * y1
+                            + 3.0 * mt * t * t * y2
+                            + t * t * t * y;
                         cur.push((bx, by));
                     }
                     cx = x;
@@ -565,7 +637,9 @@ fn flatten(d: &str) -> Vec<Vec<(f32, f32)>> {
                         ry *= s;
                     }
                     let sign = if laf != sf { 1.0 } else { -1.0 };
-                    let num = (rx * rx * (ry * ry) - rx * rx * dy * dy - ry * ry * dx * dx).max(0.0).sqrt();
+                    let num = (rx * rx * (ry * ry) - rx * rx * dy * dy - ry * ry * dx * dx)
+                        .max(0.0)
+                        .sqrt();
                     let den = rx * rx * dy * dy + ry * ry * dx * dx;
                     let co = if den > 0.0 { sign * num / den } else { 0.0 };
                     let cxc = co * rx * dy + (x0 + x) / 2.0;
@@ -615,7 +689,11 @@ fn flatten(d: &str) -> Vec<Vec<(f32, f32)>> {
 }
 
 pub fn raster_svg(svg: &str, target: u32) -> Option<IconRgba> {
-    if svg.contains("<text") || svg.contains("filter:") || svg.contains("<filter") || svg.contains("clip-path") {
+    if svg.contains("<text")
+        || svg.contains("filter:")
+        || svg.contains("<filter")
+        || svg.contains("clip-path")
+    {
         return None;
     }
     // viewBox
@@ -626,7 +704,10 @@ pub fn raster_svg(svg: &str, target: u32) -> Option<IconRgba> {
         .into_iter()
         .find(|(k, _)| k == "viewBox")
         .and_then(|(_, v)| {
-            let n: Vec<f32> = v.split([',', ' ']).filter_map(|p| p.trim().parse().ok()).collect();
+            let n: Vec<f32> = v
+                .split([',', ' '])
+                .filter_map(|p| p.trim().parse().ok())
+                .collect();
             (n.len() == 4).then_some((n[0], n[1], n[2], n[3]))
         });
     let (vb_x, vb_y, vb_w, vb_h) = vb.or_else(|| {
@@ -649,7 +730,12 @@ pub fn raster_svg(svg: &str, target: u32) -> Option<IconRgba> {
         let bytes: Vec<char> = svg.chars().collect();
         let mut i = 0;
         while i < bytes.len() {
-            if bytes[i] == '<' && i + 1 < bytes.len() && bytes[i + 1] != '!' && bytes[i + 1] != '?' && bytes[i + 1] != '/' {
+            if bytes[i] == '<'
+                && i + 1 < bytes.len()
+                && bytes[i + 1] != '!'
+                && bytes[i + 1] != '?'
+                && bytes[i + 1] != '/'
+            {
                 let end = i + 1;
                 let gt = match bytes[end..].iter().position(|c| *c == '>') {
                     Some(p) => p + end,
@@ -657,7 +743,10 @@ pub fn raster_svg(svg: &str, target: u32) -> Option<IconRgba> {
                 };
                 let inner: String = bytes[end..gt].iter().collect();
                 let selfclose = inner.ends_with('/');
-                let name: String = inner.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-').collect();
+                let name: String = inner
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+                    .collect();
                 let rest: String = inner.chars().skip(name.len()).collect();
                 out.push((name, rest, selfclose));
                 i = gt + 1;
@@ -670,9 +759,14 @@ pub fn raster_svg(svg: &str, target: u32) -> Option<IconRgba> {
     for (name, rest, _sc) in tags {
         let a = attrs(&rest);
         let op = opacity_of(&a);
-        let stroke: Option<(f32, Rgba)> = get(&a, "stroke")
-            .and_then(|s| parse_color(s))
-            .map(|c| (get(&a, "stroke-width").and_then(|v| v.parse().ok()).unwrap_or(1.0f32), c));
+        let stroke: Option<(f32, Rgba)> = get(&a, "stroke").and_then(parse_color).map(|c| {
+            (
+                get(&a, "stroke-width")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1.0f32),
+                c,
+            )
+        });
         match name.as_str() {
             "rect" => {
                 let fill = fill_of(&a);
@@ -701,7 +795,14 @@ pub fn raster_svg(svg: &str, target: u32) -> Option<IconRgba> {
                         Some(v) => v,
                         None => continue,
                     };
-                    shapes.push(Shape::Ellipse { cx: fnum(&a, "cx").unwrap_or(0.0), cy: fnum(&a, "cy").unwrap_or(0.0), rx: r, ry: r, fill: f, op });
+                    shapes.push(Shape::Ellipse {
+                        cx: fnum(&a, "cx").unwrap_or(0.0),
+                        cy: fnum(&a, "cy").unwrap_or(0.0),
+                        rx: r,
+                        ry: r,
+                        fill: f,
+                        op,
+                    });
                 }
             }
             "ellipse" => {
@@ -724,7 +825,7 @@ pub fn raster_svg(svg: &str, target: u32) -> Option<IconRgba> {
             "polygon" | "polyline" | "path" => {
                 let fill = fill_of(&a);
                 let pts = if name == "path" {
-                    get(&a, "d").map(|d| flatten(d)).unwrap_or_default()
+                    get(&a, "d").map(flatten).unwrap_or_default()
                 } else {
                     let nums: Vec<f32> = get(&a, "points")
                         .unwrap_or("")
@@ -744,7 +845,13 @@ pub fn raster_svg(svg: &str, target: u32) -> Option<IconRgba> {
                         continue;
                     }
                     let closed = name != "polyline";
-                    shapes.push(Shape::Poly { pts: poly, closed, fill, stroke, op });
+                    shapes.push(Shape::Poly {
+                        pts: poly,
+                        closed,
+                        fill,
+                        stroke,
+                        op,
+                    });
                 }
             }
             _ => {}
@@ -758,7 +865,15 @@ pub fn raster_svg(svg: &str, target: u32) -> Option<IconRgba> {
     let mut buf = vec![0u8; n * n * 4];
     for sh in &shapes {
         match sh {
-            Shape::Rect { x, y, w, h, rx, fill, op } => {
+            Shape::Rect {
+                x,
+                y,
+                w,
+                h,
+                rx,
+                fill,
+                op,
+            } => {
                 let (x0, y0) = tf(*x, *y);
                 let (x1, y1) = tf(*x + w, *y + h);
                 let r = rx * scale;
@@ -766,10 +881,22 @@ pub fn raster_svg(svg: &str, target: u32) -> Option<IconRgba> {
                     for px in (x0.floor() as i32).max(0)..(x1.ceil() as i32).min(n as i32) {
                         let (fx, fy) = (px as f32 + 0.5, py as f32 + 0.5);
                         if r > 0.0 {
-                            let inside_tl = fx < x0 + r && fy < y0 + r && ((fx - x0 - r) * (fx - x0 - r) + (fy - y0 - r) * (fy - y0 - r)) > r * r;
-                            let inside_tr = fx > x1 - r && fy < y0 + r && ((fx - x1 + r) * (fx - x1 + r) + (fy - y0 - r) * (fy - y0 - r)) > r * r;
-                            let inside_bl = fx < x0 + r && fy > y1 - r && ((fx - x0 - r) * (fx - x0 - r) + (fy - y1 + r) * (fy - y1 + r)) > r * r;
-                            let inside_br = fx > x1 - r && fy > y1 - r && ((fx - x1 + r) * (fx - x1 + r) + (fy - y1 + r) * (fy - y1 + r)) > r * r;
+                            let inside_tl = fx < x0 + r
+                                && fy < y0 + r
+                                && ((fx - x0 - r) * (fx - x0 - r) + (fy - y0 - r) * (fy - y0 - r))
+                                    > r * r;
+                            let inside_tr = fx > x1 - r
+                                && fy < y0 + r
+                                && ((fx - x1 + r) * (fx - x1 + r) + (fy - y0 - r) * (fy - y0 - r))
+                                    > r * r;
+                            let inside_bl = fx < x0 + r
+                                && fy > y1 - r
+                                && ((fx - x0 - r) * (fx - x0 - r) + (fy - y1 + r) * (fy - y1 + r))
+                                    > r * r;
+                            let inside_br = fx > x1 - r
+                                && fy > y1 - r
+                                && ((fx - x1 + r) * (fx - x1 + r) + (fy - y1 + r) * (fy - y1 + r))
+                                    > r * r;
                             if inside_tl || inside_tr || inside_bl || inside_br {
                                 continue;
                             }
@@ -778,11 +905,22 @@ pub fn raster_svg(svg: &str, target: u32) -> Option<IconRgba> {
                     }
                 }
             }
-            Shape::Ellipse { cx, cy, rx, ry, fill, op } => {
+            Shape::Ellipse {
+                cx,
+                cy,
+                rx,
+                ry,
+                fill,
+                op,
+            } => {
                 let (ccx, ccy) = tf(*cx, *cy);
                 let (rx, ry) = (*rx * scale, *ry * scale);
-                for py in ((ccy - ry).floor() as i32).max(0)..((ccy + ry).ceil() as i32).min(n as i32) {
-                    for px in ((ccx - rx).floor() as i32).max(0)..((ccx + rx).ceil() as i32).min(n as i32) {
+                for py in
+                    ((ccy - ry).floor() as i32).max(0)..((ccy + ry).ceil() as i32).min(n as i32)
+                {
+                    for px in
+                        ((ccx - rx).floor() as i32).max(0)..((ccx + rx).ceil() as i32).min(n as i32)
+                    {
                         let dx = (px as f32 + 0.5 - ccx) / rx;
                         let dy = (py as f32 + 0.5 - ccy) / ry;
                         if dx * dx + dy * dy <= 1.0 {
@@ -791,7 +929,13 @@ pub fn raster_svg(svg: &str, target: u32) -> Option<IconRgba> {
                     }
                 }
             }
-            Shape::Poly { pts, closed, fill, stroke, op } => {
+            Shape::Poly {
+                pts,
+                closed,
+                fill,
+                stroke,
+                op,
+            } => {
                 let t: Vec<(f32, f32)> = pts.iter().map(|(x, y)| tf(*x, *y)).collect();
                 if let Some(f) = fill {
                     if *closed {
@@ -810,7 +954,9 @@ pub fn raster_svg(svg: &str, target: u32) -> Option<IconRgba> {
                             xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
                             for pair in xs.chunks(2) {
                                 if pair.len() == 2 {
-                                    for px in (pair[0].floor() as i32).max(0)..(pair[1].ceil() as i32).min(n as i32) {
+                                    for px in (pair[0].floor() as i32).max(0)
+                                        ..(pair[1].ceil() as i32).min(n as i32)
+                                    {
                                         blend(&mut buf, n, px, py, *f, *op);
                                     }
                                 }
@@ -827,7 +973,11 @@ pub fn raster_svg(svg: &str, target: u32) -> Option<IconRgba> {
             }
         }
     }
-    Some(IconRgba { w: n as u32, h: n as u32, px: buf })
+    Some(IconRgba {
+        w: n as u32,
+        h: n as u32,
+        px: buf,
+    })
 }
 
 fn blend(buf: &mut [u8], n: usize, x: i32, y: i32, c: Rgba, op: f32) {
@@ -837,7 +987,12 @@ fn blend(buf: &mut [u8], n: usize, x: i32, y: i32, c: Rgba, op: f32) {
     let i = ((y as usize) * n + x as usize) * 4;
     let a = c.3 * op;
     let px = &mut buf[i..i + 4];
-    let (sr, sg, sb, sa) = (px[0] as f32 / 255.0, px[1] as f32 / 255.0, px[2] as f32 / 255.0, px[3] as f32 / 255.0);
+    let (sr, sg, sb, sa) = (
+        px[0] as f32 / 255.0,
+        px[1] as f32 / 255.0,
+        px[2] as f32 / 255.0,
+        px[3] as f32 / 255.0,
+    );
     let oa = a + sa * (1.0 - a);
     if oa <= 0.0 {
         return;
@@ -880,7 +1035,10 @@ pub struct TexCache {
 
 impl TexCache {
     pub fn new() -> Self {
-        Self { tex: HashMap::new(), epoch: 0 }
+        Self {
+            tex: HashMap::new(),
+            epoch: 0,
+        }
     }
 
     /// Texture for an icon name, or None when not decoded yet / no icon
@@ -942,7 +1100,7 @@ pub fn tint_cached(name: &str) -> Option<egui::Color32> {
 
 fn tint_of(i: &IconRgba) -> Option<egui::Color32> {
     let (mut r, mut g, mut b, mut n) = (0u64, 0u64, 0u64, 0u64);
-    for p in i.px.chunks_exact(4) {
+    for p in i.px.as_chunks::<4>().0 {
         if p[3] > 200 {
             r += p[0] as u64;
             g += p[1] as u64;
@@ -953,7 +1111,11 @@ fn tint_of(i: &IconRgba) -> Option<egui::Color32> {
     if n == 0 {
         return None;
     }
-    Some(egui::Color32::from_rgb((r / n) as u8, (g / n) as u8, (b / n) as u8))
+    Some(egui::Color32::from_rgb(
+        (r / n) as u8,
+        (g / n) as u8,
+        (b / n) as u8,
+    ))
 }
 
 #[cfg(test)]
@@ -987,9 +1149,15 @@ mod tests {
         };
         // centre is the white circle, corner is the orange rounded rect
         let (r, g, b, a) = at(32, 32);
-        assert!(a > 200 && r > 200 && g > 200 && b > 200, "centre {r},{g},{b},{a}");
+        assert!(
+            a > 200 && r > 200 && g > 200 && b > 200,
+            "centre {r},{g},{b},{a}"
+        );
         let (r, g, b, a) = at(12, 32);
-        assert!(a > 200 && r > 180 && g > 80 && b < 90, "side {r},{g},{b},{a}");
+        assert!(
+            a > 200 && r > 180 && g > 80 && b < 90,
+            "side {r},{g},{b},{a}"
+        );
         // outside the rounded rect: transparent
         assert!(at(0, 0).3 == 0);
     }
@@ -1026,15 +1194,16 @@ mod tests {
         // build a gzipped svg and run it through the same decode the loader uses
         use std::io::Write;
         let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        e.write_all(br##"<svg viewBox="0 0 32 32"><rect width="32" height="32" fill="red"/></svg>"##)
-            .unwrap();
+        e.write_all(
+            br##"<svg viewBox="0 0 32 32"><rect width="32" height="32" fill="red"/></svg>"##,
+        )
+        .unwrap();
         let gz = e.finish().unwrap();
         let mut out = Vec::new();
         std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(&gz[..]), &mut out).unwrap();
         let img = raster_svg(&String::from_utf8_lossy(&out), 32).unwrap();
         assert!(img.px[3] > 200);
     }
-
 
     /// On a live desktop, the names the .desktop layer produces must
     /// actually decode: this is what the Processes rows and dashboard

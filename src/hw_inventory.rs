@@ -42,7 +42,6 @@ impl Inventory {
             .filter_map(|d| d.kern.clone())
             .collect()
     }
-
 }
 
 /// Filesystems mounted off the inventoried drives (root and home, …), read
@@ -88,23 +87,23 @@ pub fn disk_usage() -> Vec<DiskUsage> {
 }
 
 /// Whole-disk name for a partition: nvme0n1p2 -> nvme0n1, sda1 -> sda,
-    /// mmcblk0p1 -> mmcblk0.
+/// mmcblk0p1 -> mmcblk0.
 pub fn whole_of(part: &str) -> Option<String> {
     if part.starts_with("nvme") || part.starts_with("mmcblk") {
-    match part.rfind('p') {
-        Some(i)
-            if !part[i + 1..].is_empty()
-                && part[i + 1..].chars().all(|c| c.is_ascii_digit()) =>
-        {
-            Some(part[..i].to_string())
+        match part.rfind('p') {
+            Some(i)
+                if !part[i + 1..].is_empty()
+                    && part[i + 1..].chars().all(|c| c.is_ascii_digit()) =>
+            {
+                Some(part[..i].to_string())
+            }
+            _ => Some(part.to_string()), // the whole disk mounted directly
         }
-        _ => Some(part.to_string()), // the whole disk mounted directly
-    }
     } else {
-    match part.find(|c: char| c.is_ascii_digit()) {
-        Some(end) => Some(part[..end].to_string()),
-        None => Some(part.to_string()), // sda, vda: already whole
-    }
+        match part.find(|c: char| c.is_ascii_digit()) {
+            Some(end) => Some(part[..end].to_string()),
+            None => Some(part.to_string()), // sda, vda: already whole
+        }
     }
 }
 
@@ -146,13 +145,8 @@ fn statvfs(path: &str) -> Result<(u64, u64), ()> {
     if rc != 0 || buf.f_frsize == 0 || buf.f_blocks == 0 {
         return Err(());
     }
-    Ok((
-        buf.f_blocks * buf.f_frsize,
-        buf.f_bavail * buf.f_frsize,
-    ))
+    Ok((buf.f_blocks * buf.f_frsize, buf.f_bavail * buf.f_frsize))
 }
-
-
 
 /// PCI vendor/device id -> human name, from `lspci -mm -n -D` output.
 /// Returns an empty map when lspci is unavailable.
@@ -251,7 +245,10 @@ fn gpus(names: &HashMap<String, String>) -> Vec<HwDevice> {
     cards.sort();
     for card in cards {
         let dev = format!("/sys/class/drm/{card}/device");
-        let (Some(vendor), Some(device)) = (hex_id(&format!("{dev}/vendor")), hex_id(&format!("{dev}/device"))) else {
+        let (Some(vendor), Some(device)) = (
+            hex_id(&format!("{dev}/vendor")),
+            hex_id(&format!("{dev}/device")),
+        ) else {
             continue;
         };
         let class = sysfs(&format!("{dev}/class")).unwrap_or_default();
@@ -259,7 +256,10 @@ fn gpus(names: &HashMap<String, String>) -> Vec<HwDevice> {
             continue;
         }
         let key = format!("{vendor}:{device}");
-        let raw = names.get(&key).cloned().unwrap_or_else(|| format!("GPU [{key}]"));
+        let raw = names
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| format!("GPU [{key}]"));
         let name = pretty_pci_name(&raw);
         let driver = fs::read_link(format!("{dev}/driver"))
             .ok()
@@ -276,7 +276,12 @@ fn gpus(names: &HashMap<String, String>) -> Vec<HwDevice> {
             }
             detail.push_str(&format!("{} VRAM", fmt_size(v as i64)));
         }
-        out.push(HwDevice { kind: "gpu", name, detail, kern: None });
+        out.push(HwDevice {
+            kind: "gpu",
+            name,
+            detail,
+            kern: None,
+        });
     }
     out
 }
@@ -344,7 +349,10 @@ fn nics(names: &HashMap<String, String>) -> Vec<HwDevice> {
         if !Path::new(&dev).exists() {
             continue; // virtual iface (docker0, veth…) — no physical device
         }
-        let (Some(vendor), Some(device)) = (hex_id(&format!("{dev}/vendor")), hex_id(&format!("{dev}/device"))) else {
+        let (Some(vendor), Some(device)) = (
+            hex_id(&format!("{dev}/vendor")),
+            hex_id(&format!("{dev}/device")),
+        ) else {
             continue;
         };
         let key = format!("{vendor}:{device}");
@@ -354,7 +362,12 @@ fn nics(names: &HashMap<String, String>) -> Vec<HwDevice> {
             .filter(|s| *s > 0)
             .map(|s| format!("{s} Mbit/s"))
             .unwrap_or_else(|| iface.clone());
-        out.push(HwDevice { kind: "nic", name, detail: speed, kern: None });
+        out.push(HwDevice {
+            kind: "nic",
+            name,
+            detail: speed,
+            kern: None,
+        });
     }
     // the same PCI device can back several interfaces; keep one row
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -469,7 +482,9 @@ fn nvidia_cards_present() -> bool {
 pub fn gpu_stats_hwmon_only() -> Vec<GpuStat> {
     let mut out = Vec::new();
     let names = lspci_names();
-    let Ok(entries) = fs::read_dir("/sys/class/drm") else { return out };
+    let Ok(entries) = fs::read_dir("/sys/class/drm") else {
+        return out;
+    };
     let mut cards: Vec<String> = entries
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
@@ -478,14 +493,20 @@ pub fn gpu_stats_hwmon_only() -> Vec<GpuStat> {
     cards.sort();
     for card in &cards {
         let dev = format!("/sys/class/drm/{card}/device");
-        let (Some(vendor), Some(device)) = (hex_id(&format!("{dev}/vendor")), hex_id(&format!("{dev}/device"))) else {
+        let (Some(vendor), Some(device)) = (
+            hex_id(&format!("{dev}/vendor")),
+            hex_id(&format!("{dev}/device")),
+        ) else {
             continue;
         };
         let class = sysfs(&format!("{dev}/class")).unwrap_or_default();
         if !GPU_CLASSES.contains(&class.as_str()) {
             continue;
         }
-        let raw = names.get(&format!("{vendor}:{device}")).cloned().unwrap_or_else(|| format!("GPU [{card}]"));
+        let raw = names
+            .get(&format!("{vendor}:{device}"))
+            .cloned()
+            .unwrap_or_else(|| format!("GPU [{card}]"));
         let name = pretty_pci_name(&raw);
         if vendor == "10de" {
             out.push(GpuStat {
@@ -525,7 +546,10 @@ pub static INVENTORY: LazyLock<Inventory> = LazyLock::new(|| {
         .and_then(|l| l.split_once(':'))
         .map(|(_, v)| v.trim().to_string())
         .unwrap_or_else(|| "unknown CPU".to_string());
-    let ncpu = cpuinfo.lines().filter(|l| l.starts_with("processor")).count();
+    let ncpu = cpuinfo
+        .lines()
+        .filter(|l| l.starts_with("processor"))
+        .count();
     let board = sysfs("/sys/class/dmi/id/board_name")
         .or_else(|| sysfs("/sys/class/dmi/id/product_name"))
         .unwrap_or_default();
@@ -555,7 +579,11 @@ pub static INVENTORY: LazyLock<Inventory> = LazyLock::new(|| {
     });
     devices.extend(disks());
     devices.extend(nics(&names));
-    Inventory { cpu, board, devices }
+    Inventory {
+        cpu,
+        board,
+        devices,
+    }
 });
 
 #[cfg(test)]
@@ -573,12 +601,19 @@ mod tests {
     fn disk_usage_reports_plausible_capacity_for_inventoried_disks() {
         let usages = disk_usage();
         // any real Linux box has at least the root fs on an inventoried disk
-        assert!(!usages.is_empty(), "no mounted filesystem matched the inventory");
+        assert!(
+            !usages.is_empty(),
+            "no mounted filesystem matched the inventory"
+        );
         for u in &usages {
             assert!(u.total > 0, "{} total=0", u.mount);
             assert!(u.used <= u.total, "{} used>total", u.mount);
             assert!(u.mount.starts_with('/'), "{} not a path", u.mount);
-            assert!(INVENTORY.disk_kerns().iter().any(|k| *k == u.kern), "{} not inventoried", u.kern);
+            assert!(
+                INVENTORY.disk_kerns().contains(&u.kern),
+                "{} not inventoried",
+                u.kern
+            );
         }
     }
 
@@ -592,10 +627,15 @@ mod tests {
         );
         // no bracket: strip the "… Corporation " vendor prefix, keep the rest
         assert_eq!(
-            pretty_pci_name("Advanced Micro Devices, Inc. [AMD/ATI] Granite Ridge [Radeon Graphics]"),
+            pretty_pci_name(
+                "Advanced Micro Devices, Inc. [AMD/ATI] Granite Ridge [Radeon Graphics]"
+            ),
             "Radeon Graphics"
         );
-        assert_eq!(pretty_pci_name("Vendor Corporation Widget Pro"), "Widget Pro");
+        assert_eq!(
+            pretty_pci_name("Vendor Corporation Widget Pro"),
+            "Widget Pro"
+        );
         assert_eq!(pretty_pci_name("Plain Device Name"), "Plain Device Name");
     }
 
@@ -603,7 +643,10 @@ mod tests {
     fn inventory_names_the_cpu() {
         let inv = &*INVENTORY;
         assert!(!inv.cpu.is_empty());
-        assert!(inv.devices.iter().any(|d| d.kind == "cpu" && d.name == inv.cpu));
+        assert!(inv
+            .devices
+            .iter()
+            .any(|d| d.kind == "cpu" && d.name == inv.cpu));
     }
 
     #[test]
@@ -621,7 +664,9 @@ mod tests {
 
     #[test]
     fn parse_nvidia_row_reads_all_fields() {
-        let g = parse_nvidia_row("NVIDIA GeForce RTX 5080, 55, 99, 16303, 15266, 194.68, 595.99.02").unwrap();
+        let g =
+            parse_nvidia_row("NVIDIA GeForce RTX 5080, 55, 99, 16303, 15266, 194.68, 595.99.02")
+                .unwrap();
         assert_eq!(g.name, "NVIDIA GeForce RTX 5080");
         assert_eq!(g.temp_c, Some(55.0));
         assert_eq!(g.busy_pct, Some(99.0));
@@ -645,7 +690,7 @@ mod tests {
         for g in &gs {
             assert!(!g.name.is_empty());
             if let Some(b) = g.busy_pct {
-                assert!(b >= 0.0 && b <= 100.0, "busy out of range: {b}");
+                assert!((0.0..=100.0).contains(&b), "busy out of range: {b}");
             }
             if let Some(t) = g.temp_c {
                 assert!(t > 0.0 && t < 150.0, "gpu temp out of range: {t}");

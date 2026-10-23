@@ -80,7 +80,10 @@ fn default_true() -> bool {
 
 impl Default for GeneralConfig {
     fn default() -> Self {
-        Self { refresh_secs: 2.0, autoscroll_logs: true }
+        Self {
+            refresh_secs: 2.0,
+            autoscroll_logs: true,
+        }
     }
 }
 
@@ -158,8 +161,14 @@ pub fn write_at(path: &std::path::Path, cfg: &FileConfig) -> Result<(), String> 
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default();
-    root.insert("strata".into(), serde_json::to_value(&cfg.strata).map_err(|e| e.to_string())?);
-    root.insert("general".into(), serde_json::to_value(&cfg.general).map_err(|e| e.to_string())?);
+    root.insert(
+        "strata".into(),
+        serde_json::to_value(&cfg.strata).map_err(|e| e.to_string())?,
+    );
+    root.insert(
+        "general".into(),
+        serde_json::to_value(&cfg.general).map_err(|e| e.to_string())?,
+    );
     let pretty = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
     std::fs::write(path, pretty).map_err(|e| e.to_string())
 }
@@ -362,7 +371,10 @@ pub fn parse_metrics(body: &[u8]) -> Result<Metrics, String> {
     let mut m = Metrics::default();
     m.model = sstr(engine.get("model")).unwrap_or_default();
     m.max_context = ndef(engine.get("max_context"), 0);
-    m.images = engine.get("images").and_then(|v| v.as_bool()).unwrap_or(false);
+    m.images = engine
+        .get("images")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     m.batch = ndef(engine.get("batch"), 0);
     m.batch_groups = ndef(engine.get("batch_groups"), 0);
     m.expert_slots = num(engine.get("expert_slots")).map(|x| x as i64);
@@ -421,7 +433,11 @@ pub fn parse_metrics(body: &[u8]) -> Result<Metrics, String> {
         }
     }
 
-    for (key, slot) in [("ttft", &mut m.ttft), ("itl", &mut m.itl), ("e2e", &mut m.e2e)] {
+    for (key, slot) in [
+        ("ttft", &mut m.ttft),
+        ("itl", &mut m.itl),
+        ("e2e", &mut m.e2e),
+    ] {
         let o = lat.get(key);
         slot.p50 = num(o.and_then(|o| o.get("p50")));
         slot.p90 = num(o.and_then(|o| o.get("p90")));
@@ -439,7 +455,10 @@ pub fn parse_metrics(body: &[u8]) -> Result<Metrics, String> {
 
     if conv.is_object() {
         let mut c = ConvCache::default();
-        c.enabled = conv.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+        c.enabled = conv
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         c.budget_mib = num(conv.get("budget_mib")).map(|x| x as i64);
         c.slots = num(conv.get("slots")).map(|x| x as i64);
         c.parked = num(conv.get("parked")).map(|x| x as i64);
@@ -562,7 +581,10 @@ impl HttpClient {
             return Err("the server needs an API key (401) — set it in the fields above".into());
         }
         if !(200..300).contains(&status) {
-            let text = String::from_utf8_lossy(&body).chars().take(160).collect::<String>();
+            let text = String::from_utf8_lossy(&body)
+                .chars()
+                .take(160)
+                .collect::<String>();
             return Err(format!("/metrics: HTTP {status} {text}"));
         }
         parse_metrics(&body)
@@ -575,7 +597,9 @@ struct HttpConnector;
 impl tower_service::Service<Uri> for HttpConnector {
     type Response = TokioIo<tokio::net::TcpStream>;
     type Error = std::io::Error;
-    type Future = Pin<Box<dyn Future<Output = Result<TokioIo<tokio::net::TcpStream>, std::io::Error>> + Send>>;
+    type Future = Pin<
+        Box<dyn Future<Output = Result<TokioIo<tokio::net::TcpStream>, std::io::Error>> + Send>,
+    >;
 
     fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
@@ -590,7 +614,9 @@ impl tower_service::Service<Uri> for HttpConnector {
             let sock = tokio::net::lookup_host((host, port))
                 .await?
                 .next()
-                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no address for host"))?;
+                .ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::NotFound, "no address for host")
+                })?;
             tokio::net::TcpStream::connect(sock).await.map(TokioIo::new)
         })
     }
@@ -613,7 +639,9 @@ pub fn get_blocking(cfg: &StrataConfig, path: &str) -> Result<(u16, Vec<u8>), St
     // literal ([::1]) carries no scope id and cannot be connected; keep only
     // loopback/unscoped addresses from the resolver.
     let addrs = match std::net::ToSocketAddrs::to_socket_addrs(&(host_only, port)) {
-        Ok(a) => a.filter(|a| !(a.is_ipv6() && a.ip().to_string().starts_with("fe80"))).collect::<Vec<_>>(),
+        Ok(a) => a
+            .filter(|a| !(a.is_ipv6() && a.ip().to_string().starts_with("fe80")))
+            .collect::<Vec<_>>(),
         Err(e) => return Err(format!("{path}: resolve: {e}")),
     };
     let mut connected = None;
@@ -629,21 +657,34 @@ pub fn get_blocking(cfg: &StrataConfig, path: &str) -> Result<(u16, Vec<u8>), St
     }
     let mut stream = match connected {
         Some(s) => s,
-        None => return Err(format!("{path}: {}", last_err.map(|e| e.to_string()).unwrap_or_else(|| "no address".into()))),
+        None => {
+            return Err(format!(
+                "{path}: {}",
+                last_err
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "no address".into())
+            ))
+        }
     };
     stream.set_nodelay(true).ok();
     // every read is bounded: the real server closes the connection, but a
     // misbehaving one must never wedge the UI worker thread forever
-    stream.set_read_timeout(Some(std::time::Duration::from_millis(3000))).ok();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_millis(3000)))
+        .ok();
     // path is absolute ("/health"); prefix is "" or "/some/base"
     let req = format!(
         "GET {prefix}{path} HTTP/1.1\r\nHost: {authority}\r\nAccept: application/json\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
         cfg.api_key.trim()
     );
     use std::io::{Read, Write};
-    stream.write_all(req.as_bytes()).map_err(|e| format!("{path}: {e}"))?;
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|e| format!("{path}: {e}"))?;
     let mut buf = Vec::new();
-    stream.read_to_end(&mut buf).map_err(|e| format!("{path}: {e}"))?;
+    stream
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("{path}: {e}"))?;
     let split = buf
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
@@ -675,7 +716,10 @@ mod blocking_tests {
             let n = sock.read(&mut req).unwrap_or(0);
             let head = String::from_utf8_lossy(&req[..n]).to_string();
             let body = "{\"ok\": true}";
-            let resp = format!("HTTP/1.1 {response}\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+            let resp = format!(
+                "HTTP/1.1 {response}\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
             sock.write_all(resp.as_bytes()).unwrap();
             head
         });
@@ -874,10 +918,11 @@ pub mod tests {
     #[test]
     fn config_round_trip_merges_other_keys() {
         let _home = isolate_home();
-        let dir = std::env::temp_dir().join(format!("syskamling-strata-cfg-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("syskamling-strata-cfg-{}", std::process::id()));
         std::fs::create_dir_all(dir.join(".config/syskamling")).unwrap();
         std::env::set_var("HOME", &dir);
-                let path = dir.join(".config/syskamling/config.json");
+        let path = dir.join(".config/syskamling/config.json");
         std::fs::write(&path, r#"{"other": 7}"#).unwrap();
         let all = FileConfig {
             strata: StrataConfig {
@@ -899,14 +944,21 @@ pub mod tests {
     #[test]
     fn general_settings_round_trip_and_merge() {
         let _home = isolate_home();
-        let dir = std::env::temp_dir().join(format!("syskamling-general-rt-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("syskamling-general-rt-{}", std::process::id()));
         std::fs::create_dir_all(dir.join(".config/syskamling")).unwrap();
         std::env::set_var("HOME", &dir);
         let path = dir.join(".config/syskamling/config.json");
         std::fs::write(&path, r#"{"other": {"keep": 1}}"#).unwrap();
         let all = FileConfig {
-            strata: StrataConfig { endpoint: "http://h:1".into(), api_key: "k".into() },
-            general: GeneralConfig { refresh_secs: 5.0, autoscroll_logs: false },
+            strata: StrataConfig {
+                endpoint: "http://h:1".into(),
+                api_key: "k".into(),
+            },
+            general: GeneralConfig {
+                refresh_secs: 5.0,
+                autoscroll_logs: false,
+            },
         };
         save_file(&all).unwrap();
         let back = load_file();
@@ -921,10 +973,15 @@ pub mod tests {
     #[test]
     fn general_defaults_when_absent() {
         let _home = isolate_home();
-        let dir = std::env::temp_dir().join(format!("syskamling-general-def-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("syskamling-general-def-{}", std::process::id()));
         std::fs::create_dir_all(dir.join(".config/syskamling")).unwrap();
         std::env::set_var("HOME", &dir);
-        std::fs::write(dir.join(".config/syskamling/config.json"), r#"{"strata":{"api_key":"k"}}"#).unwrap();
+        std::fs::write(
+            dir.join(".config/syskamling/config.json"),
+            r#"{"strata":{"api_key":"k"}}"#,
+        )
+        .unwrap();
         let back = load_file();
         assert_eq!(back.general, GeneralConfig::default());
         std::fs::remove_dir_all(&dir).ok();
@@ -933,10 +990,11 @@ pub mod tests {
     #[test]
     fn load_survives_a_broken_file() {
         let _home = isolate_home();
-        let dir = std::env::temp_dir().join(format!("syskamling-strata-bad-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("syskamling-strata-bad-{}", std::process::id()));
         std::fs::create_dir_all(dir.join(".config/syskamling")).unwrap();
         std::env::set_var("HOME", &dir);
-                std::fs::write(dir.join(".config/syskamling/config.json"), "not json").unwrap();
+        std::fs::write(dir.join(".config/syskamling/config.json"), "not json").unwrap();
         assert_eq!(load(), StrataConfig::default());
         std::fs::remove_dir_all(&dir).ok();
     }

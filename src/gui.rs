@@ -16,8 +16,8 @@ use tokio::sync::mpsc;
 
 use crate::agents::{Activity, AgentScanner, AgentSession, Step, StepKind};
 use crate::docker::{
-    self, ContainerSummary, DiskSummary, Docker, DockerError, EventMessage, ImageSummary,
-    LogLine, StatsSample, StreamKind, SystemInfo,
+    self, ContainerSummary, DiskSummary, Docker, DockerError, EventMessage, ImageSummary, LogLine,
+    StatsSample, StreamKind, SystemInfo,
 };
 use crate::hw::{HwSample, Sampler};
 use crate::hw_inventory as hwinv;
@@ -398,7 +398,11 @@ impl Gui {
                 f.is_empty()
                     || a.agent.to_lowercase().contains(&f)
                     || a.vendor.to_lowercase().contains(&f)
-                    || a.cwd.as_deref().map(|c| c.to_lowercase()).unwrap_or_default().contains(&f)
+                    || a.cwd
+                        .as_deref()
+                        .map(|c| c.to_lowercase())
+                        .unwrap_or_default()
+                        .contains(&f)
             })
             .collect()
     }
@@ -431,7 +435,11 @@ impl Gui {
                     || p.proto.contains(&f)
                     || p.addr.contains(&f)
                     || p.port.to_string().contains(&f)
-                    || p.proc_name.as_deref().map(|n| n.to_lowercase()).unwrap_or_default().contains(&f)
+                    || p.proc_name
+                        .as_deref()
+                        .map(|n| n.to_lowercase())
+                        .unwrap_or_default()
+                        .contains(&f)
                     || p.state.to_lowercase().contains(&f)
             })
             .collect()
@@ -465,7 +473,10 @@ impl Gui {
         };
         push(&mut self.hw_cpu_hist, s.cpu_pct);
         push(&mut self.hw_mem_hist, (s.mem_total - s.mem_avail) as f64);
-        push(&mut self.hw_swap_hist, s.swap_total.saturating_sub(s.swap_free) as f64);
+        push(
+            &mut self.hw_swap_hist,
+            s.swap_total.saturating_sub(s.swap_free) as f64,
+        );
         push(&mut self.hw_disk_r_hist, s.disk_read_bps);
         push(&mut self.hw_disk_w_hist, s.disk_write_bps);
         push(&mut self.hw_net_rx_hist, s.net_rx_bps);
@@ -473,10 +484,23 @@ impl Gui {
         push_opt(&mut self.hw_cpu_temp_hist, s.cpu_temp_c);
         // GPU aggregates: busiest GPU busy%, most-used VRAM across GPUs,
         // hottest GPU/SSD sensor — one row each regardless of GPU count.
-        let busy = gpus.iter().filter_map(|g| g.busy_pct).fold(None::<f64>, |a, b| Some(a.map_or(b, |a| a.max(b))));
-        let vram = gpus.iter().map(|g| g.vram_used as f64).fold(0.0_f64, f64::max);
-        let gpu_temp = gpus.iter().filter_map(|g| g.temp_c).fold(None::<f64>, |a, b| Some(a.map_or(b, |a| a.max(b))));
-        let disk_temp = s.disks.iter().filter_map(|d| d.temp_c).fold(None::<f64>, |a, b| Some(a.map_or(b, |a| a.max(b))));
+        let busy = gpus
+            .iter()
+            .filter_map(|g| g.busy_pct)
+            .fold(None::<f64>, |a, b| Some(a.map_or(b, |a| a.max(b))));
+        let vram = gpus
+            .iter()
+            .map(|g| g.vram_used as f64)
+            .fold(0.0_f64, f64::max);
+        let gpu_temp = gpus
+            .iter()
+            .filter_map(|g| g.temp_c)
+            .fold(None::<f64>, |a, b| Some(a.map_or(b, |a| a.max(b))));
+        let disk_temp = s
+            .disks
+            .iter()
+            .filter_map(|d| d.temp_c)
+            .fold(None::<f64>, |a, b| Some(a.map_or(b, |a| a.max(b))));
         push_opt(&mut self.hw_gpu_busy_hist, busy);
         if vram > 0.0 {
             push(&mut self.hw_gpu_vram_hist, vram);
@@ -504,7 +528,7 @@ impl Gui {
         if self.logs_container.as_deref() != Some("__all__") {
             return;
         }
-        self.logs.sort_by(|a, b| ts_of(&a.text).cmp(&ts_of(&b.text)));
+        self.logs.sort_by(|a, b| ts_of(&a.text).cmp(ts_of(&b.text)));
     }
 }
 
@@ -700,7 +724,11 @@ impl SysKamlingApp {
     fn probe_hardware_scroll(size: egui::Vec2) -> (f32, f32) {
         let ctx = egui::Context::default();
         let (tx, rx) = mpsc::unbounded_channel();
-        let rt = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap(),
+        );
         let mut app = Self::new_offscreen(&ctx, tx, rx, rt);
         app.gui.tab = Tab::Hardware;
         app.sample_hardware();
@@ -709,10 +737,18 @@ impl SysKamlingApp {
         // names must match the inventory for the storage cards to render;
         // pad with the first inventoried name so several cards stack up
         let real: Vec<String> = crate::hw_inventory::INVENTORY.disk_kerns();
-        let base = if real.is_empty() { "nvme0n1".to_string() } else { real[0].clone() };
+        let base = if real.is_empty() {
+            "nvme0n1".to_string()
+        } else {
+            real[0].clone()
+        };
         rich.disks = (0..8)
             .map(|i| crate::hw::DiskStat {
-                name: if i < real.len() { real[i].clone() } else { base.clone() },
+                name: if i < real.len() {
+                    real[i].clone()
+                } else {
+                    base.clone()
+                },
                 reads: 10,
                 writes: 20,
                 total_read: 1000,
@@ -730,9 +766,10 @@ impl SysKamlingApp {
         hw_scroll_probe::reset();
         for _ in 0..3 {
             ctx.begin_pass(raw.clone());
-            egui::CentralPanel::default().show(&ctx, |ui| match app.gui.tab {
-                Tab::Hardware => app.hardware_view(ui),
-                _ => {}
+            egui::CentralPanel::default().show(&ctx, |ui| {
+                if app.gui.tab == Tab::Hardware {
+                    app.hardware_view(ui)
+                }
             });
             let _ = ctx.end_pass();
         }
@@ -820,7 +857,7 @@ fn apply_theme(ctx: &egui::Context) {
     w.active.weak_bg_fill = Color32::from_rgb(46, 54, 70);
     w.active.bg_stroke = Stroke::new(1.0_f32, ACCENT);
     w.active.fg_stroke = Stroke::new(1.0_f32, TEXT);
-    w.open = w.active.clone();
+    w.open = w.active;
     for s in [
         &mut w.noninteractive,
         &mut w.inactive,
@@ -842,10 +879,18 @@ fn apply_theme(ctx: &egui::Context) {
     style.spacing.scroll = egui::style::ScrollStyle::floating();
 
     style.text_styles.insert(TextStyle::Heading, bold(22.0));
-    style.text_styles.insert(TextStyle::Body, FontId::proportional(14.0));
-    style.text_styles.insert(TextStyle::Button, FontId::proportional(13.5));
-    style.text_styles.insert(TextStyle::Monospace, FontId::monospace(12.5));
-    style.text_styles.insert(TextStyle::Small, FontId::proportional(12.0));
+    style
+        .text_styles
+        .insert(TextStyle::Body, FontId::proportional(14.0));
+    style
+        .text_styles
+        .insert(TextStyle::Button, FontId::proportional(13.5));
+    style
+        .text_styles
+        .insert(TextStyle::Monospace, FontId::monospace(12.5));
+    style
+        .text_styles
+        .insert(TextStyle::Small, FontId::proportional(12.0));
 
     ctx.set_style(style);
 }
@@ -867,7 +912,11 @@ fn install_fonts(ctx: &egui::Context) {
         let bytes = files
             .iter()
             .flat_map(|f| DIRS.iter().map(move |d| format!("{d}/{f}")))
-            .chain(files.iter().map(|f| format!("/usr/share/fonts/truetype/hack/{f}")))
+            .chain(
+                files
+                    .iter()
+                    .map(|f| format!("/usr/share/fonts/truetype/hack/{f}")),
+            )
             .find_map(|p| std::fs::read(p).ok())?;
         fonts
             .font_data
@@ -875,10 +924,17 @@ fn install_fonts(ctx: &egui::Context) {
         Some(key.to_string())
     };
     let ui = load("syskamling-ui", &["NotoSans-Regular.ttf", "DejaVuSans.ttf"]);
-    let ui_bold = load("syskamling-bold", &["NotoSans-Bold.ttf", "DejaVuSans-Bold.ttf"]);
+    let ui_bold = load(
+        "syskamling-bold",
+        &["NotoSans-Bold.ttf", "DejaVuSans-Bold.ttf"],
+    );
     let mono = load(
         "syskamling-mono",
-        &["Hack-Regular.ttf", "DejaVuSansMono.ttf", "NotoSansMono-Regular.ttf"],
+        &[
+            "Hack-Regular.ttf",
+            "DejaVuSansMono.ttf",
+            "NotoSansMono-Regular.ttf",
+        ],
     );
     let symbols = load("syskamling-symbols", &["DejaVuSans.ttf"]);
 
@@ -895,7 +951,9 @@ fn install_fonts(ctx: &egui::Context) {
     let bold_fam = family(ui_bold, &stock_prop);
     let mono_fam = family(mono, &stock_mono);
     fonts.families.insert(FontFamily::Proportional, prop);
-    fonts.families.insert(FontFamily::Name("bold".into()), bold_fam);
+    fonts
+        .families
+        .insert(FontFamily::Name("bold".into()), bold_fam);
     fonts.families.insert(FontFamily::Monospace, mono_fam);
     ctx.set_fonts(fonts);
 }
@@ -915,7 +973,8 @@ impl eframe::App for SysKamlingApp {
 
         // Periodic refresh + continuous repaint at ~4 fps when idle so the
         // list stays live without burning CPU.
-        if self.tick.elapsed() >= Duration::from_millis(if self.refresh > 0.0 { 250 } else { 100 }) {
+        if self.tick.elapsed() >= Duration::from_millis(if self.refresh > 0.0 { 250 } else { 100 })
+        {
             self.tick = Instant::now();
             if self.refresh > 0.0
                 && self.last_refresh.elapsed() >= Duration::from_secs_f64(self.refresh)
@@ -932,7 +991,9 @@ impl eframe::App for SysKamlingApp {
             self.spawn_strata_poll();
             // nvidia-smi (~50 ms) runs off the UI thread only when the
             // Hardware tab is visible; the result lands via the channel.
-            if self.gui.tab == Tab::Hardware && self.last_gpu_stats.elapsed() >= Duration::from_secs_f64(self.refresh.max(1.0)) {
+            if self.gui.tab == Tab::Hardware
+                && self.last_gpu_stats.elapsed() >= Duration::from_secs_f64(self.refresh.max(1.0))
+            {
                 self.last_gpu_stats = Instant::now();
                 if !*self.gpu_scan_busy.lock().unwrap() {
                     *self.gpu_scan_busy.lock().unwrap() = true;
@@ -1014,7 +1075,13 @@ impl SysKamlingApp {
         let s = self.sampler.sample();
         // keep whatever richer nvidia numbers the async scan last produced;
         // hwmon-only fills in everything else instantly
-        let nvidia = self.gui.gpus.iter().filter(|g| g.driver == "nvidia").cloned().collect::<Vec<_>>();
+        let nvidia = self
+            .gui
+            .gpus
+            .iter()
+            .filter(|g| g.driver == "nvidia")
+            .cloned()
+            .collect::<Vec<_>>();
         let mut gpus = gpu_stats_hwmon_only();
         gpus.retain(|g| g.driver != "nvidia");
         gpus.extend(nvidia);
@@ -1112,10 +1179,13 @@ impl SysKamlingApp {
     /// `force` bypasses the visible-tab gate (used for the first pull when
     /// the tab opens and right after settings change).
     fn spawn_strata_poll_inner(&mut self, force: bool) {
-        if (!force && !matches!(self.gui.tab, Tab::Strata | Tab::Dashboard)) || self.refresh <= 0.0 {
+        if (!force && !matches!(self.gui.tab, Tab::Strata | Tab::Dashboard)) || self.refresh <= 0.0
+        {
             return;
         }
-        if !force && self.last_strata_poll.elapsed() < Duration::from_secs_f64(self.refresh.max(1.0)) {
+        if !force
+            && self.last_strata_poll.elapsed() < Duration::from_secs_f64(self.refresh.max(1.0))
+        {
             return;
         }
         if *self.strata_poll_busy.lock().unwrap() {
@@ -1128,16 +1198,23 @@ impl SysKamlingApp {
         let cfg = self.gui.strata_cfg.clone();
         self.rt.spawn_blocking(move || {
             let h = match strata::get_blocking(&cfg, "/health") {
-                Ok((200, body)) => serde_json::from_slice(&body).map_err(|e| format!("/health: bad JSON: {e}")),
+                Ok((200, body)) => {
+                    serde_json::from_slice(&body).map_err(|e| format!("/health: bad JSON: {e}"))
+                }
                 Ok((s, _)) => Err(format!("/health: HTTP {s}")),
                 Err(e) => Err(e),
             };
             let _ = tx.send(Msg::StrataHealth(h));
             let m = match strata::get_blocking(&cfg, "/metrics") {
                 Ok((200, body)) => strata::parse_metrics(&body),
-                Ok((401, _)) => Err("the server needs an API key (401) — set it in the fields above".into()),
+                Ok((401, _)) => {
+                    Err("the server needs an API key (401) — set it in the fields above".into())
+                }
                 Ok((s, body)) => {
-                    let text = String::from_utf8_lossy(&body).chars().take(160).collect::<String>();
+                    let text = String::from_utf8_lossy(&body)
+                        .chars()
+                        .take(160)
+                        .collect::<String>();
                     Err(format!("/metrics: HTTP {s} {text}"))
                 }
                 Err(e) => Err(e),
@@ -1253,7 +1330,12 @@ impl SysKamlingApp {
 
         // Spinner: a 0.9 s spin once per action, cleared when the action ends.
         if let Some((id, started)) = &self.spin {
-            if self.gui.pending_action.as_ref().is_some_and(|(i, _)| i == id) {
+            if self
+                .gui
+                .pending_action
+                .as_ref()
+                .is_some_and(|(i, _)| i == id)
+            {
                 let _ = started;
                 animating = true;
             } else {
@@ -1314,9 +1396,8 @@ impl SysKamlingApp {
                                 );
                             }
                         }
-                        self.all_logs_follow.retain(|id| {
-                            want.iter().any(|(wid, _)| wid == id)
-                        });
+                        self.all_logs_follow
+                            .retain(|id| want.iter().any(|(wid, _)| wid == id));
                     }
                 }
                 if let Ok(i) = data.images {
@@ -1436,7 +1517,10 @@ impl SysKamlingApp {
                     g.selected_port = g
                         .ports
                         .iter()
-                        .find(|p| (p.proto, p.addr.as_str(), p.port) == (key.0.as_str(), key.1.as_str(), key.2))
+                        .find(|p| {
+                            (p.proto, p.addr.as_str(), p.port)
+                                == (key.0.as_str(), key.1.as_str(), key.2)
+                        })
                         .map(|p| (p.proto.to_string(), p.addr.clone(), p.port));
                 }
             }
@@ -1505,7 +1589,11 @@ impl SysKamlingApp {
         let n_run = g.containers.iter().filter(|c| c.state == "running").count();
         let items = [
             (Tab::Dashboard, "Dashboard", String::new()),
-            (Tab::Containers, "Containers", format!("{n_run}/{}", g.containers.len())),
+            (
+                Tab::Containers,
+                "Containers",
+                format!("{n_run}/{}", g.containers.len()),
+            ),
             (Tab::Images, "Images", g.images.len().to_string()),
             (Tab::Volumes, "Volumes", g.volumes.len().to_string()),
             (Tab::Agents, "Agents", g.agents.len().to_string()),
@@ -1516,12 +1604,20 @@ impl SysKamlingApp {
             (Tab::Logs, "Logs", String::new()),
         ];
         let sys_items = [(Tab::Settings, "Settings", String::new())];
-        let version = g.info.as_ref().map(|i| i.server_version.clone()).unwrap_or_default();
+        let version = g
+            .info
+            .as_ref()
+            .map(|i| i.server_version.clone())
+            .unwrap_or_default();
         let synced = self.last_sync.map(|t| t.elapsed().as_secs());
         egui::SidePanel::left("nav")
             .exact_width(216.0)
             .resizable(false)
-            .frame(Frame::NONE.fill(RAIL).inner_margin(Margin::symmetric(12, 18)))
+            .frame(
+                Frame::NONE
+                    .fill(RAIL)
+                    .inner_margin(Margin::symmetric(12, 18)),
+            )
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.add_space(4.0);
@@ -1530,7 +1626,11 @@ impl SysKamlingApp {
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 0.0;
                         ui.label(RichText::new("SysKamling").font(bold(15.0)).color(TEXT));
-                        ui.label(RichText::new("Developer system monitor").size(11.5).color(FAINT));
+                        ui.label(
+                            RichText::new("Developer system monitor")
+                                .size(11.5)
+                                .color(FAINT),
+                        );
                     });
                 });
                 ui.add_space(16.0);
@@ -1704,7 +1804,11 @@ impl SysKamlingApp {
                     ),
                     Tab::Images => ("Images", self.gui.images.len(), "Search tags"),
                     Tab::Agents => ("Agents", self.gui.agents.len(), "Search agent or project"),
-                    Tab::Ports => ("Ports", self.gui.ports.len(), "Search port, process or address"),
+                    Tab::Ports => (
+                        "Ports",
+                        self.gui.ports.len(),
+                        "Search port, process or address",
+                    ),
                     _ => ("Volumes", self.gui.volumes.len(), "Search volumes"),
                 };
                 ui.horizontal(|ui| {
@@ -1765,7 +1869,9 @@ impl SysKamlingApp {
                             g.ports_listening_only = !g.ports_listening_only;
                         }
                         if toggle_chip(ui, "Exposed", g.ports_exposed_only)
-                            .on_hover_text("Only sockets bound beyond loopback (reachable from the network)")
+                            .on_hover_text(
+                                "Only sockets bound beyond loopback (reachable from the network)",
+                            )
                             .clicked()
                         {
                             g.ports_exposed_only = !g.ports_exposed_only;
@@ -1815,10 +1921,8 @@ impl SysKamlingApp {
                 ui.spacing_mut().item_spacing.y = 4.0;
                 let time = ui.input(|i| i.time);
                 for (i, c) in rows {
-                    let (rect, resp) = ui.allocate_exact_size(
-                        Vec2::new(ui.available_width(), 58.0),
-                        Sense::click(),
-                    );
+                    let (rect, resp) = ui
+                        .allocate_exact_size(Vec2::new(ui.available_width(), 58.0), Sense::click());
                     if resp.clicked() {
                         new_sel = Some(i);
                     }
@@ -1883,14 +1987,24 @@ impl SysKamlingApp {
                         }
                     } else {
                         let label = capitalize(&c.state);
-                        pill_at(p, Pos2::new(rect.right() - 12.0, rect.center().y), &label, FAINT, SURFACE_HI);
+                        pill_at(
+                            p,
+                            Pos2::new(rect.right() - 12.0, rect.center().y),
+                            &label,
+                            FAINT,
+                            SURFACE_HI,
+                        );
                     }
                     let ports = c.port_summary();
                     resp.on_hover_text(format!(
                         "{}\n{}{}",
                         c.image,
                         c.status,
-                        if ports.is_empty() { String::new() } else { format!("\n{ports}") }
+                        if ports.is_empty() {
+                            String::new()
+                        } else {
+                            format!("\n{ports}")
+                        }
                     ));
                 }
             });
@@ -1925,10 +2039,8 @@ impl SysKamlingApp {
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 4.0;
                 for im in rows {
-                    let (rect, resp) = ui.allocate_exact_size(
-                        Vec2::new(ui.available_width(), 58.0),
-                        Sense::click(),
-                    );
+                    let (rect, resp) = ui
+                        .allocate_exact_size(Vec2::new(ui.available_width(), 58.0), Sense::click());
                     let is_sel = sel.as_deref() == Some(im.id.as_str());
                     if resp.clicked() {
                         new_sel = Some(if is_sel { None } else { Some(im.id.clone()) });
@@ -1944,7 +2056,13 @@ impl SysKamlingApp {
                     let text_w = (rect.width() - 54.0 - 86.0).max(40.0);
                     let tag = im.tag();
                     let (repo, version) = tag.rsplit_once(':').unwrap_or((tag.as_str(), ""));
-                    let name = elide(p, repo.to_string(), FontId::proportional(14.0), TEXT, text_w);
+                    let name = elide(
+                        p,
+                        repo.to_string(),
+                        FontId::proportional(14.0),
+                        TEXT,
+                        text_w,
+                    );
                     p.galley(Pos2::new(left, rect.top() + 10.0), name, TEXT);
                     let usage = if in_use {
                         format!("{} in use", im.containers)
@@ -1973,7 +2091,12 @@ impl SysKamlingApp {
     }
 
     fn agent_list(&mut self, ui: &mut Ui) {
-        let mut rows: Vec<&AgentSession> = self.gui.filtered_agents().into_iter().map(|(_, a)| a).collect();
+        let mut rows: Vec<&AgentSession> = self
+            .gui
+            .filtered_agents()
+            .into_iter()
+            .map(|(_, a)| a)
+            .collect();
         let sel = self.gui.selected_agent;
         if rows.is_empty() {
             if self.gui.agents.is_empty() {
@@ -1989,16 +2112,34 @@ impl SysKamlingApp {
         }
         // whatever needs you first, then whatever is working
         rows.sort_by_key(|a| (agent_state(a).rank, a.agent, a.lead_pid));
-        let count = |rank: u8| self.gui.agents.iter().filter(|a| agent_state(a).rank == rank).count();
+        let count = |rank: u8| {
+            self.gui
+                .agents
+                .iter()
+                .filter(|a| agent_state(a).rank == rank)
+                .count()
+        };
         let (needs, working) = (count(0), count(1));
         ui.horizontal(|ui| {
             ui.add_space(4.0);
-            ui.label(RichText::new(format!("{} sessions", self.gui.agents.len())).size(12.0).color(MUTED));
+            ui.label(
+                RichText::new(format!("{} sessions", self.gui.agents.len()))
+                    .size(12.0)
+                    .color(MUTED),
+            );
             if working > 0 {
-                ui.label(RichText::new(format!("· {working} working")).size(12.0).color(GREEN));
+                ui.label(
+                    RichText::new(format!("· {working} working"))
+                        .size(12.0)
+                        .color(GREEN),
+                );
             }
             if needs > 0 {
-                ui.label(RichText::new(format!("· {needs} need you")).size(12.0).color(AMBER));
+                ui.label(
+                    RichText::new(format!("· {needs} need you"))
+                        .size(12.0)
+                        .color(AMBER),
+                );
             }
         });
         ui.add_space(6.0);
@@ -2010,10 +2151,8 @@ impl SysKamlingApp {
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 4.0;
                 for a in rows {
-                    let (rect, resp) = ui.allocate_exact_size(
-                        Vec2::new(ui.available_width(), 62.0),
-                        Sense::click(),
-                    );
+                    let (rect, resp) = ui
+                        .allocate_exact_size(Vec2::new(ui.available_width(), 62.0), Sense::click());
                     let is_sel = sel == Some(a.lead_pid);
                     if resp.clicked() {
                         new_sel = Some(if is_sel { None } else { Some(a.lead_pid) });
@@ -2042,17 +2181,33 @@ impl SysKamlingApp {
                     let title = elide(p, agent_title(a), FontId::proportional(14.0), TEXT, text_w);
                     p.galley(Pos2::new(left, rect.top() + 10.0), title, TEXT);
                     // second line: what it's doing right now, else where it runs
-                    let doing = a.activity.as_ref().filter(|_| st.live).and_then(|x| x.steps.last());
+                    let doing = a
+                        .activity
+                        .as_ref()
+                        .filter(|_| st.live)
+                        .and_then(|x| x.steps.last());
                     let (sub, sub_color) = match doing {
                         Some(s) => (step_line(s), MUTED),
                         None => (agent_where(a), FAINT),
                     };
                     let mut x = left;
                     if doing.is_some() {
-                        spinner_at(p, time, Pos2::new(x + 5.0, rect.top() + 42.0), 4.5, st.color);
+                        spinner_at(
+                            p,
+                            time,
+                            Pos2::new(x + 5.0, rect.top() + 42.0),
+                            4.5,
+                            st.color,
+                        );
                         x += 16.0;
                     }
-                    let sub = elide(p, sub, FontId::proportional(12.0), sub_color, text_w - (x - left));
+                    let sub = elide(
+                        p,
+                        sub,
+                        FontId::proportional(12.0),
+                        sub_color,
+                        text_w - (x - left),
+                    );
                     p.galley(Pos2::new(x, rect.top() + 34.0), sub, sub_color);
                 }
             });
@@ -2075,7 +2230,11 @@ impl SysKamlingApp {
                     "Nothing is bound on this machine — or /proc/net is unreadable.",
                 );
             } else {
-                empty_state(ui, "No sockets match", "Try another search or turn off some filters.");
+                empty_state(
+                    ui,
+                    "No sockets match",
+                    "Try another search or turn off some filters.",
+                );
             }
             return;
         }
@@ -2087,8 +2246,10 @@ impl SysKamlingApp {
                 for (_i, p) in rows {
                     let key = (p.proto.to_string(), p.addr.clone(), p.port);
                     let rect_h = if p.proc_name.is_some() { 58.0 } else { 44.0 };
-                    let (rect, resp) =
-                        ui.allocate_exact_size(Vec2::new(ui.available_width(), rect_h), Sense::click());
+                    let (rect, resp) = ui.allocate_exact_size(
+                        Vec2::new(ui.available_width(), rect_h),
+                        Sense::click(),
+                    );
                     let is_sel = sel.as_ref() == Some(&key);
                     if resp.clicked() {
                         new_sel = Some(if is_sel { None } else { Some(key.clone()) });
@@ -2114,13 +2275,7 @@ impl SysKamlingApp {
                         .proc_name
                         .clone()
                         .unwrap_or_else(|| format!("{} · kernel/other", p.addr));
-                    let sub = elide(
-                        paint,
-                        sub,
-                        FontId::proportional(12.5),
-                        MUTED,
-                        text_w,
-                    );
+                    let sub = elide(paint, sub, FontId::proportional(12.5), MUTED, text_w);
                     paint.galley(Pos2::new(left, rect.top() + 30.0), sub, MUTED);
                     paint.text(
                         Pos2::new(rect.right() - 12.0, rect.center().y),
@@ -2159,7 +2314,11 @@ impl SysKamlingApp {
             })
             .count();
         if !self.gui.proc_filter.is_empty() {
-            ui.label(RichText::new(format!("{n} of {n_all} processes match")).size(11.5).color(FAINT));
+            ui.label(
+                RichText::new(format!("{n} of {n_all} processes match"))
+                    .size(11.5)
+                    .color(FAINT),
+            );
         }
     }
 
@@ -2214,7 +2373,10 @@ impl SysKamlingApp {
         // ---- header ----
         let (hr, _) = ui.allocate_exact_size(Vec2::new(w, 24.0), Sense::hover());
         let p = ui.painter().clone();
-        p.line_segment([hr.left_bottom(), hr.right_bottom()], Stroke::new(1.0_f32, BORDER));
+        p.line_segment(
+            [hr.left_bottom(), hr.right_bottom()],
+            Stroke::new(1.0_f32, BORDER),
+        );
         let mut new_sort: Option<SortCol> = None;
         // left x of every header cell, captured for the offscreen tests
         #[cfg(test)]
@@ -2244,7 +2406,11 @@ impl SysKamlingApp {
             }
             let active = self.gui.proc_sort == col;
             let arrow = if active {
-                if self.gui.proc_sort_desc { " ▼" } else { " ▲" }
+                if self.gui.proc_sort_desc {
+                    " ▼"
+                } else {
+                    " ▲"
+                }
             } else {
                 ""
             };
@@ -2253,10 +2419,22 @@ impl SysKamlingApp {
                 align,
                 format!("{label}{arrow}"),
                 FontId::proportional(12.0),
-                if active { ACCENT } else if resp.hovered() { TEXT } else { FAINT },
+                if active {
+                    ACCENT
+                } else if resp.hovered() {
+                    TEXT
+                } else {
+                    FAINT
+                },
             );
         };
-        header(ui, "Name", SortCol::Name, hr.left() + icon_w + 6.0, egui::Align2::LEFT_CENTER);
+        header(
+            ui,
+            "Name",
+            SortCol::Name,
+            hr.left() + icon_w + 6.0,
+            egui::Align2::LEFT_CENTER,
+        );
         ui.painter().text(
             Pos2::new(hr.left() + icon_w + name_w + user_w - 6.0, hr.center().y),
             egui::Align2::RIGHT_CENTER,
@@ -2264,9 +2442,27 @@ impl SysKamlingApp {
             FontId::proportional(12.0),
             FAINT,
         );
-        header(ui, "PID", SortCol::Pid, hr.left() + icon_w + name_w + user_w + pid_w - 6.0, egui::Align2::RIGHT_CENTER);
-        header(ui, "CPU", SortCol::Cpu, hr.left() + icon_w + name_w + user_w + pid_w + cpu_w - 6.0, egui::Align2::RIGHT_CENTER);
-        header(ui, "Memory", SortCol::Mem, hr.right() - 6.0, egui::Align2::RIGHT_CENTER);
+        header(
+            ui,
+            "PID",
+            SortCol::Pid,
+            hr.left() + icon_w + name_w + user_w + pid_w - 6.0,
+            egui::Align2::RIGHT_CENTER,
+        );
+        header(
+            ui,
+            "CPU",
+            SortCol::Cpu,
+            hr.left() + icon_w + name_w + user_w + pid_w + cpu_w - 6.0,
+            egui::Align2::RIGHT_CENTER,
+        );
+        header(
+            ui,
+            "Memory",
+            SortCol::Mem,
+            hr.right() - 6.0,
+            egui::Align2::RIGHT_CENTER,
+        );
         if let Some(col) = new_sort {
             if self.gui.proc_sort == col {
                 self.gui.proc_sort_desc = !self.gui.proc_sort_desc;
@@ -2276,7 +2472,6 @@ impl SysKamlingApp {
                 self.gui.proc_sort_desc = !matches!(col, SortCol::Name | SortCol::Pid);
             }
         }
-
 
         // ---- rows ----
         let sel = self.gui.selected_proc;
@@ -2298,7 +2493,9 @@ impl SysKamlingApp {
                         ("proc-row", e.members[0].pid as u64)
                     };
                     let rect = ui.allocate_exact_size(Vec2::new(w, 30.0), Sense::click()).0;
-                    let clicked = ui.interact(rect, ui.id().with(key), Sense::click()).clicked();
+                    let clicked = ui
+                        .interact(rect, ui.id().with(key), Sense::click())
+                        .clicked();
                     let is_sel = !is_app && sel == Some(e.members[0].pid);
                     if clicked {
                         if is_app {
@@ -2326,7 +2523,10 @@ impl SysKamlingApp {
                     // app icon: the real application icon when the system
                     // theme has one, otherwise a tinted tile with a drawn
                     // glyph per process family (browser, terminal, …)
-                    let tile = Rect::from_center_size(rect.left_center() + Vec2::new(15.0, 0.0), Vec2::splat(24.0));
+                    let tile = Rect::from_center_size(
+                        rect.left_center() + Vec2::new(15.0, 0.0),
+                        Vec2::splat(24.0),
+                    );
                     let ic = proc_icon_color(e.kind);
                     ui.painter().rect_filled(tile, 7.0, ic.gamma_multiply(0.14));
                     match self.gui.icons.get(&e.icon) {
@@ -2342,38 +2542,65 @@ impl SysKamlingApp {
                         title.push_str("  ·  ");
                         title.push_str(&e.sub);
                     }
-                    let name = elide(ui.painter(), title, FontId::proportional(13.0), color, name_w - 24.0);
+                    let name = elide(
+                        ui.painter(),
+                        title,
+                        FontId::proportional(13.0),
+                        color,
+                        name_w - 24.0,
+                    );
                     let name_w_px = name.size().x;
-                    ui.painter().galley(Pos2::new(x_name, rect.center().y - name.size().y / 2.0), name, color);
+                    ui.painter().galley(
+                        Pos2::new(x_name, rect.center().y - name.size().y / 2.0),
+                        name,
+                        color,
+                    );
                     if is_app {
                         // disclosure chevron in the name cell
                         let cx = x_name + name_w_px + 8.0;
                         let cy = rect.center().y;
                         let s = Stroke::new(1.4_f32, FAINT);
                         let (a, b, c2) = if open {
-                            (Pos2::new(cx, cy - 3.0), Pos2::new(cx + 4.0, cy + 2.0), Pos2::new(cx + 8.0, cy - 3.0))
+                            (
+                                Pos2::new(cx, cy - 3.0),
+                                Pos2::new(cx + 4.0, cy + 2.0),
+                                Pos2::new(cx + 8.0, cy - 3.0),
+                            )
                         } else {
-                            (Pos2::new(cx, cy - 4.0), Pos2::new(cx + 4.0, cy), Pos2::new(cx, cy + 4.0))
+                            (
+                                Pos2::new(cx, cy - 4.0),
+                                Pos2::new(cx + 4.0, cy),
+                                Pos2::new(cx, cy + 4.0),
+                            )
                         };
                         ui.painter().line_segment([a, b], s);
                         ui.painter().line_segment([b, c2], s);
                     }
                     ui.painter().text(
-                        Pos2::new(rect.left() + icon_w + name_w + user_w - 6.0, rect.center().y),
+                        Pos2::new(
+                            rect.left() + icon_w + name_w + user_w - 6.0,
+                            rect.center().y,
+                        ),
                         egui::Align2::RIGHT_CENTER,
                         &e.user,
                         FontId::proportional(11.5),
                         if e.user == "root" { AMBER } else { MUTED },
                     );
                     ui.painter().text(
-                        Pos2::new(rect.left() + icon_w + name_w + user_w + pid_w - 6.0, rect.center().y),
+                        Pos2::new(
+                            rect.left() + icon_w + name_w + user_w + pid_w - 6.0,
+                            rect.center().y,
+                        ),
                         egui::Align2::RIGHT_CENTER,
                         &e.pid_label,
                         FontId::monospace(12.0),
                         MUTED,
                     );
                     ui.painter().text(
-                        Pos2::new(rect.left() + icon_w + name_w + user_w + pid_w + cpu_w - 6.0, rect.center().y),
+                        Pos2::new(
+                            rect.left() + icon_w + name_w + user_w + pid_w + cpu_w - 6.0,
+                            rect.center().y,
+                        ),
                         egui::Align2::RIGHT_CENTER,
                         format!("{:.1}", e.cpu),
                         FontId::monospace(12.0),
@@ -2389,7 +2616,8 @@ impl SysKamlingApp {
                     // expanded: the individual processes behind this app
                     if open {
                         for m in &e.members {
-                            let rrect = ui.allocate_exact_size(Vec2::new(w, 26.0), Sense::click()).0;
+                            let rrect =
+                                ui.allocate_exact_size(Vec2::new(w, 26.0), Sense::click()).0;
                             if !ui.is_rect_visible(rrect) {
                                 continue;
                             }
@@ -2403,16 +2631,30 @@ impl SysKamlingApp {
                             let msel = sel == Some(m.pid);
                             if msel {
                                 ui.painter().rect_filled(
-                                    Rect::from_min_max(Pos2::new(rect.left() + 28.0, rrect.top()), rrect.max),
+                                    Rect::from_min_max(
+                                        Pos2::new(rect.left() + 28.0, rrect.top()),
+                                        rrect.max,
+                                    ),
                                     8.0,
                                     ACCENT.gamma_multiply(0.10),
                                 );
                             }
-                            if ui.interact(rrect, ui.id().with(("proc-member", m.pid)), Sense::click()).clicked() {
+                            if ui
+                                .interact(
+                                    rrect,
+                                    ui.id().with(("proc-member", m.pid)),
+                                    Sense::click(),
+                                )
+                                .clicked()
+                            {
                                 new_sel = Some(if msel { None } else { Some(m.pid) });
                             }
                             let x = rect.left() + 40.0;
-                            ui.painter().circle_filled(Pos2::new(x, rrect.center().y), 2.5, proc_icon_color(&m.icon));
+                            ui.painter().circle_filled(
+                                Pos2::new(x, rrect.center().y),
+                                2.5,
+                                proc_icon_color(m.icon),
+                            );
                             let nm = elide(
                                 ui.painter(),
                                 m.name.clone(),
@@ -2426,14 +2668,20 @@ impl SysKamlingApp {
                                 if msel { TEXT } else { MUTED },
                             );
                             ui.painter().text(
-                                Pos2::new(rect.left() + icon_w + name_w + user_w + pid_w - 6.0, rrect.center().y),
+                                Pos2::new(
+                                    rect.left() + icon_w + name_w + user_w + pid_w - 6.0,
+                                    rrect.center().y,
+                                ),
                                 egui::Align2::RIGHT_CENTER,
                                 m.pid.to_string(),
                                 FontId::monospace(11.5),
                                 MUTED,
                             );
                             ui.painter().text(
-                                Pos2::new(rect.left() + icon_w + name_w + user_w + pid_w + cpu_w - 6.0, rrect.center().y),
+                                Pos2::new(
+                                    rect.left() + icon_w + name_w + user_w + pid_w + cpu_w - 6.0,
+                                    rrect.center().y,
+                                ),
                                 egui::Align2::RIGHT_CENTER,
                                 format!("{:.1}", m.cpu_pct),
                                 FontId::monospace(11.5),
@@ -2468,7 +2716,11 @@ impl SysKamlingApp {
             return;
         };
         let Some(r) = self.gui.procs.iter().find(|r| r.pid == pid).cloned() else {
-            ui.label(RichText::new("That process exited; pick another row.").size(12.5).color(FAINT));
+            ui.label(
+                RichText::new("That process exited; pick another row.")
+                    .size(12.5)
+                    .color(FAINT),
+            );
             return;
         };
         let now = epoch();
@@ -2483,9 +2735,23 @@ impl SysKamlingApp {
                     ui.add_space(4.0);
                 }
                 ui.label(RichText::new(&r.name).font(bold(16.0)).color(TEXT));
-                let cpu_color = if r.cpu_pct > 80.0 { RED } else if r.cpu_pct > 30.0 { AMBER } else { ACCENT };
-                ui.label(RichText::new(format!("{:.1}% cpu", r.cpu_pct)).font(bold(13.0)).color(cpu_color));
-                ui.label(RichText::new(format!("· {}", human_size(r.rss_bytes as i64))).size(13.0).color(VIOLET));
+                let cpu_color = if r.cpu_pct > 80.0 {
+                    RED
+                } else if r.cpu_pct > 30.0 {
+                    AMBER
+                } else {
+                    ACCENT
+                };
+                ui.label(
+                    RichText::new(format!("{:.1}% cpu", r.cpu_pct))
+                        .font(bold(13.0))
+                        .color(cpu_color),
+                );
+                ui.label(
+                    RichText::new(format!("· {}", human_size(r.rss_bytes as i64)))
+                        .size(13.0)
+                        .color(VIOLET),
+                );
                 let st: (&str, Color32) = match r.state {
                     'R' => ("running", GREEN),
                     'S' | 'I' => ("sleeping", MUTED),
@@ -2501,7 +2767,7 @@ impl SysKamlingApp {
                         r.pid,
                         r.threads,
                         r.user,
-                        uptime_str(up as i64)
+                        uptime_str(up)
                     ))
                     .size(12.0)
                     .color(FAINT),
@@ -2510,7 +2776,9 @@ impl SysKamlingApp {
             if !r.cmdline.is_empty() {
                 ui.add(
                     egui::Label::new(
-                        RichText::new(&r.cmdline).font(FontId::monospace(12.0)).color(MUTED),
+                        RichText::new(&r.cmdline)
+                            .font(FontId::monospace(12.0))
+                            .color(MUTED),
                     )
                     .wrap(),
                 );
@@ -2557,7 +2825,11 @@ impl SysKamlingApp {
                 .map(|x| format!("{} ({})", x.name, x.pid))
                 .collect();
             if !kids.is_empty() {
-                ui.label(RichText::new(format!("children: {}", kids.join(", "))).size(11.5).color(FAINT));
+                ui.label(
+                    RichText::new(format!("children: {}", kids.join(", ")))
+                        .size(11.5)
+                        .color(FAINT),
+                );
             }
         });
     }
@@ -2581,10 +2853,8 @@ impl SysKamlingApp {
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 4.0;
                 for v in rows {
-                    let (rect, resp) = ui.allocate_exact_size(
-                        Vec2::new(ui.available_width(), 58.0),
-                        Sense::click(),
-                    );
+                    let (rect, resp) = ui
+                        .allocate_exact_size(Vec2::new(ui.available_width(), 58.0), Sense::click());
                     let is_sel = sel.as_deref() == Some(v.name.as_str());
                     if resp.clicked() {
                         new_sel = Some(if is_sel { None } else { Some(v.name.clone()) });
@@ -2595,7 +2865,12 @@ impl SysKamlingApp {
                     let p = ui.painter();
                     row_bg(p, rect, is_sel, resp.hovered());
                     let refs = v.usage_data.as_ref().map(|u| u.ref_count);
-                    icon_tile(p, rect, Tab::Volumes, if refs != Some(0) { VIOLET } else { FAINT });
+                    icon_tile(
+                        p,
+                        rect,
+                        Tab::Volumes,
+                        if refs != Some(0) { VIOLET } else { FAINT },
+                    );
                     let left = rect.left() + 54.0;
                     let text_w = (rect.width() - 54.0 - 86.0).max(40.0);
                     let name = elide(p, v.name.clone(), FontId::proportional(14.0), TEXT, text_w);
@@ -2605,7 +2880,11 @@ impl SysKamlingApp {
                         match refs {
                             Some(1) => format!("{} · 1 ref", v.driver),
                             Some(n) => format!("{} · {n} refs", v.driver),
-                            None => format!("{} · created {}", v.driver, v.created.get(..10).unwrap_or("?")),
+                            None => format!(
+                                "{} · created {}",
+                                v.driver,
+                                v.created.get(..10).unwrap_or("?")
+                            ),
                         },
                         FontId::proportional(12.0),
                         MUTED,
@@ -2686,7 +2965,10 @@ impl SysKamlingApp {
                     });
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
-                            .add(egui::Button::new(RichText::new("Dismiss").size(12.5).color(MUTED)).frame(false))
+                            .add(
+                                egui::Button::new(RichText::new("Dismiss").size(12.5).color(MUTED))
+                                    .frame(false),
+                            )
                             .clicked()
                         {
                             dismiss = true;
@@ -2783,23 +3065,39 @@ impl SysKamlingApp {
                 None
             }
         };
-        let hottest = |it: &mut dyn Iterator<Item = f64>| it.fold(None::<f64>, |a, b| Some(a.map_or(b, |a| a.max(b))));
+        let hottest = |it: &mut dyn Iterator<Item = f64>| {
+            it.fold(None::<f64>, |a, b| Some(a.map_or(b, |a| a.max(b))))
+        };
         let mut issues: Vec<(Color32, String, Tab)> = Vec::new();
         if let Some(h) = &g.hw {
             let mem = (h.mem_total - h.mem_avail) as f64 / h.mem_total.max(1) as f64 * 100.0;
             if let Some(c) = level(mem, 80.0, 92.0) {
-                issues.push((c, format!("Memory {mem:.0}% used · {} free", human_size(h.mem_avail as i64)), Tab::Hardware));
+                issues.push((
+                    c,
+                    format!(
+                        "Memory {mem:.0}% used · {} free",
+                        human_size(h.mem_avail as i64)
+                    ),
+                    Tab::Hardware,
+                ));
             }
             if h.swap_total > 0 {
-                let swap = h.swap_total.saturating_sub(h.swap_free) as f64 / h.swap_total as f64 * 100.0;
+                let swap =
+                    h.swap_total.saturating_sub(h.swap_free) as f64 / h.swap_total as f64 * 100.0;
                 if let Some(c) = level(swap, 50.0, 85.0) {
                     issues.push((c, format!("Swap {swap:.0}% used"), Tab::Hardware));
                 }
             }
             if h.load5 > h.ncpu as f64 {
-                issues.push((AMBER, format!("Load {:.1} is above {} CPUs", h.load5, h.ncpu), Tab::Hardware));
+                issues.push((
+                    AMBER,
+                    format!("Load {:.1} is above {} CPUs", h.load5, h.ncpu),
+                    Tab::Hardware,
+                ));
             }
-            let gpu_t = h.gpu_temp_c.or_else(|| hottest(&mut g.gpus.iter().filter_map(|x| x.temp_c)));
+            let gpu_t = h
+                .gpu_temp_c
+                .or_else(|| hottest(&mut g.gpus.iter().filter_map(|x| x.temp_c)));
             let ssd_t = hottest(&mut h.disks.iter().filter_map(|d| d.temp_c));
             for (what, t, warn, bad) in [
                 ("CPU", h.cpu_temp_c.or(h.temp_c), 80.0, 90.0),
@@ -2807,13 +3105,25 @@ impl SysKamlingApp {
                 ("SSD", ssd_t, 60.0, 70.0),
             ] {
                 if let Some((c, t)) = t.and_then(|t| level(t, warn, bad).map(|c| (c, t))) {
-                    issues.push((c, format!("{what} running hot at {} °C", temp_str(t)), Tab::Hardware));
+                    issues.push((
+                        c,
+                        format!("{what} running hot at {} °C", temp_str(t)),
+                        Tab::Hardware,
+                    ));
                 }
             }
         }
-        let restarting = g.containers.iter().filter(|c| c.state == "restarting").count();
+        let restarting = g
+            .containers
+            .iter()
+            .filter(|c| c.state == "restarting")
+            .count();
         if restarting > 0 {
-            issues.push((RED, format!("{restarting} container(s) stuck restarting"), Tab::Containers));
+            issues.push((
+                RED,
+                format!("{restarting} container(s) stuck restarting"),
+                Tab::Containers,
+            ));
         }
         // exited non-zero recently ("Exited (1) 3 minutes ago"); old corpses
         // from last week are not news
@@ -2824,23 +3134,40 @@ impl SysKamlingApp {
             .filter(|c| c.status.contains("second") || c.status.contains("minute"))
             .count();
         if crashed > 0 {
-            issues.push((AMBER, format!("{crashed} container(s) exited with an error in the last hour"), Tab::Containers));
+            issues.push((
+                AMBER,
+                format!("{crashed} container(s) exited with an error in the last hour"),
+                Tab::Containers,
+            ));
         }
         let waiting = g.agents.iter().filter(|a| agent_state(a).rank == 0).count();
         if waiting > 0 {
-            issues.push((AMBER, format!("{waiting} agent session(s) waiting for your input"), Tab::Agents));
+            issues.push((
+                AMBER,
+                format!("{waiting} agent session(s) waiting for your input"),
+                Tab::Agents,
+            ));
         }
         if !g.strata_cfg.api_key.trim().is_empty() && g.strata_error.is_some() {
             issues.push((AMBER, "Strata server is not responding".into(), Tab::Strata));
         }
         if let Some(df) = &g.df {
-            let reclaim: i64 = [&df.image_usage, &df.container_usage, &df.volume_usage, &df.build_cache_usage]
-                .into_iter()
-                .flatten()
-                .map(|u| u.reclaimable)
-                .sum();
+            let reclaim: i64 = [
+                &df.image_usage,
+                &df.container_usage,
+                &df.volume_usage,
+                &df.build_cache_usage,
+            ]
+            .into_iter()
+            .flatten()
+            .map(|u| u.reclaimable)
+            .sum();
             if reclaim >= 10 << 30 {
-                issues.push((ACCENT, format!("{} of Docker data can be reclaimed", human_size(reclaim)), Tab::Images));
+                issues.push((
+                    ACCENT,
+                    format!("{} of Docker data can be reclaimed", human_size(reclaim)),
+                    Tab::Images,
+                ));
             }
         }
         issues.sort_by_key(|(c, _, _)| [RED, AMBER, ACCENT].iter().position(|x| x == c));
@@ -2851,26 +3178,45 @@ impl SysKamlingApp {
                 ui.horizontal(|ui| {
                     let (r, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
                     ui.painter().circle_filled(r.center(), 4.0, GREEN);
-                    ui.label(RichText::new("All systems normal").font(bold(13.5)).color(TEXT));
-                    ui.label(RichText::new("memory, temperatures, containers and Strata look healthy").size(12.5).color(FAINT));
+                    ui.label(
+                        RichText::new("All systems normal")
+                            .font(bold(13.5))
+                            .color(TEXT),
+                    );
+                    ui.label(
+                        RichText::new("memory, temperatures, containers and Strata look healthy")
+                            .size(12.5)
+                            .color(FAINT),
+                    );
                 });
                 return;
             }
             card_title(
                 ui,
                 "Needs attention",
-                &format!("{} issue{}", issues.len(), if issues.len() == 1 { "" } else { "s" }),
+                &format!(
+                    "{} issue{}",
+                    issues.len(),
+                    if issues.len() == 1 { "" } else { "s" }
+                ),
             );
             ui.spacing_mut().item_spacing.y = 0.0;
             for (color, text, tab) in &issues {
-                let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click());
+                let (rect, resp) =
+                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 30.0), Sense::click());
                 let p = ui.painter();
                 if resp.hovered() {
                     p.rect_filled(rect, 8.0, SURFACE_HI);
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
                 p.circle_filled(Pos2::new(rect.left() + 10.0, rect.center().y), 4.0, *color);
-                p.text(Pos2::new(rect.left() + 24.0, rect.center().y), egui::Align2::LEFT_CENTER, text, FontId::proportional(13.0), TEXT);
+                p.text(
+                    Pos2::new(rect.left() + 24.0, rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    text,
+                    FontId::proportional(13.0),
+                    TEXT,
+                );
                 p.text(
                     Pos2::new(rect.right() - 8.0, rect.center().y),
                     egui::Align2::RIGHT_CENTER,
@@ -2892,7 +3238,12 @@ impl SysKamlingApp {
     fn vital_tiles(&self, ui: &mut Ui) {
         let g = &self.gui;
         let hist = |q: &VecDeque<f64>| q.iter().copied().collect::<Vec<f64>>();
-        let sum = |a: &VecDeque<f64>, b: &VecDeque<f64>| a.iter().zip(b.iter()).map(|(x, y)| x + y).collect::<Vec<f64>>();
+        let sum = |a: &VecDeque<f64>, b: &VecDeque<f64>| {
+            a.iter()
+                .zip(b.iter())
+                .map(|(x, y)| x + y)
+                .collect::<Vec<f64>>()
+        };
         let Some(h) = &g.hw else {
             card(ui, |ui| {
                 ui.label(RichText::new("Collecting host vitals…").color(FAINT));
@@ -2910,7 +3261,7 @@ impl SysKamlingApp {
             Kpi {
                 label: "CPU",
                 device: String::new(),
-value: format!("{:.0}%", h.cpu_pct),
+                value: format!("{:.0}%", h.cpu_pct),
                 sub: cpu_sub.join(" · "),
                 color: ACCENT,
                 viz: Viz::Spark(hist(&g.hw_cpu_hist)),
@@ -2919,12 +3270,19 @@ value: format!("{:.0}%", h.cpu_pct),
             Kpi {
                 label: "Memory",
                 device: String::new(),
-value: format!("{:.0}%", mem_used as f64 / h.mem_total.max(1) as f64 * 100.0),
+                value: format!(
+                    "{:.0}%",
+                    mem_used as f64 / h.mem_total.max(1) as f64 * 100.0
+                ),
                 sub: format!(
                     "{} of {}{}",
                     human_size(mem_used as i64),
                     human_size(h.mem_total as i64),
-                    if swap_used > 0 { format!(" · swap {}", human_size(swap_used as i64)) } else { String::new() }
+                    if swap_used > 0 {
+                        format!(" · swap {}", human_size(swap_used as i64))
+                    } else {
+                        String::new()
+                    }
                 ),
                 color: VIOLET,
                 viz: Viz::Spark(hist(&g.hw_mem_hist)),
@@ -2935,7 +3293,11 @@ value: format!("{:.0}%", mem_used as f64 / h.mem_total.max(1) as f64 * 100.0),
             .gpus
             .iter()
             .filter(|x| x.busy_pct.is_some())
-            .max_by(|a, b| a.busy_pct.partial_cmp(&b.busy_pct).unwrap_or(std::cmp::Ordering::Equal));
+            .max_by(|a, b| {
+                a.busy_pct
+                    .partial_cmp(&b.busy_pct)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
         tiles.push(match gpu {
             Some(gp) => {
                 let mut sub = Vec::new();
@@ -2943,7 +3305,11 @@ value: format!("{:.0}%", mem_used as f64 / h.mem_total.max(1) as f64 * 100.0),
                     sub.push(format!("{} °C", temp_str(t)));
                 }
                 if gp.vram_total > 0 {
-                    sub.push(format!("VRAM {} of {}", human_size(gp.vram_used as i64), human_size(gp.vram_total as i64)));
+                    sub.push(format!(
+                        "VRAM {} of {}",
+                        human_size(gp.vram_used as i64),
+                        human_size(gp.vram_total as i64)
+                    ));
                 }
                 if sub.is_empty() {
                     sub.push(gp.name.clone());
@@ -2951,7 +3317,7 @@ value: format!("{:.0}%", mem_used as f64 / h.mem_total.max(1) as f64 * 100.0),
                 Kpi {
                     label: "GPU",
                     device: String::new(),
-value: format!("{:.0}%", gp.busy_pct.unwrap_or(0.0)),
+                    value: format!("{:.0}%", gp.busy_pct.unwrap_or(0.0)),
                     sub: sub.join(" · "),
                     color: CYAN,
                     viz: Viz::Spark(hist(&g.hw_gpu_busy_hist)),
@@ -2961,8 +3327,12 @@ value: format!("{:.0}%", gp.busy_pct.unwrap_or(0.0)),
             None => Kpi {
                 label: "Disk I/O",
                 device: String::new(),
-value: human_rate(h.disk_read_bps + h.disk_write_bps),
-                sub: format!("read {} · write {}", human_rate(h.disk_read_bps), human_rate(h.disk_write_bps)),
+                value: human_rate(h.disk_read_bps + h.disk_write_bps),
+                sub: format!(
+                    "read {} · write {}",
+                    human_rate(h.disk_read_bps),
+                    human_rate(h.disk_write_bps)
+                ),
                 color: AMBER,
                 viz: Viz::Spark(sum(&g.hw_disk_r_hist, &g.hw_disk_w_hist)),
                 glyph: Some("disk"),
@@ -2971,8 +3341,12 @@ value: human_rate(h.disk_read_bps + h.disk_write_bps),
         tiles.push(Kpi {
             label: "Network",
             device: String::new(),
-value: human_rate(h.net_rx_bps + h.net_tx_bps),
-            sub: format!("↓ {} · ↑ {}", human_rate(h.net_rx_bps), human_rate(h.net_tx_bps)),
+            value: human_rate(h.net_rx_bps + h.net_tx_bps),
+            sub: format!(
+                "↓ {} · ↑ {}",
+                human_rate(h.net_rx_bps),
+                human_rate(h.net_tx_bps)
+            ),
             color: GREEN,
             viz: Viz::Spark(sum(&g.hw_net_rx_hist, &g.hw_net_tx_hist)),
             glyph: Some("net"),
@@ -3005,29 +3379,48 @@ value: human_rate(h.net_rx_bps + h.net_tx_bps),
         ui.scope(|ui| {
             ui.spacing_mut().item_spacing.x = 14.0;
             ui.columns(2, |cols| {
-                if overview_card(&mut cols[0], Tab::Containers, "Containers", |ui| self.containers_overview(ui)) {
+                if overview_card(&mut cols[0], Tab::Containers, "Containers", |ui| {
+                    self.containers_overview(ui)
+                }) {
                     pick(&mut nav, Tab::Containers);
                 }
-                if overview_card(&mut cols[1], Tab::Strata, "Strata", |ui| self.strata_overview(ui)) {
+                if overview_card(&mut cols[1], Tab::Strata, "Strata", |ui| {
+                    self.strata_overview(ui)
+                }) {
                     // nothing to look at until it's configured
-                    pick(&mut nav, if self.gui.strata_cfg.api_key.trim().is_empty() { Tab::Settings } else { Tab::Strata });
+                    pick(
+                        &mut nav,
+                        if self.gui.strata_cfg.api_key.trim().is_empty() {
+                            Tab::Settings
+                        } else {
+                            Tab::Strata
+                        },
+                    );
                 }
             });
             ui.add_space(6.0);
             ui.columns(2, |cols| {
-                if overview_card(&mut cols[0], Tab::Agents, "Agents", |ui| self.agents_overview(ui)) {
+                if overview_card(&mut cols[0], Tab::Agents, "Agents", |ui| {
+                    self.agents_overview(ui)
+                }) {
                     pick(&mut nav, Tab::Agents);
                 }
-                if overview_card(&mut cols[1], Tab::Ports, "Ports", |ui| self.ports_overview(ui)) {
+                if overview_card(&mut cols[1], Tab::Ports, "Ports", |ui| {
+                    self.ports_overview(ui)
+                }) {
                     pick(&mut nav, Tab::Ports);
                 }
             });
             ui.add_space(6.0);
             ui.columns(2, |cols| {
-                if overview_card(&mut cols[0], Tab::Processes, "Processes", |ui| self.processes_overview(ui)) {
+                if overview_card(&mut cols[0], Tab::Processes, "Processes", |ui| {
+                    self.processes_overview(ui)
+                }) {
                     pick(&mut nav, Tab::Processes);
                 }
-                if overview_card(&mut cols[1], Tab::Hardware, "Hardware", |ui| self.hardware_overview(ui)) {
+                if overview_card(&mut cols[1], Tab::Hardware, "Hardware", |ui| {
+                    self.hardware_overview(ui)
+                }) {
                     pick(&mut nav, Tab::Hardware);
                 }
             });
@@ -3042,7 +3435,12 @@ value: human_rate(h.net_rx_bps + h.net_tx_bps),
             return;
         }
         let n_run = g.containers.iter().filter(|c| c.state == "running").count();
-        headline(ui, &n_run.to_string(), &format!("running of {}", g.containers.len()), if n_run > 0 { GREEN } else { TEXT });
+        headline(
+            ui,
+            &n_run.to_string(),
+            &format!("running of {}", g.containers.len()),
+            if n_run > 0 { GREEN } else { TEXT },
+        );
         // share of the whole host, like the CPU tile above (Docker reports
         // 100% per core)
         let ncpu = g.hw.as_ref().map(|h| h.ncpu.max(1)).unwrap_or(1) as f64;
@@ -3060,11 +3458,16 @@ value: human_rate(h.net_rx_bps + h.net_tx_bps),
         let cpu: f64 = rows.iter().map(|r| r.1).sum();
         let mem: i64 = rows.iter().map(|r| r.2).sum();
         let disk = g.df.as_ref().map(|d| {
-            [&d.image_usage, &d.container_usage, &d.volume_usage, &d.build_cache_usage]
-                .into_iter()
-                .flatten()
-                .map(|u| u.total_size)
-                .sum::<i64>()
+            [
+                &d.image_usage,
+                &d.container_usage,
+                &d.volume_usage,
+                &d.build_cache_usage,
+            ]
+            .into_iter()
+            .flatten()
+            .map(|u| u.total_size)
+            .sum::<i64>()
         });
         let mut meta = vec![format!("{} images", g.images.len())];
         if !rows.is_empty() {
@@ -3075,10 +3478,22 @@ value: human_rate(h.net_rx_bps + h.net_tx_bps),
         }
         meta_line(ui, &meta.join(" · "));
         for (name, cpu, mem) in rows.iter().take(3) {
-            mini_row(ui, GREEN, name, &format!("{cpu:.1}% · {}", human_size(*mem)));
+            mini_row(
+                ui,
+                GREEN,
+                name,
+                &format!("{cpu:.1}% · {}", human_size(*mem)),
+            );
         }
         if rows.is_empty() {
-            meta_line(ui, if n_run > 0 { "Collecting container stats…" } else { "No running containers." });
+            meta_line(
+                ui,
+                if n_run > 0 {
+                    "Collecting container stats…"
+                } else {
+                    "No running containers."
+                },
+            );
         }
         if let Some(e) = g.events.last() {
             let action = e.action.split(':').next().unwrap_or(&e.action);
@@ -3087,19 +3502,30 @@ value: human_rate(h.net_rx_bps + h.net_tx_bps),
                 "die" | "kill" | "stop" | "oom" => RED,
                 _ => FAINT,
             };
-            mini_row(ui, color, &format!("{} {action}", e.container_name()), &ago(epoch() - e.time));
+            mini_row(
+                ui,
+                color,
+                &format!("{} {action}", e.container_name()),
+                &ago(epoch() - e.time),
+            );
         }
     }
 
     fn agents_overview(&self, ui: &mut Ui) {
         let g = &self.gui;
         let n = g.agents.len();
-        headline(ui, &n.to_string(), "AI coding sessions", if n > 0 { GREEN } else { TEXT });
+        headline(
+            ui,
+            &n.to_string(),
+            "AI coding sessions",
+            if n > 0 { GREEN } else { TEXT },
+        );
         if n == 0 {
             meta_line(ui, "No agents running.");
             return;
         }
-        let mut top: Vec<(&AgentSession, AgentState)> = g.agents.iter().map(|a| (a, agent_state(a))).collect();
+        let mut top: Vec<(&AgentSession, AgentState)> =
+            g.agents.iter().map(|a| (a, agent_state(a))).collect();
         top.sort_by_key(|(a, st)| (st.rank, a.lead_pid));
         let count = |rank: u8| top.iter().filter(|(_, st)| st.rank == rank).count();
         let mut meta = Vec::new();
@@ -3118,13 +3544,21 @@ value: human_rate(h.net_rx_bps + h.net_tx_bps),
     fn ports_overview(&self, ui: &mut Ui) {
         let g = &self.gui;
         let listen: Vec<&PortEntry> = g.ports.iter().filter(|p| p.state == "LISTEN").collect();
-        let exposed = listen.iter().filter(|p| p.addr == "0.0.0.0" || p.addr == "[::]").count();
+        let exposed = listen
+            .iter()
+            .filter(|p| p.addr == "0.0.0.0" || p.addr == "[::]")
+            .count();
         headline(ui, &listen.len().to_string(), "listening ports", CYAN);
         meta_line(ui, &format!("{exposed} open on all interfaces"));
         // dev servers first: sockets whose owner runs in a project directory
-        let mut picks: Vec<&PortEntry> = listen.iter().copied().filter(|p| p.cwd.is_some()).collect();
+        let mut picks: Vec<&PortEntry> =
+            listen.iter().copied().filter(|p| p.cwd.is_some()).collect();
         if picks.is_empty() {
-            picks = listen.iter().copied().filter(|p| p.proc_name.is_some()).collect();
+            picks = listen
+                .iter()
+                .copied()
+                .filter(|p| p.proc_name.is_some())
+                .collect();
         }
         picks.sort_by_key(|p| p.port);
         picks.dedup_by_key(|p| p.port);
@@ -3148,7 +3582,12 @@ value: human_rate(h.net_rx_bps + h.net_tx_bps),
             meta_line(ui, "The /proc walk has not landed yet.");
             return;
         }
-        headline(ui, &g.procs.len().to_string(), "processes running", if g.procs.len() > 0 { TEXT } else { FAINT });
+        headline(
+            ui,
+            &g.procs.len().to_string(),
+            "processes running",
+            if !g.procs.is_empty() { TEXT } else { FAINT },
+        );
         let mut cpu: Vec<ProcInfo> = g.procs.clone();
         procsmod::sort_rows(&mut cpu, SortCol::Cpu, true);
         let mut mem: Vec<ProcInfo> = g.procs.clone();
@@ -3185,25 +3624,47 @@ value: human_rate(h.net_rx_bps + h.net_tx_bps),
             ui,
             &format!("{:.0}%", h.cpu_pct),
             &format!("cpu · {} cores", h.ncpu),
-            if h.cpu_pct > 85.0 { RED } else if h.cpu_pct > 60.0 { AMBER } else { ACCENT },
+            if h.cpu_pct > 85.0 {
+                RED
+            } else if h.cpu_pct > 60.0 {
+                AMBER
+            } else {
+                ACCENT
+            },
         );
-        meta_line(ui, &format!(
-            "load {} · up {}",
-            h.load1,
-            uptime_str(h.uptime as i64)
-        ));
-        mini_row(ui, VIOLET, "Memory", &format!("{} of {}", human_size(mem as i64), human_size(h.mem_total as i64)));
+        meta_line(
+            ui,
+            &format!("load {} · up {}", h.load1, uptime_str(h.uptime as i64)),
+        );
+        mini_row(
+            ui,
+            VIOLET,
+            "Memory",
+            &format!(
+                "{} of {}",
+                human_size(mem as i64),
+                human_size(h.mem_total as i64)
+            ),
+        );
         mini_row(
             ui,
             GREEN,
             "Disk I/O",
-            &format!("↓ {} ↑ {}", human_rate(h.disk_read_bps), human_rate(h.disk_write_bps)),
+            &format!(
+                "↓ {} ↑ {}",
+                human_rate(h.disk_read_bps),
+                human_rate(h.disk_write_bps)
+            ),
         );
         mini_row(
             ui,
             AMBER,
             "Network",
-            &format!("↓ {} ↑ {}", human_rate(h.net_rx_bps), human_rate(h.net_tx_bps)),
+            &format!(
+                "↓ {} ↑ {}",
+                human_rate(h.net_rx_bps),
+                human_rate(h.net_tx_bps)
+            ),
         );
     }
 
@@ -3226,8 +3687,24 @@ value: human_rate(h.net_rx_bps + h.net_tx_bps),
             "reading" => ("Reading", ACCENT),
             _ => ("Idle", TEXT),
         };
-        let queued = if m.queued > 0 { format!(" · {} queued", m.queued) } else { String::new() };
-        headline(ui, state, &format!("{}{queued}", if m.model.is_empty() { "strata" } else { &m.model }), color);
+        let queued = if m.queued > 0 {
+            format!(" · {} queued", m.queued)
+        } else {
+            String::new()
+        };
+        headline(
+            ui,
+            state,
+            &format!(
+                "{}{queued}",
+                if m.model.is_empty() {
+                    "strata"
+                } else {
+                    &m.model
+                }
+            ),
+            color,
+        );
         let mut meta = vec![format!("{} requests served", fmt_tokens(m.tot_requests))];
         if let (Some(u), Some(t)) = (m.gpu_mem_used, m.gpu_mem_total) {
             meta.push(format!("VRAM {:.1} of {:.0} GB", u / 1e9, t / 1e9));
@@ -3235,15 +3712,31 @@ value: human_rate(h.net_rx_bps + h.net_tx_bps),
         meta_line(ui, &meta.join(" · "));
         let last = m.requests.first();
         let dash = || "–".to_string();
-        mini_row(ui, ACCENT, "Decode speed", &strata::decode_now(m, last).map(|v| format!("{v:.1} tok/s")).unwrap_or_else(dash));
-        mini_row(ui, VIOLET, "First token (p50)", &m.ttft.p50.map(|v| format!("{v:.2} s")).unwrap_or_else(dash));
+        mini_row(
+            ui,
+            ACCENT,
+            "Decode speed",
+            &strata::decode_now(m, last)
+                .map(|v| format!("{v:.1} tok/s"))
+                .unwrap_or_else(dash),
+        );
+        mini_row(
+            ui,
+            VIOLET,
+            "First token (p50)",
+            &m.ttft.p50.map(|v| format!("{v:.2} s")).unwrap_or_else(dash),
+        );
         let used = strata::context_used(m, last);
         mini_row(
             ui,
             CYAN,
             "Context",
             &if m.max_context > 0 {
-                format!("{}% of {}", (used * 100) / m.max_context, fmt_tokens(m.max_context))
+                format!(
+                    "{}% of {}",
+                    (used * 100) / m.max_context,
+                    fmt_tokens(m.max_context)
+                )
             } else {
                 dash()
             },
@@ -3264,7 +3757,11 @@ value: human_rate(h.net_rx_bps + h.net_tx_bps),
             return;
         };
         let running = c.state == "running";
-        let busy = self.gui.pending_action.as_ref().is_some_and(|(i, _)| *i == c.id);
+        let busy = self
+            .gui
+            .pending_action
+            .as_ref()
+            .is_some_and(|(i, _)| *i == c.id);
 
         let mut action = None;
         let mut remove = false;
@@ -3273,15 +3770,22 @@ value: human_rate(h.net_rx_bps + h.net_tx_bps),
             ui.vertical(|ui| {
                 ui.set_max_width(title_w);
                 ui.spacing_mut().item_spacing.y = 6.0;
-                ui.add(egui::Label::new(RichText::new(c.short_name()).font(bold(22.0)).color(TEXT)).truncate());
+                ui.add(
+                    egui::Label::new(RichText::new(c.short_name()).font(bold(22.0)).color(TEXT))
+                        .truncate(),
+                );
                 ui.horizontal(|ui| {
                     state_badge(ui, &c.state);
                     if let Some(p) = c.project() {
                         chip(ui, p, MUTED);
                     }
                     ui.add(
-                        egui::Label::new(RichText::new(&c.image).font(FontId::monospace(12.5)).color(MUTED))
-                            .truncate(),
+                        egui::Label::new(
+                            RichText::new(&c.image)
+                                .font(FontId::monospace(12.5))
+                                .color(MUTED),
+                        )
+                        .truncate(),
                     );
                 });
             });
@@ -3298,7 +3802,11 @@ value: human_rate(h.net_rx_bps + h.net_tx_bps),
                     button(ui, "▶  Start", Btn::Primary, !busy).clicked()
                 };
                 if clicked {
-                    action = Some(if running { Pending::Stop } else { Pending::Start });
+                    action = Some(if running {
+                        Pending::Stop
+                    } else {
+                        Pending::Start
+                    });
                 }
                 if busy {
                     ui.add(egui::Spinner::new().size(18.0).color(ACCENT));
@@ -3326,12 +3834,28 @@ value: human_rate(h.net_rx_bps + h.net_tx_bps),
                 ("Container ID", c.id[..12.min(c.id.len())].to_string(), true),
                 (
                     "Created",
-                    if c.created > 0 { fmt_epoch(c.created) } else { "—".into() },
+                    if c.created > 0 {
+                        fmt_epoch(c.created)
+                    } else {
+                        "—".into()
+                    },
                     false,
                 ),
                 ("Image", c.image.clone(), true),
-                ("Ports", if ports.is_empty() { "—".into() } else { ports }, true),
-                ("Writable layer", c.size_rw.map(human_size).unwrap_or_else(|| "—".into()), false),
+                (
+                    "Ports",
+                    if ports.is_empty() {
+                        "—".into()
+                    } else {
+                        ports
+                    },
+                    true,
+                ),
+                (
+                    "Writable layer",
+                    c.size_rw.map(human_size).unwrap_or_else(|| "—".into()),
+                    false,
+                ),
             ];
             let per_row = if ui.available_width() > 520.0 { 3 } else { 2 };
             ui.scope(|ui| {
@@ -3384,7 +3908,9 @@ value: human_rate(h.net_rx_bps + h.net_tx_bps),
             });
             return;
         };
-        let cpu = StatsSample::cpu_percent(g.prev_stats.get(&c.id), s).unwrap_or(0.0).max(0.0);
+        let cpu = StatsSample::cpu_percent(g.prev_stats.get(&c.id), s)
+            .unwrap_or(0.0)
+            .max(0.0);
         let h = g.hist.get(&c.id);
         let series = |f: &dyn Fn(&StatHist) -> Vec<f64>| h.map(f).unwrap_or_default();
         let last = |q: Option<&VecDeque<i64>>| q.and_then(|q| q.back().copied()).unwrap_or(0);
@@ -3396,7 +3922,7 @@ value: human_rate(h.net_rx_bps + h.net_tx_bps),
             Kpi {
                 label: "CPU",
                 device: String::new(),
-value: format!("{cpu:.1}%"),
+                value: format!("{cpu:.1}%"),
                 sub: "of one core = 100%".to_string(),
                 color: ACCENT,
                 viz: Viz::Spark(series(&|h| h.cpu.iter().copied().collect())),
@@ -3405,7 +3931,7 @@ value: format!("{cpu:.1}%"),
             Kpi {
                 label: "Memory",
                 device: String::new(),
-value: human_size(s.mem_usage()),
+                value: human_size(s.mem_usage()),
                 sub: format!(
                     "of {} · {:.0}%",
                     human_size(s.mem_limit()),
@@ -3418,19 +3944,34 @@ value: human_size(s.mem_usage()),
             Kpi {
                 label: "Network",
                 device: String::new(),
-value: format!("↓ {}/s", human_size(rx)),
+                value: format!("↓ {}/s", human_size(rx)),
                 sub: format!("↑ {}/s · {} pids", human_size(txb), s.pids_stats.current),
                 color: CYAN,
-                viz: Viz::Spark(series(&|h| h.rx.iter().zip(&h.tx).map(|(a, b)| (a + b) as f64).collect())),
+                viz: Viz::Spark(series(&|h| {
+                    h.rx.iter()
+                        .zip(&h.tx)
+                        .map(|(a, b)| (a + b) as f64)
+                        .collect()
+                })),
                 glyph: Some("net"),
             },
             Kpi {
                 label: "Disk I/O",
                 device: String::new(),
-value: format!("{}/s", human_size(br + bw)),
-                sub: format!("read {} · write {}", human_size(s.blk_read()), human_size(s.blk_write())),
+                value: format!("{}/s", human_size(br + bw)),
+                sub: format!(
+                    "read {} · write {}",
+                    human_size(s.blk_read()),
+                    human_size(s.blk_write())
+                ),
                 color: AMBER,
-                viz: Viz::Spark(series(&|h| h.blk_r.iter().zip(&h.blk_w).map(|(a, b)| (a + b) as f64).collect())),
+                viz: Viz::Spark(series(&|h| {
+                    h.blk_r
+                        .iter()
+                        .zip(&h.blk_w)
+                        .map(|(a, b)| (a + b) as f64)
+                        .collect()
+                })),
                 glyph: Some("disk"),
             },
         ];
@@ -3456,7 +3997,11 @@ value: format!("{}/s", human_size(br + bw)),
 
     fn image_detail(&mut self, ui: &mut Ui) {
         let Some(id) = self.gui.selected_image.clone() else {
-            empty_state(ui, "No image selected", "Pick an image on the left to see its size, tags and users.");
+            empty_state(
+                ui,
+                "No image selected",
+                "Pick an image on the left to see its size, tags and users.",
+            );
             return;
         };
         let Some(im) = self.gui.images.iter().find(|i| i.id == id).cloned() else {
@@ -3480,77 +4025,118 @@ value: format!("{}/s", human_size(br + bw)),
 
         ui.horizontal(|ui| {
             ui.label(RichText::new(im.tag()).font(bold(22.0)).color(TEXT));
-            chip(ui, if im.containers > 0 { "in use" } else { "unused" }, if im.containers > 0 { GREEN } else { FAINT });
+            chip(
+                ui,
+                if im.containers > 0 {
+                    "in use"
+                } else {
+                    "unused"
+                },
+                if im.containers > 0 { GREEN } else { FAINT },
+            );
         });
-        ui.label(RichText::new(format!("sha256:{}", im.short_id())).font(FontId::monospace(12.5)).color(MUTED));
+        ui.label(
+            RichText::new(format!("sha256:{}", im.short_id()))
+                .font(FontId::monospace(12.5))
+                .color(MUTED),
+        );
         ui.add_space(16.0);
-        ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            let kpis = [
-                Kpi {
-                    label: "Size",
-                    device: String::new(),
-value: human_size(im.size),
-                    sub: format!("{:.1}% of all layers", im.size as f64 / total.max(1) as f64 * 100.0),
-                    color: ACCENT,
-                    viz: Viz::Ratio(im.size as f32 / total.max(1) as f32),
-                    glyph: None,
-                },
-                Kpi {
-                    label: "Unique",
-                    device: String::new(),
-value: human_size((im.size - im.shared_size.max(0)).max(0)),
-                    sub: format!("{} shared with other images", human_size(im.shared_size.max(0))),
-                    color: VIOLET,
-                    viz: Viz::Ratio((im.size - im.shared_size.max(0)).max(0) as f32 / im.size.max(1) as f32),
-                    glyph: None,
-                },
-                Kpi {
-                    label: "Containers",
-                    device: String::new(),
-value: im.containers.max(0).to_string(),
-                    sub: if im.created > 0 { format!("created {}", fmt_epoch(im.created)) } else { String::new() },
-                    color: GREEN,
-                    viz: Viz::None,
-                    glyph: None,
-                },
-            ];
-            ui.scope(|ui| {
-                ui.spacing_mut().item_spacing.x = 14.0;
-                ui.columns(3, |cols| {
-                    for (col, k) in cols.iter_mut().zip(&kpis) {
-                        kpi_card(col, k);
-                    }
-                });
-            });
-            ui.add_space(14.0);
-            ui.scope(|ui| {
-                ui.spacing_mut().item_spacing.x = 14.0;
-                ui.columns(2, |cols| {
-                    card(&mut cols[0], |ui| {
-                        card_title(ui, "Tags", &im.repo_tags.len().to_string());
-                        if im.repo_tags.is_empty() {
-                            ui.label(RichText::new("<none>").font(FontId::monospace(12.5)).color(FAINT));
-                        }
-                        for t in &im.repo_tags {
-                            ui.add(egui::Label::new(RichText::new(t).font(FontId::monospace(12.5)).color(TEXT)).truncate());
-                        }
-                    });
-                    card(&mut cols[1], |ui| {
-                        card_title(ui, "Used by", &users.len().to_string());
-                        if users.is_empty() {
-                            ui.label(RichText::new("No containers use this image.").color(FAINT));
-                        }
-                        for u in users.iter().take(20) {
-                            ui.horizontal(|ui| {
-                                let (r, _) = ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
-                                ui.painter().circle_filled(r.center(), 3.0, GREEN);
-                                ui.add(egui::Label::new(RichText::new(u).size(13.0).color(TEXT)).truncate());
-                            });
+        ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let kpis = [
+                    Kpi {
+                        label: "Size",
+                        device: String::new(),
+                        value: human_size(im.size),
+                        sub: format!(
+                            "{:.1}% of all layers",
+                            im.size as f64 / total.max(1) as f64 * 100.0
+                        ),
+                        color: ACCENT,
+                        viz: Viz::Ratio(im.size as f32 / total.max(1) as f32),
+                        glyph: None,
+                    },
+                    Kpi {
+                        label: "Unique",
+                        device: String::new(),
+                        value: human_size((im.size - im.shared_size.max(0)).max(0)),
+                        sub: format!(
+                            "{} shared with other images",
+                            human_size(im.shared_size.max(0))
+                        ),
+                        color: VIOLET,
+                        viz: Viz::Ratio(
+                            (im.size - im.shared_size.max(0)).max(0) as f32 / im.size.max(1) as f32,
+                        ),
+                        glyph: None,
+                    },
+                    Kpi {
+                        label: "Containers",
+                        device: String::new(),
+                        value: im.containers.max(0).to_string(),
+                        sub: if im.created > 0 {
+                            format!("created {}", fmt_epoch(im.created))
+                        } else {
+                            String::new()
+                        },
+                        color: GREEN,
+                        viz: Viz::None,
+                        glyph: None,
+                    },
+                ];
+                ui.scope(|ui| {
+                    ui.spacing_mut().item_spacing.x = 14.0;
+                    ui.columns(3, |cols| {
+                        for (col, k) in cols.iter_mut().zip(&kpis) {
+                            kpi_card(col, k);
                         }
                     });
                 });
+                ui.add_space(14.0);
+                ui.scope(|ui| {
+                    ui.spacing_mut().item_spacing.x = 14.0;
+                    ui.columns(2, |cols| {
+                        card(&mut cols[0], |ui| {
+                            card_title(ui, "Tags", &im.repo_tags.len().to_string());
+                            if im.repo_tags.is_empty() {
+                                ui.label(
+                                    RichText::new("<none>")
+                                        .font(FontId::monospace(12.5))
+                                        .color(FAINT),
+                                );
+                            }
+                            for t in &im.repo_tags {
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(t).font(FontId::monospace(12.5)).color(TEXT),
+                                    )
+                                    .truncate(),
+                                );
+                            }
+                        });
+                        card(&mut cols[1], |ui| {
+                            card_title(ui, "Used by", &users.len().to_string());
+                            if users.is_empty() {
+                                ui.label(
+                                    RichText::new("No containers use this image.").color(FAINT),
+                                );
+                            }
+                            for u in users.iter().take(20) {
+                                ui.horizontal(|ui| {
+                                    let (r, _) =
+                                        ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                                    ui.painter().circle_filled(r.center(), 3.0, GREEN);
+                                    ui.add(
+                                        egui::Label::new(RichText::new(u).size(13.0).color(TEXT))
+                                            .truncate(),
+                                    );
+                                });
+                            }
+                        });
+                    });
+                });
             });
-        });
     }
 
     fn agent_detail(&mut self, ui: &mut Ui) {
@@ -3563,14 +4149,21 @@ value: im.containers.max(0).to_string(),
             return;
         };
         let Some(a) = self.gui.agents.iter().find(|a| a.lead_pid == pid).cloned() else {
-            empty_state(ui, "Session ended", "That agent session is no longer running.");
+            empty_state(
+                ui,
+                "Session ended",
+                "That agent session is no longer running.",
+            );
             return;
         };
         let st = agent_state(&a);
         let now = epoch();
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
-                ui.add(egui::Label::new(RichText::new(agent_title(&a)).font(bold(22.0)).color(TEXT)).truncate());
+                ui.add(
+                    egui::Label::new(RichText::new(agent_title(&a)).font(bold(22.0)).color(TEXT))
+                        .truncate(),
+                );
                 let mut sub = vec![a.agent.to_string()];
                 if let Some(c) = &a.cwd {
                     sub.push(c.clone());
@@ -3604,32 +4197,64 @@ value: im.containers.max(0).to_string(),
     }
 
     /// Status, task, numbers and recent steps of an agent that reports them.
-    fn agent_activity(&self, ui: &mut Ui, a: &AgentSession, act: &Activity, st: &AgentState, now: i64) {
+    fn agent_activity(
+        &self,
+        ui: &mut Ui,
+        a: &AgentSession,
+        act: &Activity,
+        st: &AgentState,
+        now: i64,
+    ) {
         let time = ui.input(|i| i.time);
         // ---- now: status, what it's on, the task ----
         card(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(st.label).font(bold(18.0)).color(st.color));
                 if let Some(since) = act.status_since {
-                    ui.label(RichText::new(format!("for {}", uptime_str(now - since))).size(12.5).color(FAINT));
+                    ui.label(
+                        RichText::new(format!("for {}", uptime_str(now - since)))
+                            .size(12.5)
+                            .color(FAINT),
+                    );
                 }
             });
             ui.add_space(2.0);
             let current = act.steps.last().filter(|_| st.live);
             match (act.status.as_str(), current) {
                 (_, Some(s)) => {
-                    let (r, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 22.0), Sense::hover());
+                    let (r, _) = ui
+                        .allocate_exact_size(Vec2::new(ui.available_width(), 22.0), Sense::hover());
                     let p = ui.painter();
-                    spinner_at(p, time, Pos2::new(r.left() + 6.0, r.center().y), 5.0, st.color);
-                    let line = elide(p, step_line(s), FontId::proportional(13.5), TEXT, r.width() - 22.0);
-                    p.galley(Pos2::new(r.left() + 20.0, r.center().y - line.size().y / 2.0), line, TEXT);
+                    spinner_at(
+                        p,
+                        time,
+                        Pos2::new(r.left() + 6.0, r.center().y),
+                        5.0,
+                        st.color,
+                    );
+                    let line = elide(
+                        p,
+                        step_line(s),
+                        FontId::proportional(13.5),
+                        TEXT,
+                        r.width() - 22.0,
+                    );
+                    p.galley(
+                        Pos2::new(r.left() + 20.0, r.center().y - line.size().y / 2.0),
+                        line,
+                        TEXT,
+                    );
                     ui.ctx().request_repaint_after(Duration::from_millis(50));
                 }
                 ("waiting", _) => {
                     ui.label(RichText::new("Waiting for you: approve a tool call or answer a question in its terminal.").size(13.0).color(TEXT));
                 }
                 ("idle", _) => {
-                    ui.label(RichText::new("Done. Waiting for the next prompt.").size(13.0).color(MUTED));
+                    ui.label(
+                        RichText::new("Done. Waiting for the next prompt.")
+                            .size(13.0)
+                            .color(MUTED),
+                    );
                 }
                 _ => {}
             }
@@ -3644,28 +4269,45 @@ value: im.containers.max(0).to_string(),
         let stats = [
             (
                 "Last activity",
-                act.last_active.map(|t| ago(now - t)).unwrap_or_else(|| "–".into()),
+                act.last_active
+                    .map(|t| ago(now - t))
+                    .unwrap_or_else(|| "–".into()),
                 format!("{} steps in view", act.steps.len()),
             ),
             (
                 "Context",
-                act.context_tokens.map(|t| format!("{} tokens", fmt_tokens(t as i64))).unwrap_or_else(|| "–".into()),
+                act.context_tokens
+                    .map(|t| format!("{} tokens", fmt_tokens(t as i64)))
+                    .unwrap_or_else(|| "–".into()),
                 act.model.clone().unwrap_or_default(),
             ),
             (
                 "CPU",
                 format!("{:.1}%", a.cpu_pct),
-                format!("{} process{}", a.pids.len(), if a.pids.len() == 1 { "" } else { "es" }),
+                format!(
+                    "{} process{}",
+                    a.pids.len(),
+                    if a.pids.len() == 1 { "" } else { "es" }
+                ),
             ),
-            ("Memory", human_size(a.mem_bytes as i64), "resident".to_string()),
+            (
+                "Memory",
+                human_size(a.mem_bytes as i64),
+                "resident".to_string(),
+            ),
         ];
         card(ui, |ui| {
             ui.columns(4, |cols| {
                 for (col, (label, value, sub)) in cols.iter_mut().zip(&stats) {
                     col.spacing_mut().item_spacing.y = 1.0;
                     col.label(RichText::new(*label).size(11.5).color(FAINT));
-                    col.add(egui::Label::new(RichText::new(value).font(bold(17.0)).color(TEXT)).truncate());
-                    col.add(egui::Label::new(RichText::new(sub).size(11.5).color(FAINT)).truncate());
+                    col.add(
+                        egui::Label::new(RichText::new(value).font(bold(17.0)).color(TEXT))
+                            .truncate(),
+                    );
+                    col.add(
+                        egui::Label::new(RichText::new(sub).size(11.5).color(FAINT)).truncate(),
+                    );
                 }
             });
         });
@@ -3679,7 +4321,8 @@ value: im.containers.max(0).to_string(),
             }
             ui.spacing_mut().item_spacing.y = 0.0;
             for s in act.steps.iter().rev() {
-                let (r, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::hover());
+                let (r, _) =
+                    ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::hover());
                 if !ui.is_rect_visible(r) {
                     continue;
                 }
@@ -3697,13 +4340,37 @@ value: im.containers.max(0).to_string(),
                     p.circle_filled(Pos2::new(r.left() + 5.0, y), 3.0, color);
                 }
                 let when = s.at.map(|t| ago(now - t)).unwrap_or_default();
-                p.text(Pos2::new(r.right() - 4.0, y), egui::Align2::RIGHT_CENTER, when, FontId::proportional(11.5), FAINT);
+                p.text(
+                    Pos2::new(r.right() - 4.0, y),
+                    egui::Align2::RIGHT_CENTER,
+                    when,
+                    FontId::proportional(11.5),
+                    FAINT,
+                );
                 let tag_g = elide(p, tag, FontId::proportional(12.0), color, 150.0);
                 let tag_w = tag_g.size().x;
-                p.galley(Pos2::new(r.left() + 18.0, y - tag_g.size().y / 2.0), tag_g, color);
-                let text_color = if s.kind == StepKind::Reply { MUTED } else { TEXT };
-                let text = elide(p, s.text.clone(), FontId::proportional(13.0), text_color, r.width() - tag_w - 120.0);
-                p.galley(Pos2::new(r.left() + 28.0 + tag_w, y - text.size().y / 2.0), text, text_color);
+                p.galley(
+                    Pos2::new(r.left() + 18.0, y - tag_g.size().y / 2.0),
+                    tag_g,
+                    color,
+                );
+                let text_color = if s.kind == StepKind::Reply {
+                    MUTED
+                } else {
+                    TEXT
+                };
+                let text = elide(
+                    p,
+                    s.text.clone(),
+                    FontId::proportional(13.0),
+                    text_color,
+                    r.width() - tag_w - 120.0,
+                );
+                p.galley(
+                    Pos2::new(r.left() + 28.0 + tag_w, y - text.size().y / 2.0),
+                    text,
+                    text_color,
+                );
             }
         });
         ui.add_space(12.0);
@@ -3716,7 +4383,11 @@ value: im.containers.max(0).to_string(),
 
     fn hardware_view(&mut self, ui: &mut Ui) {
         let Some(s) = self.gui.hw.clone() else {
-            empty_state(ui, "Collecting…", "The first hardware sample lands in a moment.");
+            empty_state(
+                ui,
+                "Collecting…",
+                "The first hardware sample lands in a moment.",
+            );
             return;
         };
         page_header(
@@ -3745,259 +4416,357 @@ value: im.containers.max(0).to_string(),
             .show(ui, |ui| {
                 ui.add_space(16.0);
 
-        let mem_used = s.mem_total - s.mem_avail;
-        let swap_used = s.swap_total.saturating_sub(s.swap_free);
-        let cpu_hist: Vec<f64> = self.gui.hw_cpu_hist.iter().copied().collect();
-        let gpu_busy_hist: Vec<f64> = self.gui.hw_gpu_busy_hist.iter().copied().collect();
-        let dr_hist: Vec<f64> = self.gui.hw_disk_r_hist.iter().copied().collect();
-        let dw_hist: Vec<f64> = self.gui.hw_disk_w_hist.iter().copied().collect();
-        let rx_hist: Vec<f64> = self.gui.hw_net_rx_hist.iter().copied().collect();
-        let tx_hist: Vec<f64> = self.gui.hw_net_tx_hist.iter().copied().collect();
-        let gpus = self.gui.gpus.clone();
+                let mem_used = s.mem_total - s.mem_avail;
+                let swap_used = s.swap_total.saturating_sub(s.swap_free);
+                let cpu_hist: Vec<f64> = self.gui.hw_cpu_hist.iter().copied().collect();
+                let gpu_busy_hist: Vec<f64> = self.gui.hw_gpu_busy_hist.iter().copied().collect();
+                let dr_hist: Vec<f64> = self.gui.hw_disk_r_hist.iter().copied().collect();
+                let dw_hist: Vec<f64> = self.gui.hw_disk_w_hist.iter().copied().collect();
+                let rx_hist: Vec<f64> = self.gui.hw_net_rx_hist.iter().copied().collect();
+                let tx_hist: Vec<f64> = self.gui.hw_net_tx_hist.iter().copied().collect();
+                let gpus = self.gui.gpus.clone();
 
-        // per-card device identity from the inventory: the cards themselves
-        // say WHICH cpu/ram/ssd/nic this is — no separate machine section
-        let cpu_name = hwinv::INVENTORY.cpu.clone();
-        let mem_name = hwinv::INVENTORY
-            .devices
-            .iter()
-            .find(|d| d.kind == "memory")
-            .map(|d| format!("{} RAM", d.detail))
-            .unwrap_or_default();
-        let disk_name = hwinv::INVENTORY
-            .disk_kerns()
-            .first()
-            .and_then(|k| hwinv::INVENTORY.disk_name(k))
-            .unwrap_or_default()
-            .to_string();
-        let nic_name = hwinv::INVENTORY
-            .devices
-            .iter()
-            .find(|d| d.kind == "nic")
-            .map(|d| d.name.clone())
-            .unwrap_or_default();
+                // per-card device identity from the inventory: the cards themselves
+                // say WHICH cpu/ram/ssd/nic this is — no separate machine section
+                let cpu_name = hwinv::INVENTORY.cpu.clone();
+                let mem_name = hwinv::INVENTORY
+                    .devices
+                    .iter()
+                    .find(|d| d.kind == "memory")
+                    .map(|d| format!("{} RAM", d.detail))
+                    .unwrap_or_default();
+                let disk_name = hwinv::INVENTORY
+                    .disk_kerns()
+                    .first()
+                    .and_then(|k| hwinv::INVENTORY.disk_name(k))
+                    .unwrap_or_default()
+                    .to_string();
+                let nic_name = hwinv::INVENTORY
+                    .devices
+                    .iter()
+                    .find(|d| d.kind == "nic")
+                    .map(|d| d.name.clone())
+                    .unwrap_or_default();
 
-        let mut kpis = vec![
-            Kpi {
-                label: "CPU",
-                device: cpu_name,
-value: format!("{:.1}%", s.cpu_pct),
-                sub: match s.cpu_temp_c {
-                    Some(t) => format!("{} °C · load {}", temp_str(t), s.load1),
-                    None => format!("load {} · {} · {}", s.load1, s.load5, s.load15),
-                },
-                color: ACCENT,
-                viz: Viz::Spark(cpu_hist),
-                glyph: Some("cpu"),
-            },
-            Kpi {
-                label: "Memory",
-                device: mem_name,
-value: human_size(mem_used as i64),
-                sub: format!("of {} ({:.0}%)", human_size(s.mem_total as i64), mem_used as f64 / s.mem_total.max(1) as f64 * 100.0),
-                color: VIOLET,
-                viz: Viz::Ratio(mem_used as f32 / s.mem_total.max(1) as f32),
-                glyph: Some("ram"),
-            },
-            Kpi {
-                label: "Disk I/O",
-                device: disk_name,
-value: format!("{} · {}", human_rate(s.disk_read_bps), human_rate(s.disk_write_bps)),
-                sub: "read · write per second".into(),
-                color: GREEN,
-                viz: Viz::Spark(dr_hist.into_iter().zip(dw_hist).map(|(r, w)| r + w).collect()),
-                glyph: Some("disk"),
-            },
-            Kpi {
-                label: "Network",
-                device: nic_name,
-value: format!("{} · {}", human_rate(s.net_rx_bps), human_rate(s.net_tx_bps)),
-                sub: "down · up per second".into(),
-                color: AMBER,
-                viz: Viz::Spark(rx_hist.into_iter().zip(tx_hist).map(|(r, t)| r + t).collect()),
-                glyph: Some("net"),
-            },
-        ];
-        if let Some(g) = gpus.iter().max_by(|a, b| a.busy_pct.unwrap_or(0.0).partial_cmp(&b.busy_pct.unwrap_or(0.0)).unwrap_or(std::cmp::Ordering::Equal)) {
-            kpis.push(Kpi {
-                label: "GPU",
-                device: g.name.clone(),
-value: g.busy_pct.map(|b| format!("{b:.0}%")).unwrap_or_else(|| "—".into()),
-                sub: match (g.temp_c, g.power_mw) {
-                    (Some(t), Some(p)) => format!("{} · {} °C · {:.0} W", g.name, temp_str(t), p as f64 / 1000.0),
-                    (Some(t), None) => format!("{} · {} °C", g.name, temp_str(t)),
-                    _ => g.name.clone(),
-                },
-                color: CYAN,
-                viz: Viz::Spark(gpu_busy_hist.clone()),
-                glyph: Some("gpu"),
-            });
-        }
-        if let Some((dname, t)) = s
-            .disks
-            .iter()
-            .filter_map(|d| d.temp_c.map(|t| (d.name.clone(), t)))
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
-        {
-            kpis.push(Kpi {
-                label: "SSD",
-                device: hwinv::INVENTORY
-                    .disk_name(&dname)
-                    .map(String::from)
-                    .unwrap_or(dname),
-value: format!("{} °C", temp_str(t)),
-                sub: "drive temperature".into(),
-                color: if t > 70.0 { RED } else if t > 60.0 { AMBER } else { GREEN },
-                viz: Viz::Spark(self.gui.hw_disk_temp_hist.iter().copied().collect()),
-                glyph: Some("disk"),
-            });
-        }
-        ui.scope(|ui| {
-            ui.spacing_mut().item_spacing.x = 14.0;
-            let per_row = if kpis.len() >= 6 { 3 } else { 4 };
-            for (n, row) in kpis.chunks(per_row).enumerate() {
-                if n > 0 {
-                    ui.add_space(6.0);
-                }
-                ui.columns(per_row, |cols| {
-                    for (col, k) in cols.iter_mut().zip(row) {
-                        kpi_card(col, k);
-                    }
-                });
-            }
-        });
-        ui.add_space(14.0);
-
-        let swap_hist: Vec<f64> = self.gui.hw_swap_hist.iter().copied().collect();
-        ui.scope(|ui| {
-            ui.spacing_mut().item_spacing.x = 14.0;
-            ui.columns(2, |cols| {
-                card(&mut cols[0], |ui| {
-                    // memory already has its KPI card above; this one is
-                    // dedicated to swap pressure
-                    card_title(
-                        ui,
-                        "Swap",
-                        &format!("{} of {}", human_size(swap_used as i64), human_size(s.swap_total as i64)),
-                    );
-                    bar_row(ui, "Used", swap_used, s.swap_total, AMBER);
-                    let w = ui.available_width();
-                    area_chart(ui, &swap_hist, AMBER, Vec2::new(w, 54.0), |v| human_size(v as i64));
-                });
-                card(&mut cols[1], |ui| {
-                    card_title(ui, "Sensors", "");
-                    if s.sensors.is_empty() {
-                        ui.label(RichText::new("no hwmon temperature sensors found").color(FAINT));
-                    } else {
-                        for x in &s.sensors {
-                            let c = if x.c > 85.0 { RED } else if x.c > 70.0 { AMBER } else { GREEN };
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(x.group).size(11.5).color(FAINT));
-                                ui.label(RichText::new(&x.label).size(12.5).color(MUTED));
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.label(RichText::new(format!("{} °C", temp_str(x.c))).font(FontId::monospace(12.5)).color(c));
-                                });
-                            });
-                        }
-                    }
-                    ui.add_space(4.0);
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Disk").size(12.5).color(MUTED).weak());
-                        ui.label(RichText::new(format!("↓ {}", human_rate(s.disk_read_bps))).font(FontId::monospace(12.5)).color(TEXT));
-                        ui.label(RichText::new(format!("↑ {}", human_rate(s.disk_write_bps))).font(FontId::monospace(12.5)).color(TEXT));
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Net  ").size(12.5).color(MUTED).weak());
-                        ui.label(RichText::new(format!("↓ {}", human_rate(s.net_rx_bps))).font(FontId::monospace(12.5)).color(TEXT));
-                        ui.label(RichText::new(format!("↑ {}", human_rate(s.net_tx_bps))).font(FontId::monospace(12.5)).color(TEXT));
-                    });
-                });
-            });
-        });
-
-        // ---- GPUs: one card per display adapter ----
-        if !gpus.is_empty() {
-            ui.add_space(14.0);
-            section_heading(ui, "Graphics");
-            ui.add_space(6.0);
-            for g in &gpus {
-                let busy = g.busy_pct.unwrap_or(0.0);
-                let color = if busy > 85.0 { RED } else if busy > 60.0 { AMBER } else { CYAN };
-                card(ui, |ui| {
-                    card_title(
-                        ui,
-                        &g.name,
-                        &match (g.temp_c, g.power_mw) {
-                            (Some(t), Some(p)) => format!("{} °C · {:.0} W", temp_str(t), p as f64 / 1000.0),
-                            (Some(t), None) => format!("{} °C", temp_str(t)),
-                            (None, Some(p)) => format!("{:.0} W", p as f64 / 1000.0),
-                            (None, None) => String::new(),
+                let mut kpis = vec![
+                    Kpi {
+                        label: "CPU",
+                        device: cpu_name,
+                        value: format!("{:.1}%", s.cpu_pct),
+                        sub: match s.cpu_temp_c {
+                            Some(t) => format!("{} °C · load {}", temp_str(t), s.load1),
+                            None => format!("load {} · {} · {}", s.load1, s.load5, s.load15),
                         },
-                    );
-                    if g.busy_pct.is_some() {
-                        bar_row(ui, "Busy", busy as u64, 100, color);
-                    } else {
-                        ui.label(
-                            RichText::new("utilization not exposed by this driver")
-                                .size(12.0)
-                                .color(FAINT),
-                        );
-                    }
-                    if g.vram_total > 0 {
-                        bar_row(ui, "VRAM", g.vram_used, g.vram_total, VIOLET);
-                    }
-                    let w = ui.available_width();
-                    area_chart(ui, &gpu_busy_hist, color, Vec2::new(w, 60.0), |v| format!("{v:.0}%"));
-                });
-                ui.add_space(8.0);
-            }
-        }
-
-        // ---- Disks: per-device stats, Task-Manager style ----
-        if !s.disks.is_empty() {
-            ui.add_space(6.0);
-            section_heading(ui, "Storage");
-            ui.add_space(6.0);
-            // only drives we actually inventoried: internal SATA/OEM disks
-            // (sda…) and anything not named by the inventory are skipped
-            let inv_disks: Vec<&hwinv::HwDevice> =
-                hwinv::INVENTORY.devices.iter().filter(|d| d.kind == "disk").collect();
-            let named: Vec<(&crate::hw::DiskStat, Option<&hwinv::HwDevice>)> = s
-                .disks
-                .iter()
-                .filter(|d| {
-                    inv_disks.iter().any(|x| x.kern.as_deref() == Some(d.name.as_str()))
-                })
-                .map(|d| {
-                    let inv = inv_disks.iter().find(|x| x.kern.as_deref() == Some(d.name.as_str())).copied();
-                    (d, inv)
-                })
-                .collect();
-            if named.is_empty() && !s.disks.is_empty() {
-                // no inventory match at all: fall back to everything except
-                // obvious internal/OEM names so the section isn't blank
-                let fallback: Vec<&crate::hw::DiskStat> = s
+                        color: ACCENT,
+                        viz: Viz::Spark(cpu_hist),
+                        glyph: Some("cpu"),
+                    },
+                    Kpi {
+                        label: "Memory",
+                        device: mem_name,
+                        value: human_size(mem_used as i64),
+                        sub: format!(
+                            "of {} ({:.0}%)",
+                            human_size(s.mem_total as i64),
+                            mem_used as f64 / s.mem_total.max(1) as f64 * 100.0
+                        ),
+                        color: VIOLET,
+                        viz: Viz::Ratio(mem_used as f32 / s.mem_total.max(1) as f32),
+                        glyph: Some("ram"),
+                    },
+                    Kpi {
+                        label: "Disk I/O",
+                        device: disk_name,
+                        value: format!(
+                            "{} · {}",
+                            human_rate(s.disk_read_bps),
+                            human_rate(s.disk_write_bps)
+                        ),
+                        sub: "read · write per second".into(),
+                        color: GREEN,
+                        viz: Viz::Spark(
+                            dr_hist
+                                .into_iter()
+                                .zip(dw_hist)
+                                .map(|(r, w)| r + w)
+                                .collect(),
+                        ),
+                        glyph: Some("disk"),
+                    },
+                    Kpi {
+                        label: "Network",
+                        device: nic_name,
+                        value: format!(
+                            "{} · {}",
+                            human_rate(s.net_rx_bps),
+                            human_rate(s.net_tx_bps)
+                        ),
+                        sub: "down · up per second".into(),
+                        color: AMBER,
+                        viz: Viz::Spark(
+                            rx_hist
+                                .into_iter()
+                                .zip(tx_hist)
+                                .map(|(r, t)| r + t)
+                                .collect(),
+                        ),
+                        glyph: Some("net"),
+                    },
+                ];
+                if let Some(g) = gpus.iter().max_by(|a, b| {
+                    a.busy_pct
+                        .unwrap_or(0.0)
+                        .partial_cmp(&b.busy_pct.unwrap_or(0.0))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                }) {
+                    kpis.push(Kpi {
+                        label: "GPU",
+                        device: g.name.clone(),
+                        value: g
+                            .busy_pct
+                            .map(|b| format!("{b:.0}%"))
+                            .unwrap_or_else(|| "—".into()),
+                        sub: match (g.temp_c, g.power_mw) {
+                            (Some(t), Some(p)) => format!(
+                                "{} · {} °C · {:.0} W",
+                                g.name,
+                                temp_str(t),
+                                p as f64 / 1000.0
+                            ),
+                            (Some(t), None) => format!("{} · {} °C", g.name, temp_str(t)),
+                            _ => g.name.clone(),
+                        },
+                        color: CYAN,
+                        viz: Viz::Spark(gpu_busy_hist.clone()),
+                        glyph: Some("gpu"),
+                    });
+                }
+                if let Some((dname, t)) = s
                     .disks
                     .iter()
-                    .filter(|d| !(d.name == "sda" || d.name == "sdb"))
-                    .collect();
-                for d in fallback {
-                    disk_card(ui, d, None);
-                    ui.add_space(8.0);
+                    .filter_map(|d| d.temp_c.map(|t| (d.name.clone(), t)))
+                    .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                {
+                    kpis.push(Kpi {
+                        label: "SSD",
+                        device: hwinv::INVENTORY
+                            .disk_name(&dname)
+                            .map(String::from)
+                            .unwrap_or(dname),
+                        value: format!("{} °C", temp_str(t)),
+                        sub: "drive temperature".into(),
+                        color: if t > 70.0 {
+                            RED
+                        } else if t > 60.0 {
+                            AMBER
+                        } else {
+                            GREEN
+                        },
+                        viz: Viz::Spark(self.gui.hw_disk_temp_hist.iter().copied().collect()),
+                        glyph: Some("disk"),
+                    });
                 }
-            }
-            for (d, inv) in &named {
-                disk_card(ui, d, *inv);
-                ui.add_space(8.0);
-            }
-        }
+                ui.scope(|ui| {
+                    ui.spacing_mut().item_spacing.x = 14.0;
+                    let per_row = if kpis.len() >= 6 { 3 } else { 4 };
+                    for (n, row) in kpis.chunks(per_row).enumerate() {
+                        if n > 0 {
+                            ui.add_space(6.0);
+                        }
+                        ui.columns(per_row, |cols| {
+                            for (col, k) in cols.iter_mut().zip(row) {
+                                kpi_card(col, k);
+                            }
+                        });
+                    }
+                });
+                ui.add_space(14.0);
+
+                let swap_hist: Vec<f64> = self.gui.hw_swap_hist.iter().copied().collect();
+                ui.scope(|ui| {
+                    ui.spacing_mut().item_spacing.x = 14.0;
+                    ui.columns(2, |cols| {
+                        card(&mut cols[0], |ui| {
+                            // memory already has its KPI card above; this one is
+                            // dedicated to swap pressure
+                            card_title(
+                                ui,
+                                "Swap",
+                                &format!(
+                                    "{} of {}",
+                                    human_size(swap_used as i64),
+                                    human_size(s.swap_total as i64)
+                                ),
+                            );
+                            bar_row(ui, "Used", swap_used, s.swap_total, AMBER);
+                            let w = ui.available_width();
+                            area_chart(ui, &swap_hist, AMBER, Vec2::new(w, 54.0), |v| {
+                                human_size(v as i64)
+                            });
+                        });
+                        card(&mut cols[1], |ui| {
+                            card_title(ui, "Sensors", "");
+                            if s.sensors.is_empty() {
+                                ui.label(
+                                    RichText::new("no hwmon temperature sensors found")
+                                        .color(FAINT),
+                                );
+                            } else {
+                                for x in &s.sensors {
+                                    let c = if x.c > 85.0 {
+                                        RED
+                                    } else if x.c > 70.0 {
+                                        AMBER
+                                    } else {
+                                        GREEN
+                                    };
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new(x.group).size(11.5).color(FAINT));
+                                        ui.label(RichText::new(&x.label).size(12.5).color(MUTED));
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                ui.label(
+                                                    RichText::new(format!("{} °C", temp_str(x.c)))
+                                                        .font(FontId::monospace(12.5))
+                                                        .color(c),
+                                                );
+                                            },
+                                        );
+                                    });
+                                }
+                            }
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("Disk").size(12.5).color(MUTED).weak());
+                                ui.label(
+                                    RichText::new(format!("↓ {}", human_rate(s.disk_read_bps)))
+                                        .font(FontId::monospace(12.5))
+                                        .color(TEXT),
+                                );
+                                ui.label(
+                                    RichText::new(format!("↑ {}", human_rate(s.disk_write_bps)))
+                                        .font(FontId::monospace(12.5))
+                                        .color(TEXT),
+                                );
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("Net  ").size(12.5).color(MUTED).weak());
+                                ui.label(
+                                    RichText::new(format!("↓ {}", human_rate(s.net_rx_bps)))
+                                        .font(FontId::monospace(12.5))
+                                        .color(TEXT),
+                                );
+                                ui.label(
+                                    RichText::new(format!("↑ {}", human_rate(s.net_tx_bps)))
+                                        .font(FontId::monospace(12.5))
+                                        .color(TEXT),
+                                );
+                            });
+                        });
+                    });
+                });
+
+                // ---- GPUs: one card per display adapter ----
+                if !gpus.is_empty() {
+                    ui.add_space(14.0);
+                    section_heading(ui, "Graphics");
+                    ui.add_space(6.0);
+                    for g in &gpus {
+                        let busy = g.busy_pct.unwrap_or(0.0);
+                        let color = if busy > 85.0 {
+                            RED
+                        } else if busy > 60.0 {
+                            AMBER
+                        } else {
+                            CYAN
+                        };
+                        card(ui, |ui| {
+                            card_title(
+                                ui,
+                                &g.name,
+                                &match (g.temp_c, g.power_mw) {
+                                    (Some(t), Some(p)) => {
+                                        format!("{} °C · {:.0} W", temp_str(t), p as f64 / 1000.0)
+                                    }
+                                    (Some(t), None) => format!("{} °C", temp_str(t)),
+                                    (None, Some(p)) => format!("{:.0} W", p as f64 / 1000.0),
+                                    (None, None) => String::new(),
+                                },
+                            );
+                            if g.busy_pct.is_some() {
+                                bar_row(ui, "Busy", busy as u64, 100, color);
+                            } else {
+                                ui.label(
+                                    RichText::new("utilization not exposed by this driver")
+                                        .size(12.0)
+                                        .color(FAINT),
+                                );
+                            }
+                            if g.vram_total > 0 {
+                                bar_row(ui, "VRAM", g.vram_used, g.vram_total, VIOLET);
+                            }
+                            let w = ui.available_width();
+                            area_chart(ui, &gpu_busy_hist, color, Vec2::new(w, 60.0), |v| {
+                                format!("{v:.0}%")
+                            });
+                        });
+                        ui.add_space(8.0);
+                    }
+                }
+
+                // ---- Disks: per-device stats, Task-Manager style ----
+                if !s.disks.is_empty() {
+                    ui.add_space(6.0);
+                    section_heading(ui, "Storage");
+                    ui.add_space(6.0);
+                    // only drives we actually inventoried: internal SATA/OEM disks
+                    // (sda…) and anything not named by the inventory are skipped
+                    let inv_disks: Vec<&hwinv::HwDevice> = hwinv::INVENTORY
+                        .devices
+                        .iter()
+                        .filter(|d| d.kind == "disk")
+                        .collect();
+                    let named: Vec<(&crate::hw::DiskStat, Option<&hwinv::HwDevice>)> = s
+                        .disks
+                        .iter()
+                        .filter(|d| {
+                            inv_disks
+                                .iter()
+                                .any(|x| x.kern.as_deref() == Some(d.name.as_str()))
+                        })
+                        .map(|d| {
+                            let inv = inv_disks
+                                .iter()
+                                .find(|x| x.kern.as_deref() == Some(d.name.as_str()))
+                                .copied();
+                            (d, inv)
+                        })
+                        .collect();
+                    if named.is_empty() && !s.disks.is_empty() {
+                        // no inventory match at all: fall back to everything except
+                        // obvious internal/OEM names so the section isn't blank
+                        let fallback: Vec<&crate::hw::DiskStat> = s
+                            .disks
+                            .iter()
+                            .filter(|d| !(d.name == "sda" || d.name == "sdb"))
+                            .collect();
+                        for d in fallback {
+                            disk_card(ui, d, None);
+                            ui.add_space(8.0);
+                        }
+                    }
+                    for (d, inv) in &named {
+                        disk_card(ui, d, *inv);
+                        ui.add_space(8.0);
+                    }
+                }
             });
         // regression: the body must actually scroll, not clip
         #[cfg(test)]
-                #[cfg(test)]
         hw_scroll_probe::record(hw_body.inner_rect.height(), hw_body.content_size.y);
         #[cfg(not(test))]
-        drop(hw_body);
+        let _ = hw_body;
     }
     // ------------------------------------------------------------------
     // Ports tab: the socket detail page
@@ -4029,7 +4798,11 @@ value: format!("{} °C", temp_str(t)),
                     .font(FontId::monospace(22.0))
                     .color(TEXT),
             );
-            chip(ui, &format!("{}{}", p.proto, if p.family == 6 { "6" } else { "" }), color);
+            chip(
+                ui,
+                &format!("{}{}", p.proto, if p.family == 6 { "6" } else { "" }),
+                color,
+            );
             if p.state != "-" {
                 chip(ui, p.state, port_state_color(p.state));
             }
@@ -4045,8 +4818,11 @@ value: format!("{} °C", temp_str(t)),
             Kpi {
                 label: "Process",
                 device: String::new(),
-value: p.proc_name.clone().unwrap_or_else(|| "—".into()),
-                sub: p.pid.map(|x| format!("pid {x}")).unwrap_or_else(|| "owner not visible".into()),
+                value: p.proc_name.clone().unwrap_or_else(|| "—".into()),
+                sub: p
+                    .pid
+                    .map(|x| format!("pid {x}"))
+                    .unwrap_or_else(|| "owner not visible".into()),
                 color: if p.pid.is_some() { GREEN } else { FAINT },
                 viz: Viz::None,
                 glyph: None,
@@ -4054,7 +4830,7 @@ value: p.proc_name.clone().unwrap_or_else(|| "—".into()),
             Kpi {
                 label: "Protocol",
                 device: String::new(),
-value: p.proto.to_uppercase(),
+                value: p.proto.to_uppercase(),
                 sub: format!("IPv{}", p.family),
                 color: ACCENT,
                 viz: Viz::None,
@@ -4063,9 +4839,20 @@ value: p.proto.to_uppercase(),
             Kpi {
                 label: "Bind",
                 device: String::new(),
-value: if p.addr == "0.0.0.0" || p.addr == "[::]" { "public" } else if p.addr.starts_with("127.") || p.addr == "[::1]" { "localhost" } else { "interface" }.into(),
+                value: if p.addr == "0.0.0.0" || p.addr == "[::]" {
+                    "public"
+                } else if p.addr.starts_with("127.") || p.addr == "[::1]" {
+                    "localhost"
+                } else {
+                    "interface"
+                }
+                .into(),
                 sub: p.addr.clone(),
-                color: if p.addr == "0.0.0.0" || p.addr == "[::]" { AMBER } else { GREEN },
+                color: if p.addr == "0.0.0.0" || p.addr == "[::]" {
+                    AMBER
+                } else {
+                    GREEN
+                },
                 viz: Viz::None,
                 glyph: None,
             },
@@ -4084,7 +4871,14 @@ value: if p.addr == "0.0.0.0" || p.addr == "[::]" { "public" } else if p.addr.st
             card_title(ui, "Working directory", "");
             match &p.cwd {
                 Some(c) => ui.label(RichText::new(c).font(FontId::monospace(12.5)).color(TEXT)),
-                None => ui.label(RichText::new(if p.pid.is_some() { "not readable (different user?)" } else { "no owning process found" }).color(FAINT)),
+                None => ui.label(
+                    RichText::new(if p.pid.is_some() {
+                        "not readable (different user?)"
+                    } else {
+                        "no owning process found"
+                    })
+                    .color(FAINT),
+                ),
             };
         });
         ui.add_space(10.0);
@@ -4134,43 +4928,66 @@ value: if p.addr == "0.0.0.0" || p.addr == "[::]" { "public" } else if p.addr.st
                 card(ui, |ui| {
                     card_title(ui, "General", "");
                     ui.label(
-                        RichText::new("changes apply the moment you touch them · saved automatically")
-                            .size(12.0)
-                            .color(FAINT),
+                        RichText::new(
+                            "changes apply the moment you touch them · saved automatically",
+                        )
+                        .size(12.0)
+                        .color(FAINT),
                     );
                     ui.add_space(4.0);
 
                     // refresh interval: stepper + quick presets
                     let presets = [1.0_f64, 2.0, 5.0, 10.0];
-                    let preset_hit = setting_row(ui, "Refresh interval", "seconds between live pulls · 0 disables polling", |ui| {
-                        let mut hit = None;
-                        for p in presets {
-                            let on = (self.gui.refresh_edit - p).abs() < 0.01;
-                            let b = ui.add_sized(
-                                [40.0, 26.0],
-                                egui::Button::new(RichText::new(format!("{p:.0}s")).size(12.0).color(if on { ACCENT } else { MUTED }))
-                                    .fill(if on { ACCENT.gamma_multiply(0.18) } else { SURFACE_HI })
-                                    .stroke(Stroke::new(1.0_f32, if on { ACCENT.gamma_multiply(0.6) } else { BORDER })),
-                            );
-                            if b.clicked() {
-                                hit = Some(p);
+                    setting_row(
+                        ui,
+                        "Refresh interval",
+                        "seconds between live pulls · 0 disables polling",
+                        |ui| {
+                            let mut hit = None;
+                            for p in presets {
+                                let on = (self.gui.refresh_edit - p).abs() < 0.01;
+                                let b = ui.add_sized(
+                                    [40.0, 26.0],
+                                    egui::Button::new(
+                                        RichText::new(format!("{p:.0}s")).size(12.0).color(if on {
+                                            ACCENT
+                                        } else {
+                                            MUTED
+                                        }),
+                                    )
+                                    .fill(if on {
+                                        ACCENT.gamma_multiply(0.18)
+                                    } else {
+                                        SURFACE_HI
+                                    })
+                                    .stroke(Stroke::new(
+                                        1.0_f32,
+                                        if on {
+                                            ACCENT.gamma_multiply(0.6)
+                                        } else {
+                                            BORDER
+                                        },
+                                    )),
+                                );
+                                if b.clicked() {
+                                    hit = Some(p);
+                                }
                             }
-                        }
-                        let dv = egui::DragValue::new(&mut self.gui.refresh_edit)
-                            .range(0.0..=60.0)
-                            .speed(0.25)
-                            .suffix(" s")
-                            .max_decimals(1);
-                        let r = ui.add_sized([92.0, 26.0], dv);
-                        if r.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                            general_dirty = true;
-                        }
-                        if let Some(p) = hit {
-                            self.gui.refresh_edit = p;
-                            general_dirty = true;
-                        }
-                    });
-                    let _ = preset_hit;
+                            let dv = egui::DragValue::new(&mut self.gui.refresh_edit)
+                                .range(0.0..=60.0)
+                                .speed(0.25)
+                                .suffix(" s")
+                                .max_decimals(1);
+                            let r = ui.add_sized([92.0, 26.0], dv);
+                            if r.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                general_dirty = true;
+                            }
+                            if let Some(p) = hit {
+                                self.gui.refresh_edit = p;
+                                general_dirty = true;
+                            }
+                        },
+                    );
                     // apply live so the stepper feels responsive...
                     self.refresh = self.gui.refresh_edit.max(0.0);
                     if general_dirty {
@@ -4184,21 +5001,29 @@ value: if p.addr == "0.0.0.0" || p.addr == "[::]" { "public" } else if p.addr.st
                             self.gui.status = format!("could not save settings: {e}");
                         } else {
                             let v = self.refresh;
-                            let vs = if v.fract() == 0.0 { format!("{}", v as i64) } else { format!("{v}") };
+                            let vs = if v.fract() == 0.0 {
+                                format!("{}", v as i64)
+                            } else {
+                                format!("{v}")
+                            };
                             self.gui.status = format!("refresh every {vs} s");
                         }
                         general_dirty = false;
                     }
 
-                    let autoscroll = setting_row(ui, "Follow log output", "stick to the bottom as new lines land", |ui| {
-                        let on = self.gui.autoscroll_logs;
-                        if switch(ui, on).clicked() {
-                            self.gui.autoscroll_logs = !on;
-                            self.gui.logs_follow = !on;
-                            general_dirty = true;
-                        }
-                    });
-                    let _ = autoscroll;
+                    setting_row(
+                        ui,
+                        "Follow log output",
+                        "stick to the bottom as new lines land",
+                        |ui| {
+                            let on = self.gui.autoscroll_logs;
+                            if switch(ui, on).clicked() {
+                                self.gui.autoscroll_logs = !on;
+                                self.gui.logs_follow = !on;
+                                general_dirty = true;
+                            }
+                        },
+                    );
                     if general_dirty {
                         if let Err(e) = strata::patch(|c| {
                             c.general = strata::GeneralConfig {
@@ -4208,7 +5033,11 @@ value: if p.addr == "0.0.0.0" || p.addr == "[::]" { "public" } else if p.addr.st
                         }) {
                             self.gui.status = format!("could not save settings: {e}");
                         } else {
-                            self.gui.status = if self.gui.autoscroll_logs { "log follow on".into() } else { "log follow off".into() };
+                            self.gui.status = if self.gui.autoscroll_logs {
+                                "log follow on".into()
+                            } else {
+                                "log follow off".into()
+                            };
                         }
                         general_dirty = false;
                     }
@@ -4222,13 +5051,27 @@ value: if p.addr == "0.0.0.0" || p.addr == "[::]" { "public" } else if p.addr.st
                 let mut test_now = false;
                 card(ui, |ui| {
                     let connected = self.gui.strata_health.is_some();
-                    let dot = if connected { GREEN } else if self.gui.strata_error.is_some() { RED } else { FAINT };
+                    let dot = if connected {
+                        GREEN
+                    } else if self.gui.strata_error.is_some() {
+                        RED
+                    } else {
+                        FAINT
+                    };
                     card_title(ui, "Strata server", "");
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("●").size(13.0).color(dot));
                         let sub = if let Some(h) = &self.gui.strata_health {
-                            let svc = if h.service.is_empty() { "strata" } else { h.service.as_str() };
-                            let model = if h.model.is_empty() { "no model" } else { &h.model };
+                            let svc = if h.service.is_empty() {
+                                "strata"
+                            } else {
+                                h.service.as_str()
+                            };
+                            let model = if h.model.is_empty() {
+                                "no model"
+                            } else {
+                                &h.model
+                            };
                             format!(
                                 "{svc} · {} · {} ctx · {model} · {}",
                                 h.status,
@@ -4240,11 +5083,22 @@ value: if p.addr == "0.0.0.0" || p.addr == "[::]" { "public" } else if p.addr.st
                         } else {
                             "not connected yet — set the endpoint and key, then Test & save".into()
                         };
-                        ui.label(RichText::new(sub).size(12.0).color(if connected { GREEN } else { MUTED }));
+                        ui.label(RichText::new(sub).size(12.0).color(if connected {
+                            GREEN
+                        } else {
+                            MUTED
+                        }));
                     });
                     ui.add_space(6.0);
 
-                    let ep_resp = field(ui, &mut self.gui.strata_endpoint_edit, "http://127.0.0.1:9191", true, false, None);
+                    let ep_resp = field(
+                        ui,
+                        &mut self.gui.strata_endpoint_edit,
+                        "http://127.0.0.1:9191",
+                        true,
+                        false,
+                        None,
+                    );
                     #[cfg(test)]
                     {
                         self.gui.probe_endpoint_rect = Some(ep_resp.rect);
@@ -4254,13 +5108,20 @@ value: if p.addr == "0.0.0.0" || p.addr == "[::]" { "public" } else if p.addr.st
                     ui.add_space(8.0);
 
                     let masked = self.gui.strata_key_masked;
-                    let key_resp = field(ui, &mut self.gui.strata_key_edit, "sk-…", true, masked, Some((
-                        if masked { "eye" } else { "eye_off" },
+                    let key_resp = field(
+                        ui,
+                        &mut self.gui.strata_key_edit,
+                        "sk-…",
+                        true,
                         masked,
-                        &mut |on: bool| {
-                            self.gui.strata_key_masked = !on;
-                        },
-                    )));
+                        Some((
+                            if masked { "eye" } else { "eye_off" },
+                            masked,
+                            &mut |on: bool| {
+                                self.gui.strata_key_masked = !on;
+                            },
+                        )),
+                    );
                     // pull the save row up flush under the fields instead of
                     // leaving a full spacing gap
                     let c = ui.cursor();
@@ -4274,7 +5135,9 @@ value: if p.addr == "0.0.0.0" || p.addr == "[::]" { "public" } else if p.addr.st
                                 let btn = ui.add_sized(
                                     [118.0, 30.0],
                                     egui::Button::new(
-                                        RichText::new("⟳  Test & save").font(bold(12.5)).color(ACCENT),
+                                        RichText::new("⟳  Test & save")
+                                            .font(bold(12.5))
+                                            .color(ACCENT),
                                     )
                                     .fill(ACCENT.gamma_multiply(0.14))
                                     .stroke(Stroke::new(1.0_f32, ACCENT.gamma_multiply(0.55))),
@@ -4294,7 +5157,11 @@ value: if p.addr == "0.0.0.0" || p.addr == "[::]" { "public" } else if p.addr.st
                                         self.gui.strata_key_edit.trim().to_string();
                                 }
                                 if let Some(h) = &self.gui.strata_health {
-                                    let svc = if h.service.is_empty() { "strata" } else { h.service.as_str() };
+                                    let svc = if h.service.is_empty() {
+                                        "strata"
+                                    } else {
+                                        h.service.as_str()
+                                    };
                                     ui.label(
                                         RichText::new(format!(
                                             "● {svc} · {} · {} ctx · images {} · key {}",
@@ -4322,7 +5189,8 @@ value: if p.addr == "0.0.0.0" || p.addr == "[::]" { "public" } else if p.addr.st
                     self.gui.strata_cfg.api_key = self.gui.strata_key_edit.trim().to_string();
                     match strata::patch(|c| c.strata = self.gui.strata_cfg.clone()) {
                         Ok(_) => {
-                            self.strata_client = Arc::new(strata::HttpClient::new(&self.gui.strata_cfg));
+                            self.strata_client =
+                                Arc::new(strata::HttpClient::new(&self.gui.strata_cfg));
                             self.last_strata_poll = Instant::now() - Duration::from_secs(999);
                             self.spawn_strata_poll_inner(true);
                             self.gui.status = "strata settings saved".into();
@@ -4340,7 +5208,11 @@ value: if p.addr == "0.0.0.0" || p.addr == "[::]" { "public" } else if p.addr.st
                             let path = strata::config_path()
                                 .map(|p| p.display().to_string())
                                 .unwrap_or_else(|| "unavailable".into());
-                            ui.label(RichText::new(path).font(FontId::monospace(12.0)).color(MUTED));
+                            ui.label(
+                                RichText::new(path)
+                                    .font(FontId::monospace(12.0))
+                                    .color(MUTED),
+                            );
                         });
                     });
                 });
@@ -4366,8 +5238,16 @@ value: if p.addr == "0.0.0.0" || p.addr == "[::]" { "public" } else if p.addr.st
         card(ui, |ui| {
             ui.horizontal(|ui| {
                 if let Some(h) = &self.gui.strata_health {
-                    let svc = if h.service.is_empty() { "strata" } else { h.service.as_str() };
-                    let model = if h.model.is_empty() { "no model" } else { &h.model };
+                    let svc = if h.service.is_empty() {
+                        "strata"
+                    } else {
+                        h.service.as_str()
+                    };
+                    let model = if h.model.is_empty() {
+                        "no model"
+                    } else {
+                        &h.model
+                    };
                     ui.label(
                         RichText::new(format!(
                             "● {svc} · {} · {} ctx · {} · {} · images {} · key {}",
@@ -4409,7 +5289,11 @@ value: if p.addr == "0.0.0.0" || p.addr == "[::]" { "public" } else if p.addr.st
                     "This server keeps /metrics behind a key — open ⚙ Settings, fill in endpoint and key, and press ⟳ Test & save.",
                 );
             } else {
-                empty_state(ui, "Collecting…", "The first /metrics pull lands in a moment.");
+                empty_state(
+                    ui,
+                    "Collecting…",
+                    "The first /metrics pull lands in a moment.",
+                );
             }
             return;
         };
@@ -4431,8 +5315,13 @@ value: if p.addr == "0.0.0.0" || p.addr == "[::]" { "public" } else if p.addr.st
                     format!("Reading prompt{pct}"),
                     ACCENT,
                     fmt_tokens(m.prompt_read.unwrap_or(0))
-                        + &m.prompt_total.map(|t| format!(" / {} tokens read", fmt_tokens(t))).unwrap_or_default(),
-                    m.prompt_total.filter(|t| *t > 0).and_then(|t| m.prompt_read.map(|r| r as f32 / t as f32)).unwrap_or(0.0),
+                        + &m.prompt_total
+                            .map(|t| format!(" / {} tokens read", fmt_tokens(t)))
+                            .unwrap_or_default(),
+                    m.prompt_total
+                        .filter(|t| *t > 0)
+                        .and_then(|t| m.prompt_read.map(|r| r as f32 / t as f32))
+                        .unwrap_or(0.0),
                 )
             }
             "generating" => {
@@ -4443,9 +5332,14 @@ value: if p.addr == "0.0.0.0" || p.addr == "[::]" { "public" } else if p.addr.st
                     format!(
                         "{} tokens · {} tok/s",
                         fmt_tokens(m.generated.unwrap_or(0)),
-                        m.tok_s.map(|v| format!("{v:.1}")).unwrap_or_else(|| "–".into())
+                        m.tok_s
+                            .map(|v| format!("{v:.1}"))
+                            .unwrap_or_else(|| "–".into())
                     ),
-                    m.max_tokens.filter(|t| *t > 0).and_then(|t| m.generated.map(|g| (g as f32 / t as f32).min(1.0))).unwrap_or(0.0),
+                    m.max_tokens
+                        .filter(|t| *t > 0)
+                        .and_then(|t| m.generated.map(|g| (g as f32 / t as f32).min(1.0)))
+                        .unwrap_or(0.0),
                 )
             }
             _ => (
@@ -4455,7 +5349,9 @@ value: if p.addr == "0.0.0.0" || p.addr == "[::]" { "public" } else if p.addr.st
                     format!(
                         "last: {} tokens{}",
                         fmt_tokens(r.output_tokens.unwrap_or(0)),
-                        r.decode_tok_s.map(|d| format!(" at {d:.1} tok/s")).unwrap_or_default()
+                        r.decode_tok_s
+                            .map(|d| format!(" at {d:.1} tok/s"))
+                            .unwrap_or_default()
                     )
                 })
                 .unwrap_or_else(|| "Waiting for a request".into()),
@@ -4476,7 +5372,11 @@ value: if p.addr == "0.0.0.0" || p.addr == "[::]" { "public" } else if p.addr.st
                 ui.label(
                     RichText::new(format!(
                         "{} · {} tok/s",
-                        if m.model.is_empty() { "strata" } else { &m.model },
+                        if m.model.is_empty() {
+                            "strata"
+                        } else {
+                            &m.model
+                        },
                         m.hist
                             .get("tok_s")
                             .and_then(|h| h.last())
@@ -4496,11 +5396,18 @@ value: if p.addr == "0.0.0.0" || p.addr == "[::]" { "public" } else if p.addr.st
         let hist = |k: &str| -> Vec<f64> { m.hist.get(k).cloned().unwrap_or_default() };
         let speed = strata::decode_now(m, last);
         let prefill = strata::prefill_now(m, last);
-        let multi_gpu = m.gpu_name.as_deref().map(|n| n.contains(" + ")).unwrap_or(false);
+        let multi_gpu = m
+            .gpu_name
+            .as_deref()
+            .map(|n| n.contains(" + "))
+            .unwrap_or(false);
         let gpu_sub = if multi_gpu {
             m.gpu_name.clone().unwrap_or_default()
         } else {
-            m.gpu_name.clone().or_else(|| m.gpu_note.clone()).unwrap_or_default()
+            m.gpu_name
+                .clone()
+                .or_else(|| m.gpu_note.clone())
+                .unwrap_or_default()
         };
         let gen = m.gpu_pcie_gen_max.or(m.gpu_pcie_gen);
         let ttft = &m.ttft;
@@ -4508,8 +5415,14 @@ value: if p.addr == "0.0.0.0" || p.addr == "[::]" { "public" } else if p.addr.st
             Kpi {
                 label: "GPU SPEED",
                 device: String::new(),
-value: speed.map(|v| format!("{v:.1}")).unwrap_or_else(|| "–".into()),
-                sub: if m.state == "generating" { "tok/s · decode now".into() } else { "tok/s · decode last request".into() },
+                value: speed
+                    .map(|v| format!("{v:.1}"))
+                    .unwrap_or_else(|| "–".into()),
+                sub: if m.state == "generating" {
+                    "tok/s · decode now".into()
+                } else {
+                    "tok/s · decode last request".into()
+                },
                 color: ACCENT,
                 viz: Viz::Spark(hist("tok_s")),
                 glyph: Some("gauge"),
@@ -4517,8 +5430,12 @@ value: speed.map(|v| format!("{v:.1}")).unwrap_or_else(|| "–".into()),
             Kpi {
                 label: "GPU PREFILL",
                 device: String::new(),
-value: prefill.map(fmt_tokens_f).unwrap_or_else(|| "–".into()),
-                sub: if m.state == "idle" { "t/s · prefill last request".into() } else { "t/s · prefill this request".into() },
+                value: prefill.map(fmt_tokens_f).unwrap_or_else(|| "–".into()),
+                sub: if m.state == "idle" {
+                    "t/s · prefill last request".into()
+                } else {
+                    "t/s · prefill this request".into()
+                },
                 color: CYAN,
                 viz: Viz::Spark(hist("prefill_tok_s_mean")),
                 glyph: Some("gauge"),
@@ -4526,7 +5443,10 @@ value: prefill.map(fmt_tokens_f).unwrap_or_else(|| "–".into()),
             Kpi {
                 label: "GPU LOAD",
                 device: String::new(),
-value: m.gpu_util.map(|v| format!("{v:.0}")).unwrap_or_else(|| "–".into()),
+                value: m
+                    .gpu_util
+                    .map(|v| format!("{v:.0}"))
+                    .unwrap_or_else(|| "–".into()),
                 sub: format!("% · {}", gpu_sub),
                 color: GREEN,
                 viz: Viz::Spark(hist("gpu_util")),
@@ -4535,10 +5455,19 @@ value: m.gpu_util.map(|v| format!("{v:.0}")).unwrap_or_else(|| "–".into()),
             Kpi {
                 label: "GPU VRAM",
                 device: String::new(),
-value: m.gpu_mem_used.map(|v| format!("{:.1}", v / 1e9)).unwrap_or_else(|| "–".into()),
+                value: m
+                    .gpu_mem_used
+                    .map(|v| format!("{:.1}", v / 1e9))
+                    .unwrap_or_else(|| "–".into()),
                 sub: m
                     .gpu_mem_total
-                    .map(|t| format!("of {:.0} GB · {}", t / 1e9, fmt_tokens(m.expert_slots.unwrap_or(0))))
+                    .map(|t| {
+                        format!(
+                            "of {:.0} GB · {}",
+                            t / 1e9,
+                            fmt_tokens(m.expert_slots.unwrap_or(0))
+                        )
+                    })
                     .unwrap_or_else(|| "GB".into()),
                 color: VIOLET,
                 viz: Viz::Spark(hist("gpu_mem_used")),
@@ -4547,7 +5476,10 @@ value: m.gpu_mem_used.map(|v| format!("{:.1}", v / 1e9)).unwrap_or_else(|| "–"
             Kpi {
                 label: "GPU TEMP",
                 device: String::new(),
-value: m.gpu_temp.map(|v| format!("{v:.0}")).unwrap_or_else(|| "–".into()),
+                value: m
+                    .gpu_temp
+                    .map(|v| format!("{v:.0}"))
+                    .unwrap_or_else(|| "–".into()),
                 sub: "°C".into(),
                 color: temp_color(m.gpu_temp.unwrap_or(0.0), 85.0),
                 viz: Viz::Spark(hist("gpu_temp")),
@@ -4556,7 +5488,10 @@ value: m.gpu_temp.map(|v| format!("{v:.0}")).unwrap_or_else(|| "–".into()),
             Kpi {
                 label: "GPU POWER",
                 device: String::new(),
-value: m.gpu_power.map(|v| format!("{v:.0}")).unwrap_or_else(|| "–".into()),
+                value: m
+                    .gpu_power
+                    .map(|v| format!("{v:.0}"))
+                    .unwrap_or_else(|| "–".into()),
                 sub: m
                     .gpu_power_limit
                     .map(|l| format!("W · of {:.0} W limit", l))
@@ -4568,11 +5503,15 @@ value: m.gpu_power.map(|v| format!("{v:.0}")).unwrap_or_else(|| "–".into()),
             Kpi {
                 label: "GPU PCIe",
                 device: String::new(),
-value: gen.map(|g| format!("Gen{g}")).unwrap_or_else(|| "–".into()),
+                value: gen.map(|g| format!("Gen{g}")).unwrap_or_else(|| "–".into()),
                 sub: format!(
                     "{} · to GPU {}",
-                    m.gpu_pcie_width.map(|w| format!("x{w}")).unwrap_or_else(|| "x?".into()),
-                    m.gpu_pcie_rx_mb.map(|v| format!("{v:.1} MB/s")).unwrap_or_else(|| "–".into())
+                    m.gpu_pcie_width
+                        .map(|w| format!("x{w}"))
+                        .unwrap_or_else(|| "x?".into()),
+                    m.gpu_pcie_rx_mb
+                        .map(|v| format!("{v:.1} MB/s"))
+                        .unwrap_or_else(|| "–".into())
                 ),
                 color: ORANGE,
                 viz: Viz::Spark(hist("gpu_pcie_rx_mb")),
@@ -4581,7 +5520,10 @@ value: gen.map(|g| format!("Gen{g}")).unwrap_or_else(|| "–".into()),
             Kpi {
                 label: "CPU",
                 device: String::new(),
-value: m.cpu.map(|v| format!("{v:.0}")).unwrap_or_else(|| "–".into()),
+                value: m
+                    .cpu
+                    .map(|v| format!("{v:.0}"))
+                    .unwrap_or_else(|| "–".into()),
                 sub: format!(
                     "% · {}",
                     match (m.cores, m.threads) {
@@ -4597,10 +5539,29 @@ value: m.cpu.map(|v| format!("{v:.0}")).unwrap_or_else(|| "–".into()),
             Kpi {
                 label: "DISK READ",
                 device: String::new(),
-value: m.disk_read_mb.map(|v| if v >= 1000.0 { format!("{:.2}", v / 1024.0) } else { format!("{v:.1}") }).unwrap_or_else(|| "–".into()),
+                value: m
+                    .disk_read_mb
+                    .map(|v| {
+                        if v >= 1000.0 {
+                            format!("{:.2}", v / 1024.0)
+                        } else {
+                            format!("{v:.1}")
+                        }
+                    })
+                    .unwrap_or_else(|| "–".into()),
                 sub: m
                     .disk_write_mb
-                    .map(|w| format!("{} · write {:.1} MB/s", if m.disk_read_mb.unwrap_or(0.0) >= 1000.0 { "GB/s" } else { "MB/s" }, w))
+                    .map(|w| {
+                        format!(
+                            "{} · write {:.1} MB/s",
+                            if m.disk_read_mb.unwrap_or(0.0) >= 1000.0 {
+                                "GB/s"
+                            } else {
+                                "MB/s"
+                            },
+                            w
+                        )
+                    })
                     .unwrap_or_else(|| "MB/s".into()),
                 color: GREEN,
                 viz: Viz::Spark(hist("disk_read_mb")),
@@ -4609,29 +5570,54 @@ value: m.disk_read_mb.map(|v| if v >= 1000.0 { format!("{:.2}", v / 1024.0) } el
             Kpi {
                 label: "FIRST TOKEN",
                 device: String::new(),
-value: ttft.p50.map(|v| format!("{v:.2}")).unwrap_or_else(|| "–".into()),
+                value: ttft
+                    .p50
+                    .map(|v| format!("{v:.2}"))
+                    .unwrap_or_else(|| "–".into()),
                 sub: if ttft.count > 0 {
                     format!(
                         "s · p90 {:.2} s · {} requests{}",
                         ttft.p90.unwrap_or(0.0),
                         ttft.count,
-                        m.itl.p50.map(|v| format!(" · {:.0} ms between tokens", v * 1000.0)).unwrap_or_default()
+                        m.itl
+                            .p50
+                            .map(|v| format!(" · {:.0} ms between tokens", v * 1000.0))
+                            .unwrap_or_default()
                     )
                 } else {
                     "s · waiting for a request".into()
                 },
                 color: VIOLET,
-                viz: Viz::Spark(m.requests.iter().rev().filter_map(|r| r.hit_rate.map(|h| h * 100.0)).collect()),
+                viz: Viz::Spark(
+                    m.requests
+                        .iter()
+                        .rev()
+                        .filter_map(|r| r.hit_rate.map(|h| h * 100.0))
+                        .collect(),
+                ),
                 glyph: Some("gauge"),
             },
             Kpi {
                 label: "BATCH SLOTS",
                 device: String::new(),
-value: if m.parallel > 0 {
-                    let busy = if m.running > 0 { m.running } else if m.state != "idle" { 1 } else { 0 };
+                value: if m.parallel > 0 {
+                    let busy = if m.running > 0 {
+                        m.running
+                    } else if m.state != "idle" {
+                        1
+                    } else {
+                        0
+                    };
                     format!("{busy}")
                 } else {
-                    (if m.queued > 0 { m.queued } else if m.state != "idle" { 1 } else { 0 }).to_string()
+                    (if m.queued > 0 {
+                        m.queued
+                    } else if m.state != "idle" {
+                        1
+                    } else {
+                        0
+                    })
+                    .to_string()
                 },
                 sub: if m.parallel > 0 {
                     let mut parts = vec![format!("/ {} slots", m.parallel)];
@@ -4681,31 +5667,57 @@ value: if m.parallel > 0 {
                 ui.horizontal(|ui| {
                     let (r, _) = ui.allocate_exact_size(Vec2::splat(72.0), Sense::hover());
                     ring(ui.painter(), r, frac_ctx, ACCENT);
-                    ui.label(RichText::new(format!("{}%", (frac_ctx * 100.0).round())).font(bold(20.0)).color(TEXT));
+                    ui.label(
+                        RichText::new(format!("{}%", (frac_ctx * 100.0).round()))
+                            .font(bold(20.0))
+                            .color(TEXT),
+                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(
-                            RichText::new(format!("{} / {}", fmt_tokens(used), fmt_tokens(m.max_context)))
-                                .size(12.5)
-                                .color(MUTED),
+                            RichText::new(format!(
+                                "{} / {}",
+                                fmt_tokens(used),
+                                fmt_tokens(m.max_context)
+                            ))
+                            .size(12.5)
+                            .color(MUTED),
                         );
                     });
                 });
                 ui.add_space(4.0);
                 let cache_bytes = m.expert_cache_mib.unwrap_or(0) * 1_048_576;
-                fact_row(ui, "Experts in VRAM", &match (m.expert_slots, m.gpu_mem_total) {
-                    (Some(s), Some(_)) => format!(
-                        "{} · {}",
-                        fmt_tokens(s),
-                        human_size(cache_bytes)
-                    ),
-                    (Some(s), None) => fmt_tokens(s),
-                    _ => "–".into(),
-                }, cache_bytes as f64 / m.gpu_mem_total.unwrap_or(0.0).max(1.0));
-                fact_row(ui, "System RAM", &match (m.ram_used, m.ram_total) {
-                    (Some(u), Some(t)) => format!("{} / {:.0} GB", format!("{:.1}", u / 1e9), t / 1e9),
-                    _ => "–".into(),
-                }, m.ram_used.unwrap_or(0.0) / m.ram_total.unwrap_or(1.0).max(1.0));
-                fact_row(ui, "GPU temperature", &m.gpu_temp.map(|t| format!("{t:.0} °C")).unwrap_or_else(|| "–".into()), m.gpu_temp.unwrap_or(0.0) / 100.0);
+                fact_row(
+                    ui,
+                    "Experts in VRAM",
+                    &match (m.expert_slots, m.gpu_mem_total) {
+                        (Some(s), Some(_)) => {
+                            format!("{} · {}", fmt_tokens(s), human_size(cache_bytes))
+                        }
+                        (Some(s), None) => fmt_tokens(s),
+                        _ => "–".into(),
+                    },
+                    cache_bytes as f64 / m.gpu_mem_total.unwrap_or(0.0).max(1.0),
+                );
+                fact_row(
+                    ui,
+                    "System RAM",
+                    &match (m.ram_used, m.ram_total) {
+                        (Some(u), Some(t)) => {
+                            let g = format!("{:.1}", u / 1e9);
+                            format!("{g} / {:.0} GB", t / 1e9)
+                        }
+                        _ => "–".into(),
+                    },
+                    m.ram_used.unwrap_or(0.0) / m.ram_total.unwrap_or(1.0).max(1.0),
+                );
+                fact_row(
+                    ui,
+                    "GPU temperature",
+                    &m.gpu_temp
+                        .map(|t| format!("{t:.0} °C"))
+                        .unwrap_or_else(|| "–".into()),
+                    m.gpu_temp.unwrap_or(0.0) / 100.0,
+                );
             });
             card(&mut cols[1], |ui| {
                 card_title(ui, "Engine", "");
@@ -4715,10 +5727,12 @@ value: if m.parallel > 0 {
                     ("Images", if m.images { "on" } else { "off" }.into()),
                     (
                         "CPU",
-                        m.cpu_name.clone().unwrap_or_else(|| match (m.cores, m.threads) {
-                            (Some(c), Some(t)) => format!("{c} cores · {t} threads"),
-                            _ => String::new(),
-                        }),
+                        m.cpu_name
+                            .clone()
+                            .unwrap_or_else(|| match (m.cores, m.threads) {
+                                (Some(c), Some(t)) => format!("{c} cores · {t} threads"),
+                                _ => String::new(),
+                            }),
                     ),
                     ("GPU", m.gpu_name.clone().unwrap_or_else(|| "–".into())),
                 ];
@@ -4726,9 +5740,12 @@ value: if m.parallel > 0 {
                     if !v.is_empty() {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(k).size(12.5).color(MUTED));
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.label(RichText::new(v).size(12.5).color(TEXT));
-                            });
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    ui.label(RichText::new(v).size(12.5).color(TEXT));
+                                },
+                            );
                         });
                     }
                 }
@@ -4740,15 +5757,26 @@ value: if m.parallel > 0 {
         let show_all = self.gui.strata_show_all;
         card(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Recent requests").font(bold(14.5)).color(TEXT));
+                ui.label(
+                    RichText::new("Recent requests")
+                        .font(bold(14.5))
+                        .color(TEXT),
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if m.requests_kept > 12 {
-                        if ui
-                            .button(RichText::new(if show_all { "show fewer".to_string() } else { format!("show all ({})", m.requests_kept) }).size(11.5).color(ACCENT))
+                    if m.requests_kept > 12
+                        && ui
+                            .button(
+                                RichText::new(if show_all {
+                                    "show fewer".to_string()
+                                } else {
+                                    format!("show all ({})", m.requests_kept)
+                                })
+                                .size(11.5)
+                                .color(ACCENT),
+                            )
                             .clicked()
-                        {
-                            self.gui.strata_show_all = !show_all;
-                        }
+                    {
+                        self.gui.strata_show_all = !show_all;
                     }
                 });
             });
@@ -4778,10 +5806,25 @@ value: if m.parallel > 0 {
                         for ((_, w, right), (text, color, mono)) in cols.iter().zip(cells) {
                             let cell = Rect::from_min_size(ui.cursor().min, Vec2::new(*w, 18.0));
                             ui.allocate_exact_size(Vec2::new(*w, 18.0), Sense::hover());
-                            let align = if *right { egui::Align2::RIGHT_CENTER } else { egui::Align2::LEFT_CENTER };
-                            let font = if mono { FontId::monospace(11.5) } else { FontId::proportional(11.5) };
+                            let align = if *right {
+                                egui::Align2::RIGHT_CENTER
+                            } else {
+                                egui::Align2::LEFT_CENTER
+                            };
+                            let font = if mono {
+                                FontId::monospace(11.5)
+                            } else {
+                                FontId::proportional(11.5)
+                            };
                             ui.painter().text(
-                                Pos2::new(if *right { cell.right() - 6.0 } else { cell.left() }, cell.center().y),
+                                Pos2::new(
+                                    if *right {
+                                        cell.right() - 6.0
+                                    } else {
+                                        cell.left()
+                                    },
+                                    cell.center().y,
+                                ),
                                 align,
                                 text,
                                 font,
@@ -4790,7 +5833,12 @@ value: if m.parallel > 0 {
                         }
                     });
                 };
-                line(ui, cols.iter().map(|(h, _, _)| (h.to_string(), FAINT, false)).collect());
+                line(
+                    ui,
+                    cols.iter()
+                        .map(|(h, _, _)| (h.to_string(), FAINT, false))
+                        .collect(),
+                );
                 ui.painter().line_segment(
                     [
                         Pos2::new(ui.cursor().min.x, ui.cursor().min.y),
@@ -4804,20 +5852,57 @@ value: if m.parallel > 0 {
                     let pre = strata::prefill_rate(r);
                     let hit = r
                         .hit_rate
-                        .map(|h| format!("{:.1}%", h * 100.0) + &r.pcie_share.map(|p| format!(" +{:.1}% PCIe", p * 100.0)).unwrap_or_default())
+                        .map(|h| {
+                            format!("{:.1}%", h * 100.0)
+                                + &r.pcie_share
+                                    .map(|p| format!(" +{:.1}% PCIe", p * 100.0))
+                                    .unwrap_or_default()
+                        })
                         .unwrap_or_else(|| "–".into());
                     line(
                         ui,
                         vec![
                             (format!("{h:02}:{mnt:02}:{s:02}"), MUTED, true),
                             (finish_label(&r.finish), finish_color(&r.finish), false),
-                            (r.prompt_tokens.map(fmt_tokens).unwrap_or_else(|| "–".into()), TEXT, true),
-                            (r.reused.map(fmt_tokens).unwrap_or_else(|| "0".into()), MUTED, true),
-                            (r.output_tokens.map(fmt_tokens).unwrap_or_else(|| "–".into()), TEXT, true),
-                            (pre.map(|v| fmt_tokens_f(v)).unwrap_or_else(|| "–".into()), MUTED, true),
-                            (r.decode_tok_s.map(|v| format!("{v:.1}")).unwrap_or_else(|| "–".into()), MUTED, true),
+                            (
+                                r.prompt_tokens
+                                    .map(fmt_tokens)
+                                    .unwrap_or_else(|| "–".into()),
+                                TEXT,
+                                true,
+                            ),
+                            (
+                                r.reused.map(fmt_tokens).unwrap_or_else(|| "0".into()),
+                                MUTED,
+                                true,
+                            ),
+                            (
+                                r.output_tokens
+                                    .map(fmt_tokens)
+                                    .unwrap_or_else(|| "–".into()),
+                                TEXT,
+                                true,
+                            ),
+                            (
+                                pre.map(fmt_tokens_f).unwrap_or_else(|| "–".into()),
+                                MUTED,
+                                true,
+                            ),
+                            (
+                                r.decode_tok_s
+                                    .map(|v| format!("{v:.1}"))
+                                    .unwrap_or_else(|| "–".into()),
+                                MUTED,
+                                true,
+                            ),
                             (hit, MUTED, true),
-                            (r.duration_s.map(|v| format!("{v:.1} s")).unwrap_or_else(|| "–".into()), MUTED, true),
+                            (
+                                r.duration_s
+                                    .map(|v| format!("{v:.1} s"))
+                                    .unwrap_or_else(|| "–".into()),
+                                MUTED,
+                                true,
+                            ),
                         ],
                     );
                 }
@@ -4825,7 +5910,10 @@ value: if m.parallel > 0 {
             if m.tot_requests > 0 {
                 let read = m.tot_prompt_tokens - m.tot_reused;
                 let p_speed = if m.tot_prompt_ms > 0.0 && read > 0 {
-                    format!(" at {} tok/s", fmt_tokens_f(read as f64 / (m.tot_prompt_ms / 1000.0)))
+                    format!(
+                        " at {} tok/s",
+                        fmt_tokens_f(read as f64 / (m.tot_prompt_ms / 1000.0))
+                    )
                 } else {
                     String::new()
                 };
@@ -4881,14 +5969,18 @@ value: if m.parallel > 0 {
                         c.slots.unwrap_or(0) as u64,
                         ACCENT,
                     );
-                    if let (Some(b), Some(bud)) = (c.bytes, c.budget_mib.map(|mib| mib * 1_048_576)) {
+                    if let (Some(b), Some(bud)) = (c.bytes, c.budget_mib.map(|mib| mib * 1_048_576))
+                    {
                         bar_row(ui, "Memory", b as u64, bud as u64, CYAN);
                     }
                     let switches = format!(
                         "{} parked · {} restored{}",
                         fmt_tokens(c.parks.unwrap_or(0)),
                         fmt_tokens(c.restores.unwrap_or(0)),
-                        c.evictions.filter(|e| *e > 0).map(|e| format!(" · {} evicted", fmt_tokens(e))).unwrap_or_default()
+                        c.evictions
+                            .filter(|e| *e > 0)
+                            .map(|e| format!(" · {} evicted", fmt_tokens(e)))
+                            .unwrap_or_default()
                     );
                     ui.label(RichText::new(switches).size(12.0).color(MUTED));
                 }
@@ -4904,14 +5996,20 @@ value: if m.parallel > 0 {
                     );
                 }
                 let share = if c.prompt_tokens > 0 {
-                    format!(" ({:.1}% of all prompt tokens)", 100.0 * c.reused_tokens as f64 / c.prompt_tokens as f64)
+                    format!(
+                        " ({:.1}% of all prompt tokens)",
+                        100.0 * c.reused_tokens as f64 / c.prompt_tokens as f64
+                    )
                 } else {
                     String::new()
                 };
                 ui.label(
-                    RichText::new(format!("Reused since start: {} tokens{share}", fmt_tokens(c.reused_tokens)))
-                        .size(12.0)
-                        .color(MUTED),
+                    RichText::new(format!(
+                        "Reused since start: {} tokens{share}",
+                        fmt_tokens(c.reused_tokens)
+                    ))
+                    .size(12.0)
+                    .color(MUTED),
                 );
                 ui.label(
                     RichText::new(if c.enabled {
@@ -4928,7 +6026,11 @@ value: if m.parallel > 0 {
 
     fn volume_detail(&mut self, ui: &mut Ui) {
         let Some(name) = self.gui.selected_volume.clone() else {
-            empty_state(ui, "No volume selected", "Pick a volume on the left to see its details.");
+            empty_state(
+                ui,
+                "No volume selected",
+                "Pick a volume on the left to see its details.",
+            );
             return;
         };
         let Some(v) = self.gui.volumes.iter().find(|v| v.name == name).cloned() else {
@@ -4937,7 +6039,9 @@ value: if m.parallel > 0 {
         };
         let refs = v.usage_data.as_ref().map(|u| u.ref_count);
         ui.horizontal(|ui| {
-            ui.add(egui::Label::new(RichText::new(&v.name).font(bold(22.0)).color(TEXT)).truncate());
+            ui.add(
+                egui::Label::new(RichText::new(&v.name).font(bold(22.0)).color(TEXT)).truncate(),
+            );
         });
         ui.horizontal(|ui| {
             chip(ui, &v.driver, MUTED);
@@ -4948,13 +6052,21 @@ value: if m.parallel > 0 {
             }
         });
         ui.add_space(16.0);
-        let size = v.usage_data.as_ref().and_then(|u| u.size).filter(|s| *s >= 0);
+        let size = v
+            .usage_data
+            .as_ref()
+            .and_then(|u| u.size)
+            .filter(|s| *s >= 0);
         let kpis = [
             Kpi {
                 label: "Size",
                 device: String::new(),
-value: size.map(human_size).unwrap_or_else(|| "—".into()),
-                sub: if size.is_some() { "on disk".into() } else { "not reported by driver".into() },
+                value: size.map(human_size).unwrap_or_else(|| "—".into()),
+                sub: if size.is_some() {
+                    "on disk".into()
+                } else {
+                    "not reported by driver".into()
+                },
                 color: VIOLET,
                 viz: Viz::None,
                 glyph: None,
@@ -4962,8 +6074,12 @@ value: size.map(human_size).unwrap_or_else(|| "—".into()),
             Kpi {
                 label: "References",
                 device: String::new(),
-value: refs.map(|n| n.to_string()).unwrap_or_else(|| "—".into()),
-                sub: if refs.is_some() { "containers mounting it".into() } else { "not reported by the daemon".into() },
+                value: refs.map(|n| n.to_string()).unwrap_or_else(|| "—".into()),
+                sub: if refs.is_some() {
+                    "containers mounting it".into()
+                } else {
+                    "not reported by the daemon".into()
+                },
                 color: GREEN,
                 viz: Viz::None,
                 glyph: None,
@@ -4971,7 +6087,7 @@ value: refs.map(|n| n.to_string()).unwrap_or_else(|| "—".into()),
             Kpi {
                 label: "Created",
                 device: String::new(),
-value: v.created.get(..10).unwrap_or("—").to_string(),
+                value: v.created.get(..10).unwrap_or("—").to_string(),
                 sub: v.created.get(11..19).unwrap_or("").to_string(),
                 color: ACCENT,
                 viz: Viz::None,
@@ -5057,7 +6173,11 @@ value: v.created.get(..10).unwrap_or("—").to_string(),
             }
         }
         if self.gui.logs_container.is_none() {
-            empty_state(ui, "No logs yet", "Pick a container, or reopen this tab to stream all containers.");
+            empty_state(
+                ui,
+                "No logs yet",
+                "Pick a container, or reopen this tab to stream all containers.",
+            );
             return;
         }
         self.logs_card(ui, "Output", true);
@@ -5124,9 +6244,13 @@ value: v.created.get(..10).unwrap_or("—").to_string(),
                 ui.set_width(ui.available_width());
                 if idx.is_empty() {
                     ui.label(
-                        RichText::new(if g.logs.is_empty() { "Waiting for output…" } else { "No lines match the filter." })
-                            .font(font.clone())
-                            .color(FAINT),
+                        RichText::new(if g.logs.is_empty() {
+                            "Waiting for output…"
+                        } else {
+                            "No lines match the filter."
+                        })
+                        .font(font.clone())
+                        .color(FAINT),
                     );
                     return;
                 }
@@ -5143,7 +6267,12 @@ value: v.created.get(..10).unwrap_or("—").to_string(),
                                 let t = (fresh_age / 0.35).clamp(0.0, 1.0);
                                 a = a.max(0.35 + 0.65 * t);
                             }
-                            let job = log_line_job(l, if all { l.source.as_deref() } else { None }, &font, a);
+                            let job = log_line_job(
+                                l,
+                                if all { l.source.as_deref() } else { None },
+                                &font,
+                                a,
+                            );
                             ui.add(egui::Label::new(job).extend());
                         }
                     });
@@ -5173,11 +6302,17 @@ value: v.created.get(..10).unwrap_or("—").to_string(),
             )
             .show(ctx, |ui| {
                 ui.set_width(380.0);
-                ui.label(RichText::new("Remove container?").font(bold(17.0)).color(TEXT));
+                ui.label(
+                    RichText::new("Remove container?")
+                        .font(bold(17.0))
+                        .color(TEXT),
+                );
                 ui.add_space(4.0);
                 ui.label(
-                    RichText::new(format!("{name} will be deleted. Its writable layer is lost; volumes are kept."))
-                        .color(MUTED),
+                    RichText::new(format!(
+                        "{name} will be deleted. Its writable layer is lost; volumes are kept."
+                    ))
+                    .color(MUTED),
                 );
                 ui.add_space(14.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -5234,7 +6369,12 @@ value: v.created.get(..10).unwrap_or("—").to_string(),
 /// Circular gauge ring (the Strata context-fill dial).
 fn ring(p: &egui::Painter, r: Rect, frac: f32, color: Color32) {
     let stroke = Stroke::new(6.0_f32, SURFACE_HI);
-    p.circle(r.center(), r.width() / 2.0 - 3.0, Color32::TRANSPARENT, stroke);
+    p.circle(
+        r.center(),
+        r.width() / 2.0 - 3.0,
+        Color32::TRANSPARENT,
+        stroke,
+    );
     if frac > 0.001 {
         let frac = frac.clamp(0.0, 1.0);
         let mut pts = Vec::new();
@@ -5242,7 +6382,10 @@ fn ring(p: &egui::Painter, r: Rect, frac: f32, color: Color32) {
         let rad = r.width() / 2.0 - 3.0;
         for i in 0..=steps {
             let a = std::f32::consts::TAU * (i as f32 / steps as f32) - std::f32::consts::FRAC_PI_2;
-            pts.push(Pos2::new(r.center().x + rad * a.cos(), r.center().y + rad * a.sin()));
+            pts.push(Pos2::new(
+                r.center().x + rad * a.cos(),
+                r.center().y + rad * a.sin(),
+            ));
         }
         p.add(egui::Shape::line(pts, Stroke::new(6.0_f32, color)));
     }
@@ -5265,7 +6408,7 @@ fn fmt_tokens(n: i64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -5353,10 +6496,8 @@ fn kpi_card(ui: &mut Ui, k: &Kpi) {
             ui.spacing_mut().item_spacing.y = 2.0;
             if !k.device.is_empty() {
                 ui.add(
-                    egui::Label::new(
-                        RichText::new(&k.device).font(bold(13.0)).color(TEXT),
-                    )
-                    .truncate(),
+                    egui::Label::new(RichText::new(&k.device).font(bold(13.0)).color(TEXT))
+                        .truncate(),
                 );
             }
             ui.horizontal(|ui| {
@@ -5366,14 +6507,23 @@ fn kpi_card(ui: &mut Ui, k: &Kpi) {
                 if let Some(g) = k.glyph {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let (gr, _) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
-                        icon_glyph(ui.painter(), g, gr.center(), 7.0, k.color.gamma_multiply(0.75));
+                        icon_glyph(
+                            ui.painter(),
+                            g,
+                            gr.center(),
+                            7.0,
+                            k.color.gamma_multiply(0.75),
+                        );
                     });
                 }
             });
-            ui.add(egui::Label::new(RichText::new(&k.value).font(bold(24.0)).color(TEXT)).truncate());
+            ui.add(
+                egui::Label::new(RichText::new(&k.value).font(bold(24.0)).color(TEXT)).truncate(),
+            );
             ui.add(egui::Label::new(RichText::new(&k.sub).size(12.0).color(FAINT)).truncate());
             ui.add_space(6.0);
-            let (r, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::hover());
+            let (r, _) =
+                ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::hover());
             let p = ui.painter();
             match &k.viz {
                 Viz::None => {}
@@ -5388,7 +6538,13 @@ fn kpi_card(ui: &mut Ui, k: &Kpi) {
                     p.add(egui::Shape::line(pts, Stroke::new(1.5_f32, k.color)));
                 }
                 Viz::Spark(_) => {
-                    p.text(r.left_center(), egui::Align2::LEFT_CENTER, "collecting…", FontId::proportional(11.5), FAINT);
+                    p.text(
+                        r.left_center(),
+                        egui::Align2::LEFT_CENTER,
+                        "collecting…",
+                        FontId::proportional(11.5),
+                        FAINT,
+                    );
                 }
             }
         });
@@ -5456,9 +6612,23 @@ fn mini_row(ui: &mut Ui, dot: Color32, name: &str, value: &str) {
     p.circle_filled(Pos2::new(rect.left() + 4.0, rect.center().y), 3.0, dot);
     let v = p.layout_no_wrap(value.to_string(), FontId::monospace(12.0), MUTED);
     let vw = v.size().x;
-    p.galley(Pos2::new(rect.right() - vw, rect.center().y - v.size().y / 2.0), v, MUTED);
-    let n = elide(p, name.to_string(), FontId::proportional(13.0), TEXT, rect.width() - vw - 28.0);
-    p.galley(Pos2::new(rect.left() + 14.0, rect.center().y - n.size().y / 2.0), n, TEXT);
+    p.galley(
+        Pos2::new(rect.right() - vw, rect.center().y - v.size().y / 2.0),
+        v,
+        MUTED,
+    );
+    let n = elide(
+        p,
+        name.to_string(),
+        FontId::proportional(13.0),
+        TEXT,
+        rect.width() - vw - 28.0,
+    );
+    p.galley(
+        Pos2::new(rect.left() + 14.0, rect.center().y - n.size().y / 2.0),
+        n,
+        TEXT,
+    );
 }
 
 fn tab_label(tab: Tab) -> &'static str {
@@ -5481,13 +6651,24 @@ fn tab_label(tab: Tab) -> &'static str {
 /// One physical drive's stats card: named title, rates, lifetime counters.
 fn disk_card(ui: &mut Ui, d: &crate::hw::DiskStat, inv: Option<&hwinv::HwDevice>) {
     let title = inv.map(|x| x.name.as_str()).unwrap_or(&d.name);
-    let temp = d.temp_c.map(|t| format!("{} °C", temp_str(t))).unwrap_or_default();
+    let temp = d
+        .temp_c
+        .map(|t| format!("{} °C", temp_str(t)))
+        .unwrap_or_default();
     card(ui, |ui| {
         card_title(ui, title, &temp);
         ui.horizontal(|ui| {
             ui.label(RichText::new("Rate").size(12.5).color(MUTED).weak());
-            ui.label(RichText::new(format!("↓ {}", human_rate(d.read_bps))).font(FontId::monospace(12.5)).color(TEXT));
-            ui.label(RichText::new(format!("↑ {}", human_rate(d.write_bps))).font(FontId::monospace(12.5)).color(TEXT));
+            ui.label(
+                RichText::new(format!("↓ {}", human_rate(d.read_bps)))
+                    .font(FontId::monospace(12.5))
+                    .color(TEXT),
+            );
+            ui.label(
+                RichText::new(format!("↑ {}", human_rate(d.write_bps)))
+                    .font(FontId::monospace(12.5))
+                    .color(TEXT),
+            );
             if let Some(inv) = inv {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(RichText::new(&inv.detail).size(11.5).color(FAINT));
@@ -5498,21 +6679,57 @@ fn disk_card(ui: &mut Ui, d: &crate::hw::DiskStat, inv: Option<&hwinv::HwDevice>
         let usage = hwinv::disk_usage();
         for u in usage.iter().filter(|u| u.kern == d.name) {
             let frac = u.used as f32 / u.total.max(1) as f32;
-            let col = if frac > 0.9 { RED } else if frac > 0.75 { AMBER } else { GREEN };
+            let col = if frac > 0.9 {
+                RED
+            } else if frac > 0.75 {
+                AMBER
+            } else {
+                GREEN
+            };
             bar_row(ui, &u.mount, u.used, u.total, col);
         }
         ui.horizontal(|ui| {
             ui.label(RichText::new("Lifetime").size(12.5).color(MUTED).weak());
-            ui.label(RichText::new(format!("{} read", human_size(d.total_read as i64))).font(FontId::monospace(12.0)).color(MUTED));
-            ui.label(RichText::new(format!("{} written", human_size(d.total_write as i64))).font(FontId::monospace(12.0)).color(MUTED));
-            ui.label(RichText::new(format!("{} reads · {} writes", d.reads, d.writes)).size(11.5).color(FAINT));
+            ui.label(
+                RichText::new(format!("{} read", human_size(d.total_read as i64)))
+                    .font(FontId::monospace(12.0))
+                    .color(MUTED),
+            );
+            ui.label(
+                RichText::new(format!("{} written", human_size(d.total_write as i64)))
+                    .font(FontId::monospace(12.0))
+                    .color(MUTED),
+            );
+            ui.label(
+                RichText::new(format!("{} reads · {} writes", d.reads, d.writes))
+                    .size(11.5)
+                    .color(FAINT),
+            );
             // average queue depth = weighted busy ms / elapsed ms
-            let queue = if d.uptime > 0.0 { d.ms_weighted as f64 / (d.uptime * 1000.0) } else { 0.0 };
-            ui.label(RichText::new(format!("avg queue {queue:.2}")).size(11.5).color(FAINT));
+            let queue = if d.uptime > 0.0 {
+                d.ms_weighted as f64 / (d.uptime * 1000.0)
+            } else {
+                0.0
+            };
+            ui.label(
+                RichText::new(format!("avg queue {queue:.2}"))
+                    .size(11.5)
+                    .color(FAINT),
+            );
         });
         if let Some(t) = d.temp_c {
-            let c = if t > 70.0 { RED } else if t > 60.0 { AMBER } else { GREEN };
-            ui.label(RichText::new(format!("drive temperature {} °C", temp_str(t))).size(11.5).color(c));
+            let c = if t > 70.0 {
+                RED
+            } else if t > 60.0 {
+                AMBER
+            } else {
+                GREEN
+            };
+            ui.label(
+                RichText::new(format!("drive temperature {} °C", temp_str(t)))
+                    .size(11.5)
+                    .color(c),
+            );
         }
     });
 }
@@ -5587,10 +6804,19 @@ fn icon_glyph(p: &egui::Painter, kind: &str, c: Pos2, r: f32, col: Color32) {
             for i in 0..4 {
                 let t = b.left() + b.width() * (i as f32 + 0.5) / 4.0;
                 p.line_segment([Pos2::new(t, b.top()), Pos2::new(t, b.top() - r * 0.3)], s);
-                p.line_segment([Pos2::new(t, b.bottom()), Pos2::new(t, b.bottom() + r * 0.3)], s);
+                p.line_segment(
+                    [Pos2::new(t, b.bottom()), Pos2::new(t, b.bottom() + r * 0.3)],
+                    s,
+                );
                 let u = b.top() + b.height() * (i as f32 + 0.5) / 4.0;
-                p.line_segment([Pos2::new(b.left(), u), Pos2::new(b.left() - r * 0.3, u)], s);
-                p.line_segment([Pos2::new(b.right(), u), Pos2::new(b.right() + r * 0.3, u)], s);
+                p.line_segment(
+                    [Pos2::new(b.left(), u), Pos2::new(b.left() - r * 0.3, u)],
+                    s,
+                );
+                p.line_segment(
+                    [Pos2::new(b.right(), u), Pos2::new(b.right() + r * 0.3, u)],
+                    s,
+                );
             }
         }
         "ram" => {
@@ -5611,7 +6837,10 @@ fn icon_glyph(p: &egui::Painter, kind: &str, c: Pos2, r: f32, col: Color32) {
             }
             for i in 0..4 {
                 let x = b.left() + b.width() * (i as f32 + 0.5) / 4.0;
-                p.line_segment([Pos2::new(x, b.bottom()), Pos2::new(x, b.bottom() + r * 0.3)], s);
+                p.line_segment(
+                    [Pos2::new(x, b.bottom()), Pos2::new(x, b.bottom() + r * 0.3)],
+                    s,
+                );
             }
         }
         "disk" => {
@@ -5649,7 +6878,8 @@ fn icon_glyph(p: &egui::Painter, kind: &str, c: Pos2, r: f32, col: Color32) {
         }
         "gpu" => {
             // card: bracket on the left, long body, two fan circles
-            let b = Rect::from_center_size(c + Vec2::new(r * 0.25, 0.0), Vec2::new(r * 2.1, r * 1.35));
+            let b =
+                Rect::from_center_size(c + Vec2::new(r * 0.25, 0.0), Vec2::new(r * 2.1, r * 1.35));
             p.rect_stroke(
                 b,
                 2.0,
@@ -5657,96 +6887,150 @@ fn icon_glyph(p: &egui::Painter, kind: &str, c: Pos2, r: f32, col: Color32) {
                 egui::epaint::StrokeKind::Inside,
             );
             p.line_segment(
-                [Pos2::new(b.left() - r * 0.45, b.top() - r * 0.2), Pos2::new(b.left() - r * 0.45, b.bottom() + r * 0.2)],
+                [
+                    Pos2::new(b.left() - r * 0.45, b.top() - r * 0.2),
+                    Pos2::new(b.left() - r * 0.45, b.bottom() + r * 0.2),
+                ],
                 Stroke::new(1.8_f32, col),
             );
-            p.circle_stroke(Pos2::new(b.left() + b.width() * 0.33, b.center().y), r * 0.42, Stroke::new(1.1_f32, col));
-            p.circle_stroke(Pos2::new(b.left() + b.width() * 0.72, b.center().y), r * 0.42, Stroke::new(1.1_f32, col));
+            p.circle_stroke(
+                Pos2::new(b.left() + b.width() * 0.33, b.center().y),
+                r * 0.42,
+                Stroke::new(1.1_f32, col),
+            );
+            p.circle_stroke(
+                Pos2::new(b.left() + b.width() * 0.72, b.center().y),
+                r * 0.42,
+                Stroke::new(1.1_f32, col),
+            );
         }
         "thermo" => {
             // thermometer: stem + bulb
             p.circle_stroke(Pos2::new(c.x, c.y + r * 0.62), r * 0.5, s);
             p.circle_filled(Pos2::new(c.x, c.y + r * 0.62), r * 0.24, col);
-            p.line_segment([Pos2::new(c.x - r * 0.28, c.y - r * 0.9), Pos2::new(c.x - r * 0.28, c.y + r * 0.35)], s);
-            p.line_segment([Pos2::new(c.x + r * 0.28, c.y - r * 0.9), Pos2::new(c.x + r * 0.28, c.y + r * 0.35)], s);
-            p.line_segment([Pos2::new(c.x - r * 0.28, c.y - r * 0.9), Pos2::new(c.x + r * 0.28, c.y - r * 0.9)], s);
+            p.line_segment(
+                [
+                    Pos2::new(c.x - r * 0.28, c.y - r * 0.9),
+                    Pos2::new(c.x - r * 0.28, c.y + r * 0.35),
+                ],
+                s,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(c.x + r * 0.28, c.y - r * 0.9),
+                    Pos2::new(c.x + r * 0.28, c.y + r * 0.35),
+                ],
+                s,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(c.x - r * 0.28, c.y - r * 0.9),
+                    Pos2::new(c.x + r * 0.28, c.y - r * 0.9),
+                ],
+                s,
+            );
         }
         "net" => {
             // up/down arrows side by side
             let x1 = c.x - r * 0.5;
             let x2 = c.x + r * 0.5;
-            p.line_segment([Pos2::new(x1, c.y + r * 0.8), Pos2::new(x1, c.y - r * 0.8)], s);
-            p.line_segment([Pos2::new(x1 - r * 0.35, c.y - r * 0.4), Pos2::new(x1, c.y - r * 0.85)], s);
-            p.line_segment([Pos2::new(x1 + r * 0.35, c.y - r * 0.4), Pos2::new(x1, c.y - r * 0.85)], s);
-            p.line_segment([Pos2::new(x2, c.y - r * 0.8), Pos2::new(x2, c.y + r * 0.8)], s);
-            p.line_segment([Pos2::new(x2 - r * 0.35, c.y + r * 0.4), Pos2::new(x2, c.y + r * 0.85)], s);
-            p.line_segment([Pos2::new(x2 + r * 0.35, c.y + r * 0.4), Pos2::new(x2, c.y + r * 0.85)], s);
+            p.line_segment(
+                [Pos2::new(x1, c.y + r * 0.8), Pos2::new(x1, c.y - r * 0.8)],
+                s,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(x1 - r * 0.35, c.y - r * 0.4),
+                    Pos2::new(x1, c.y - r * 0.85),
+                ],
+                s,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(x1 + r * 0.35, c.y - r * 0.4),
+                    Pos2::new(x1, c.y - r * 0.85),
+                ],
+                s,
+            );
+            p.line_segment(
+                [Pos2::new(x2, c.y - r * 0.8), Pos2::new(x2, c.y + r * 0.8)],
+                s,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(x2 - r * 0.35, c.y + r * 0.4),
+                    Pos2::new(x2, c.y + r * 0.85),
+                ],
+                s,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(x2 + r * 0.35, c.y + r * 0.4),
+                    Pos2::new(x2, c.y + r * 0.85),
+                ],
+                s,
+            );
         }
         "eye" => {
             // almond outline + pupil
             let w = r * 1.35;
             let h = r * 0.78;
-            p.add(
-                egui::epaint::CubicBezierShape::from_points_stroke(
-                    [
-                        c + Vec2::new(-w, 0.0),
-                        c + Vec2::new(-w * 0.42, -h),
-                        c + Vec2::new(w * 0.42, -h),
-                        c + Vec2::new(w, 0.0),
-                    ],
-                    false,
-                    Color32::TRANSPARENT,
-                    s,
-                ),
-            );
-            p.add(
-                egui::epaint::CubicBezierShape::from_points_stroke(
-                    [
-                        c + Vec2::new(w, 0.0),
-                        c + Vec2::new(w * 0.42, h),
-                        c + Vec2::new(-w * 0.42, h),
-                        c + Vec2::new(-w, 0.0),
-                    ],
-                    false,
-                    Color32::TRANSPARENT,
-                    s,
-                ),
-            );
+            p.add(egui::epaint::CubicBezierShape::from_points_stroke(
+                [
+                    c + Vec2::new(-w, 0.0),
+                    c + Vec2::new(-w * 0.42, -h),
+                    c + Vec2::new(w * 0.42, -h),
+                    c + Vec2::new(w, 0.0),
+                ],
+                false,
+                Color32::TRANSPARENT,
+                s,
+            ));
+            p.add(egui::epaint::CubicBezierShape::from_points_stroke(
+                [
+                    c + Vec2::new(w, 0.0),
+                    c + Vec2::new(w * 0.42, h),
+                    c + Vec2::new(-w * 0.42, h),
+                    c + Vec2::new(-w, 0.0),
+                ],
+                false,
+                Color32::TRANSPARENT,
+                s,
+            ));
             p.circle_filled(c, r * 0.34, col);
         }
         "eye_off" => {
             // almond with the pupil shrunk to a ring, plus the slash
             let w = r * 1.35;
             let h = r * 0.78;
-            p.add(
-                egui::epaint::CubicBezierShape::from_points_stroke(
-                    [
-                        c + Vec2::new(-w, 0.0),
-                        c + Vec2::new(-w * 0.42, -h),
-                        c + Vec2::new(w * 0.42, -h),
-                        c + Vec2::new(w, 0.0),
-                    ],
-                    false,
-                    Color32::TRANSPARENT,
-                    s,
-                ),
-            );
-            p.add(
-                egui::epaint::CubicBezierShape::from_points_stroke(
-                    [
-                        c + Vec2::new(w, 0.0),
-                        c + Vec2::new(w * 0.42, h),
-                        c + Vec2::new(-w * 0.42, h),
-                        c + Vec2::new(-w, 0.0),
-                    ],
-                    false,
-                    Color32::TRANSPARENT,
-                    s,
-                ),
-            );
+            p.add(egui::epaint::CubicBezierShape::from_points_stroke(
+                [
+                    c + Vec2::new(-w, 0.0),
+                    c + Vec2::new(-w * 0.42, -h),
+                    c + Vec2::new(w * 0.42, -h),
+                    c + Vec2::new(w, 0.0),
+                ],
+                false,
+                Color32::TRANSPARENT,
+                s,
+            ));
+            p.add(egui::epaint::CubicBezierShape::from_points_stroke(
+                [
+                    c + Vec2::new(w, 0.0),
+                    c + Vec2::new(w * 0.42, h),
+                    c + Vec2::new(-w * 0.42, h),
+                    c + Vec2::new(-w, 0.0),
+                ],
+                false,
+                Color32::TRANSPARENT,
+                s,
+            ));
             p.circle_stroke(c, r * 0.34, s);
             p.line_segment(
-                [c + Vec2::new(-r * 1.15, r * 1.05), c + Vec2::new(r * 1.15, -r * 1.05)],
+                [
+                    c + Vec2::new(-r * 1.15, r * 1.05),
+                    c + Vec2::new(r * 1.15, -r * 1.05),
+                ],
                 Stroke::new(1.6_f32, col),
             );
         }
@@ -5763,7 +7047,10 @@ fn icon_glyph(p: &egui::Painter, kind: &str, c: Pos2, r: f32, col: Color32) {
                 prev = pt;
             }
             let tip = arc(a1);
-            let tang = Vec2::new((a1 + std::f32::consts::FRAC_2_PI).cos(), (a1 + std::f32::consts::FRAC_2_PI).sin());
+            let tang = Vec2::new(
+                (a1 + std::f32::consts::FRAC_2_PI).cos(),
+                (a1 + std::f32::consts::FRAC_2_PI).sin(),
+            );
             let nrm = Vec2::new(-tang.y, tang.x);
             p.line_segment([tip, tip - tang * r * 0.55 + nrm * r * 0.38], s);
             p.line_segment([tip, tip - tang * r * 0.55 - nrm * r * 0.38], s);
@@ -5772,18 +7059,36 @@ fn icon_glyph(p: &egui::Painter, kind: &str, c: Pos2, r: f32, col: Color32) {
             // globe: circle, equator, one meridian ellipse
             p.circle_stroke(c, r, Stroke::new(1.4_f32, col));
             p.line_segment([Pos2::new(c.x - r, c.y), Pos2::new(c.x + r, c.y)], s);
-            p.add(egui::Shape::ellipse_stroke(c, Vec2::new(r * 0.45, r), Stroke::new(1.2_f32, col)));
+            p.add(egui::Shape::ellipse_stroke(
+                c,
+                Vec2::new(r * 0.45, r),
+                Stroke::new(1.2_f32, col),
+            ));
         }
         "terminal" => {
             // window with a prompt caret
             let b = Rect::from_center_size(c, Vec2::new(r * 2.0, r * 1.6));
-            p.rect_stroke(b, 3.0, Stroke::new(1.4_f32, col), egui::epaint::StrokeKind::Inside);
-            p.line_segment([Pos2::new(b.left() + 3.0, b.top() + 4.0), Pos2::new(b.right() - 3.0, b.top() + 4.0)], Stroke::new(1.1_f32, col));
+            p.rect_stroke(
+                b,
+                3.0,
+                Stroke::new(1.4_f32, col),
+                egui::epaint::StrokeKind::Inside,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(b.left() + 3.0, b.top() + 4.0),
+                    Pos2::new(b.right() - 3.0, b.top() + 4.0),
+                ],
+                Stroke::new(1.1_f32, col),
+            );
             let x = b.left() + 4.0;
             let y = b.center().y + 1.0;
             p.line_segment([Pos2::new(x, y - 2.5), Pos2::new(x + 2.5, y)], s);
             p.line_segment([Pos2::new(x + 2.5, y), Pos2::new(x, y + 2.5)], s);
-            p.line_segment([Pos2::new(x + 4.0, y + 2.5), Pos2::new(x + 8.0, y + 2.5)], s);
+            p.line_segment(
+                [Pos2::new(x + 4.0, y + 2.5), Pos2::new(x + 8.0, y + 2.5)],
+                s,
+            );
         }
         "service" => {
             // gear: hub + six teeth
@@ -5808,20 +7113,52 @@ fn icon_glyph(p: &egui::Painter, kind: &str, c: Pos2, r: f32, col: Color32) {
         }
         "container" => {
             // docker-ish: rounded hull, two portholes, mast line
-            let b = Rect::from_center_size(c + Vec2::new(0.0, r * 0.15), Vec2::new(r * 1.9, r * 1.2));
-            p.rect_stroke(b, 4.0, Stroke::new(1.4_f32, col), egui::epaint::StrokeKind::Inside);
+            let b =
+                Rect::from_center_size(c + Vec2::new(0.0, r * 0.15), Vec2::new(r * 1.9, r * 1.2));
+            p.rect_stroke(
+                b,
+                4.0,
+                Stroke::new(1.4_f32, col),
+                egui::epaint::StrokeKind::Inside,
+            );
             for f in [0.35, 0.65] {
-                p.circle_stroke(Pos2::new(b.left() + b.width() * f, b.center().y + 1.0), r * 0.18, Stroke::new(1.1_f32, col));
+                p.circle_stroke(
+                    Pos2::new(b.left() + b.width() * f, b.center().y + 1.0),
+                    r * 0.18,
+                    Stroke::new(1.1_f32, col),
+                );
             }
-            p.line_segment([Pos2::new(b.left() + b.width() * 0.25, b.top() - r * 0.35), Pos2::new(b.left() + b.width() * 0.75, b.top() - r * 0.35)], s);
+            p.line_segment(
+                [
+                    Pos2::new(b.left() + b.width() * 0.25, b.top() - r * 0.35),
+                    Pos2::new(b.left() + b.width() * 0.75, b.top() - r * 0.35),
+                ],
+                s,
+            );
         }
         "database" => {
             // cylinder: top ellipse + sides + bottom arc
             let rx = r * 0.85;
             let top = Pos2::new(c.x, c.y - r * 0.7);
-            p.add(egui::Shape::ellipse_stroke(top, Vec2::new(rx, r * 0.32), Stroke::new(1.3_f32, col)));
-            p.line_segment([Pos2::new(c.x - rx, top.y), Pos2::new(c.x - rx, c.y + r * 0.55)], s);
-            p.line_segment([Pos2::new(c.x + rx, top.y), Pos2::new(c.x + rx, c.y + r * 0.55)], s);
+            p.add(egui::Shape::ellipse_stroke(
+                top,
+                Vec2::new(rx, r * 0.32),
+                Stroke::new(1.3_f32, col),
+            ));
+            p.line_segment(
+                [
+                    Pos2::new(c.x - rx, top.y),
+                    Pos2::new(c.x - rx, c.y + r * 0.55),
+                ],
+                s,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(c.x + rx, top.y),
+                    Pos2::new(c.x + rx, c.y + r * 0.55),
+                ],
+                s,
+            );
             let arc: Vec<Pos2> = (0..=12)
                 .map(|i| {
                     let a = std::f32::consts::PI * i as f32 / 12.0;
@@ -5833,74 +7170,246 @@ fn icon_glyph(p: &egui::Painter, kind: &str, c: Pos2, r: f32, col: Color32) {
         "runtime" => {
             // curly braces { } around a dot
             let (x, y) = (c.x, c.y);
-            p.line_segment([Pos2::new(x - r * 0.5, y - r), Pos2::new(x - r * 0.9, y - r * 0.5)], s);
-            p.line_segment([Pos2::new(x - r * 0.9, y - r * 0.5), Pos2::new(x - r * 0.9, y + r * 0.5)], s);
-            p.line_segment([Pos2::new(x - r * 0.9, y + r * 0.5), Pos2::new(x - r * 0.5, y + r)], s);
-            p.line_segment([Pos2::new(x + r * 0.5, y - r), Pos2::new(x + r * 0.9, y - r * 0.5)], s);
-            p.line_segment([Pos2::new(x + r * 0.9, y - r * 0.5), Pos2::new(x + r * 0.9, y + r * 0.5)], s);
-            p.line_segment([Pos2::new(x + r * 0.9, y + r * 0.5), Pos2::new(x + r * 0.5, y + r)], s);
+            p.line_segment(
+                [
+                    Pos2::new(x - r * 0.5, y - r),
+                    Pos2::new(x - r * 0.9, y - r * 0.5),
+                ],
+                s,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(x - r * 0.9, y - r * 0.5),
+                    Pos2::new(x - r * 0.9, y + r * 0.5),
+                ],
+                s,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(x - r * 0.9, y + r * 0.5),
+                    Pos2::new(x - r * 0.5, y + r),
+                ],
+                s,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(x + r * 0.5, y - r),
+                    Pos2::new(x + r * 0.9, y - r * 0.5),
+                ],
+                s,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(x + r * 0.9, y - r * 0.5),
+                    Pos2::new(x + r * 0.9, y + r * 0.5),
+                ],
+                s,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(x + r * 0.9, y + r * 0.5),
+                    Pos2::new(x + r * 0.5, y + r),
+                ],
+                s,
+            );
             p.circle_filled(c, r * 0.18, col);
         }
         "chat" => {
             // speech bubble with tail
-            let b = Rect::from_center_size(c + Vec2::new(0.0, -r * 0.15), Vec2::new(r * 1.9, r * 1.35));
-            p.rect_stroke(b, 4.0, Stroke::new(1.4_f32, col), egui::epaint::StrokeKind::Inside);
-            p.line_segment([Pos2::new(b.left() + r * 0.5, b.bottom()), Pos2::new(b.left() + r * 0.2, b.bottom() + r * 0.45)], s);
-            p.line_segment([Pos2::new(b.left() + r * 0.2, b.bottom() + r * 0.45), Pos2::new(b.left() + r * 0.95, b.bottom())], s);
+            let b =
+                Rect::from_center_size(c + Vec2::new(0.0, -r * 0.15), Vec2::new(r * 1.9, r * 1.35));
+            p.rect_stroke(
+                b,
+                4.0,
+                Stroke::new(1.4_f32, col),
+                egui::epaint::StrokeKind::Inside,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(b.left() + r * 0.5, b.bottom()),
+                    Pos2::new(b.left() + r * 0.2, b.bottom() + r * 0.45),
+                ],
+                s,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(b.left() + r * 0.2, b.bottom() + r * 0.45),
+                    Pos2::new(b.left() + r * 0.95, b.bottom()),
+                ],
+                s,
+            );
         }
         "music" => {
             // eighth note: head + stem + flag
-            p.add(egui::Shape::ellipse_stroke(Pos2::new(c.x - r * 0.35, c.y + r * 0.55), Vec2::new(r * 0.42, r * 0.32), Stroke::new(1.3_f32, col)));
-            p.line_segment([Pos2::new(c.x + r * 0.05, c.y + r * 0.5), Pos2::new(c.x + r * 0.05, c.y - r)], s);
-            p.line_segment([Pos2::new(c.x + r * 0.05, c.y - r), Pos2::new(c.x + r * 0.75, c.y - r * 0.55)], s);
+            p.add(egui::Shape::ellipse_stroke(
+                Pos2::new(c.x - r * 0.35, c.y + r * 0.55),
+                Vec2::new(r * 0.42, r * 0.32),
+                Stroke::new(1.3_f32, col),
+            ));
+            p.line_segment(
+                [
+                    Pos2::new(c.x + r * 0.05, c.y + r * 0.5),
+                    Pos2::new(c.x + r * 0.05, c.y - r),
+                ],
+                s,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(c.x + r * 0.05, c.y - r),
+                    Pos2::new(c.x + r * 0.75, c.y - r * 0.55),
+                ],
+                s,
+            );
         }
         "media" => {
             // play triangle inside a frame: image/video tools
             let b = Rect::from_center_size(c, Vec2::new(r * 1.9, r * 1.6));
-            p.rect_stroke(b, 3.0, Stroke::new(1.3_f32, col), egui::epaint::StrokeKind::Inside);
+            p.rect_stroke(
+                b,
+                3.0,
+                Stroke::new(1.3_f32, col),
+                egui::epaint::StrokeKind::Inside,
+            );
             let t = b.center();
             p.add(egui::Shape::closed_line(
-                vec![Pos2::new(t.x - r * 0.3, t.y - r * 0.45), Pos2::new(t.x + r * 0.5, t.y), Pos2::new(t.x - r * 0.3, t.y + r * 0.45)],
+                vec![
+                    Pos2::new(t.x - r * 0.3, t.y - r * 0.45),
+                    Pos2::new(t.x + r * 0.5, t.y),
+                    Pos2::new(t.x - r * 0.3, t.y + r * 0.45),
+                ],
                 Stroke::new(1.3_f32, col),
             ));
         }
         "files" => {
             // folder: tab + body
-            let b = Rect::from_center_size(c + Vec2::new(0.0, r * 0.18), Vec2::new(r * 1.9, r * 1.25));
-            p.rect_stroke(b, 3.0, Stroke::new(1.4_f32, col), egui::epaint::StrokeKind::Inside);
-            p.line_segment([Pos2::new(b.left(), b.top()), Pos2::new(b.left() + b.width() * 0.45, b.top())], Stroke::new(1.6_f32, col));
-            p.line_segment([Pos2::new(b.left() + b.width() * 0.45, b.top()), Pos2::new(b.left() + b.width() * 0.6, b.top() - r * 0.3)], s);
+            let b =
+                Rect::from_center_size(c + Vec2::new(0.0, r * 0.18), Vec2::new(r * 1.9, r * 1.25));
+            p.rect_stroke(
+                b,
+                3.0,
+                Stroke::new(1.4_f32, col),
+                egui::epaint::StrokeKind::Inside,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(b.left(), b.top()),
+                    Pos2::new(b.left() + b.width() * 0.45, b.top()),
+                ],
+                Stroke::new(1.6_f32, col),
+            );
+            p.line_segment(
+                [
+                    Pos2::new(b.left() + b.width() * 0.45, b.top()),
+                    Pos2::new(b.left() + b.width() * 0.6, b.top() - r * 0.3),
+                ],
+                s,
+            );
         }
         "game" => {
             // gamepad: body + dpad + two buttons
             let b = Rect::from_center_size(c, Vec2::new(r * 2.0, r * 1.25));
-            p.rect_stroke(b, r * 0.5, Stroke::new(1.4_f32, col), egui::epaint::StrokeKind::Inside);
-            p.line_segment([Pos2::new(b.left() + r * 0.45, b.center().y), Pos2::new(b.left() + r * 1.05, b.center().y)], s);
-            p.line_segment([Pos2::new(b.left() + r * 0.75, b.center().y - r * 0.3), Pos2::new(b.left() + r * 0.75, b.center().y + r * 0.3)], s);
-            p.circle_filled(Pos2::new(b.right() - r * 0.7, b.center().y - r * 0.18), r * 0.14, col);
-            p.circle_filled(Pos2::new(b.right() - r * 0.45, b.center().y + r * 0.18), r * 0.14, col);
+            p.rect_stroke(
+                b,
+                r * 0.5,
+                Stroke::new(1.4_f32, col),
+                egui::epaint::StrokeKind::Inside,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(b.left() + r * 0.45, b.center().y),
+                    Pos2::new(b.left() + r * 1.05, b.center().y),
+                ],
+                s,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(b.left() + r * 0.75, b.center().y - r * 0.3),
+                    Pos2::new(b.left() + r * 0.75, b.center().y + r * 0.3),
+                ],
+                s,
+            );
+            p.circle_filled(
+                Pos2::new(b.right() - r * 0.7, b.center().y - r * 0.18),
+                r * 0.14,
+                col,
+            );
+            p.circle_filled(
+                Pos2::new(b.right() - r * 0.45, b.center().y + r * 0.18),
+                r * 0.14,
+                col,
+            );
         }
         "agent" => {
             // robot head: box, two eyes, antenna
             let b = Rect::from_center_size(c, Vec2::new(r * 1.7, r * 1.5));
-            p.rect_stroke(b, 3.0, Stroke::new(1.4_f32, col), egui::epaint::StrokeKind::Inside);
-            p.circle_filled(Pos2::new(b.center().x - r * 0.35, b.center().y), r * 0.16, col);
-            p.circle_filled(Pos2::new(b.center().x + r * 0.35, b.center().y), r * 0.16, col);
-            p.line_segment([Pos2::new(b.center().x, b.top()), Pos2::new(b.center().x, b.top() - r * 0.35)], s);
+            p.rect_stroke(
+                b,
+                3.0,
+                Stroke::new(1.4_f32, col),
+                egui::epaint::StrokeKind::Inside,
+            );
+            p.circle_filled(
+                Pos2::new(b.center().x - r * 0.35, b.center().y),
+                r * 0.16,
+                col,
+            );
+            p.circle_filled(
+                Pos2::new(b.center().x + r * 0.35, b.center().y),
+                r * 0.16,
+                col,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(b.center().x, b.top()),
+                    Pos2::new(b.center().x, b.top() - r * 0.35),
+                ],
+                s,
+            );
             p.circle_filled(Pos2::new(b.center().x, b.top() - r * 0.42), r * 0.12, col);
         }
         "audio" => {
             // speaker cone + two waves
             let x = c.x - r * 0.7;
-            p.line_segment([Pos2::new(x, c.y - r * 0.3), Pos2::new(x + r * 0.45, c.y - r * 0.3)], s);
-            p.line_segment([Pos2::new(x + r * 0.45, c.y - r * 0.3), Pos2::new(x + r * 0.9, c.y - r * 0.75)], s);
-            p.line_segment([Pos2::new(x + r * 0.9, c.y - r * 0.75), Pos2::new(x + r * 0.9, c.y + r * 0.75)], s);
-            p.line_segment([Pos2::new(x + r * 0.9, c.y + r * 0.75), Pos2::new(x + r * 0.45, c.y + r * 0.3)], s);
-            p.line_segment([Pos2::new(x + r * 0.45, c.y + r * 0.3), Pos2::new(x, c.y + r * 0.3)], s);
+            p.line_segment(
+                [
+                    Pos2::new(x, c.y - r * 0.3),
+                    Pos2::new(x + r * 0.45, c.y - r * 0.3),
+                ],
+                s,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(x + r * 0.45, c.y - r * 0.3),
+                    Pos2::new(x + r * 0.9, c.y - r * 0.75),
+                ],
+                s,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(x + r * 0.9, c.y - r * 0.75),
+                    Pos2::new(x + r * 0.9, c.y + r * 0.75),
+                ],
+                s,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(x + r * 0.9, c.y + r * 0.75),
+                    Pos2::new(x + r * 0.45, c.y + r * 0.3),
+                ],
+                s,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(x + r * 0.45, c.y + r * 0.3),
+                    Pos2::new(x, c.y + r * 0.3),
+                ],
+                s,
+            );
             for f in [0.55, 0.9] {
                 let arc: Vec<Pos2> = (0..=8)
                     .map(|i| {
-                        let a = -std::f32::consts::FRAC_PI_3 + std::f32::consts::FRAC_PI_2 * 2.0 / 3.0 * i as f32 / 8.0;
+                        let a = -std::f32::consts::FRAC_PI_3
+                            + std::f32::consts::FRAC_PI_2 * 2.0 / 3.0 * i as f32 / 8.0;
                         Pos2::new(c.x - r * 0.1 + a.cos() * r * f, c.y + a.sin() * r * f)
                     })
                     .collect();
@@ -5909,16 +7418,37 @@ fn icon_glyph(p: &egui::Painter, kind: &str, c: Pos2, r: f32, col: Color32) {
         }
         "desktop" => {
             // monitor + stand
-            let b = Rect::from_center_size(c + Vec2::new(0.0, -r * 0.2), Vec2::new(r * 2.0, r * 1.3));
-            p.rect_stroke(b, 3.0, Stroke::new(1.4_f32, col), egui::epaint::StrokeKind::Inside);
-            p.line_segment([Pos2::new(b.center().x, b.bottom()), Pos2::new(b.center().x, c.y + r * 0.75)], s);
-            p.line_segment([Pos2::new(c.x - r * 0.5, c.y + r * 0.75), Pos2::new(c.x + r * 0.5, c.y + r * 0.75)], Stroke::new(1.6_f32, col));
+            let b =
+                Rect::from_center_size(c + Vec2::new(0.0, -r * 0.2), Vec2::new(r * 2.0, r * 1.3));
+            p.rect_stroke(
+                b,
+                3.0,
+                Stroke::new(1.4_f32, col),
+                egui::epaint::StrokeKind::Inside,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(b.center().x, b.bottom()),
+                    Pos2::new(b.center().x, c.y + r * 0.75),
+                ],
+                s,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(c.x - r * 0.5, c.y + r * 0.75),
+                    Pos2::new(c.x + r * 0.5, c.y + r * 0.75),
+                ],
+                Stroke::new(1.6_f32, col),
+            );
         }
         "settings" => {
             // sliders: three rails with knobs
             for (i, f) in [0.3, 0.55, 0.8].iter().enumerate() {
                 let y = c.y - r + r * 2.0 * (i as f32 + 0.5) / 3.0;
-                p.line_segment([Pos2::new(c.x - r, y), Pos2::new(c.x + r, y)], Stroke::new(1.1_f32, col));
+                p.line_segment(
+                    [Pos2::new(c.x - r, y), Pos2::new(c.x + r, y)],
+                    Stroke::new(1.1_f32, col),
+                );
                 p.circle_filled(Pos2::new(c.x - r + 2.0 * r * f, y), r * 0.22, col);
             }
         }
@@ -5929,13 +7459,17 @@ fn icon_glyph(p: &egui::Painter, kind: &str, c: Pos2, r: f32, col: Color32) {
 /// Settings text field: inset well, roomy padding, monospace where it
 /// matters, and an optional icon button docked inside the right edge.
 /// `on_trail` receives the clicked state and returns the new one.
+/// A labelled text input in an inset well; `trail` adds a trailing toggle
+/// (label, state, callback), e.g. the password reveal.
+type FieldTrail<'a> = (&'a str, bool, &'a mut dyn FnMut(bool));
+
 fn field(
     ui: &mut Ui,
     value: &mut String,
     hint: &str,
     mono: bool,
     password: bool,
-    trail: Option<(&str, bool, &mut dyn FnMut(bool))>,
+    trail: Option<FieldTrail<'_>>,
 ) -> egui::Response {
     // lay the inset well down first, then the TextEdit on top of it
     let w = ui.available_width();
@@ -5968,7 +7502,8 @@ fn field(
             BORDER
         },
     );
-    ui.painter().rect_stroke(well, 9.0, stroke, egui::epaint::StrokeKind::Middle);
+    ui.painter()
+        .rect_stroke(well, 9.0, stroke, egui::epaint::StrokeKind::Middle);
     if let Some((icon, state, on_trail)) = trail {
         let r = Rect::from_center_size(
             Pos2::new(resp.rect.right() - 20.0, resp.rect.center().y),
@@ -5989,12 +7524,7 @@ fn field(
 
 /// Labelled settings row: caption + optional hint on the left, control on
 /// the right, with a hairline separating rows.
-fn setting_row<R>(
-    ui: &mut Ui,
-    label: &str,
-    hint: &str,
-    add: impl FnOnce(&mut Ui) -> R,
-) -> R {
+fn setting_row<R>(ui: &mut Ui, label: &str, hint: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
     let top = ui.cursor().top();
     let inner = ui
         .horizontal(|ui| {
@@ -6041,7 +7571,8 @@ fn empty_state(ui: &mut Ui, title: &str, body: &str) {
         let (r, _) = ui.allocate_exact_size(Vec2::splat(44.0), Sense::hover());
         ui.painter().rect_filled(r, 12.0, SURFACE_HI);
         let s = s_pulse(Rect::from_center_size(r.center(), Vec2::splat(32.0)));
-        ui.painter().add(egui::Shape::line(s, Stroke::new(2.0_f32, FAINT)));
+        ui.painter()
+            .add(egui::Shape::line(s, Stroke::new(2.0_f32, FAINT)));
         ui.add_space(6.0);
         ui.label(RichText::new(title).font(bold(15.0)).color(TEXT));
         ui.label(RichText::new(body).size(13.0).color(MUTED));
@@ -6059,10 +7590,7 @@ fn section_label(ui: &mut Ui, text: &str) {
 fn section_heading(ui: &mut Ui, text: &str) {
     ui.horizontal(|ui| {
         ui.label(RichText::new(text).font(bold(15.5)).color(TEXT));
-        let (r, _) = ui.allocate_at_least(
-            Vec2::new(ui.available_width(), 1.0),
-            Sense::hover(),
-        );
+        let (r, _) = ui.allocate_at_least(Vec2::new(ui.available_width(), 1.0), Sense::hover());
         let line = Rect::from_min_max(
             Pos2::new(r.left(), r.center().y),
             Pos2::new(r.right(), r.center().y + 1.0),
@@ -6104,17 +7632,26 @@ fn engine_card(ui: &mut Ui, ok: bool, version: &str) {
             ui.horizontal(|ui| {
                 let (r, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
                 let c = if ok { GREEN } else { RED };
-                ui.painter().circle_filled(r.center(), 6.0, c.gamma_multiply(0.2));
+                ui.painter()
+                    .circle_filled(r.center(), 6.0, c.gamma_multiply(0.2));
                 ui.painter().circle_filled(r.center(), 3.5, c);
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 0.0;
                     ui.label(
-                        RichText::new(if ok { "Engine running" } else { "Engine unreachable" })
-                            .size(12.5)
-                            .color(TEXT),
+                        RichText::new(if ok {
+                            "Engine running"
+                        } else {
+                            "Engine unreachable"
+                        })
+                        .size(12.5)
+                        .color(TEXT),
                     );
                     if !version.is_empty() {
-                        ui.label(RichText::new(format!("Docker {version}")).size(11.0).color(FAINT));
+                        ui.label(
+                            RichText::new(format!("Docker {version}"))
+                                .size(11.0)
+                                .color(FAINT),
+                        );
                     }
                 });
             });
@@ -6122,8 +7659,16 @@ fn engine_card(ui: &mut Ui, ok: bool, version: &str) {
 }
 
 /// Sidebar navigation entry; true when clicked.
-fn nav_item(ui: &mut Ui, tab: Tab, label: &str, badge: &str, active: bool, real_icon: Option<&egui::TextureHandle>) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 38.0), Sense::click());
+fn nav_item(
+    ui: &mut Ui,
+    tab: Tab,
+    label: &str,
+    badge: &str,
+    active: bool,
+    real_icon: Option<&egui::TextureHandle>,
+) -> bool {
+    let (rect, resp) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 38.0), Sense::click());
     #[cfg(test)]
     NAV_ROW_RECTS.lock().unwrap().push((tab, rect));
     let hovered = resp.hovered();
@@ -6134,7 +7679,10 @@ fn nav_item(ui: &mut Ui, tab: Tab, label: &str, badge: &str, active: bool, real_
     if active {
         p.rect_filled(rect, 9.0, ACCENT.gamma_multiply(0.15));
         p.rect_filled(
-            Rect::from_center_size(Pos2::new(rect.left() + 1.5, rect.center().y), Vec2::new(3.0, 18.0)),
+            Rect::from_center_size(
+                Pos2::new(rect.left() + 1.5, rect.center().y),
+                Vec2::new(3.0, 18.0),
+            ),
             2.0,
             ACCENT,
         );
@@ -6142,7 +7690,10 @@ fn nav_item(ui: &mut Ui, tab: Tab, label: &str, badge: &str, active: bool, real_
         p.rect_filled(rect, 9.0, SURFACE_HI);
     }
     let fg = if active || hovered { TEXT } else { MUTED };
-    let icon = Rect::from_center_size(Pos2::new(rect.left() + 22.0, rect.center().y), Vec2::splat(16.0));
+    let icon = Rect::from_center_size(
+        Pos2::new(rect.left() + 22.0, rect.center().y),
+        Vec2::splat(16.0),
+    );
     // the Processes rail carries a real application icon once one has
     // decoded; every tab keeps its drawn line-icon as the fallback
     match real_icon {
@@ -6160,10 +7711,25 @@ fn nav_item(ui: &mut Ui, tab: Tab, label: &str, badge: &str, active: bool, real_
         fg,
     );
     if !badge.is_empty() {
-        let galley = p.layout_no_wrap(badge.to_string(), FontId::proportional(11.5), if active { TEXT } else { MUTED });
+        let galley = p.layout_no_wrap(
+            badge.to_string(),
+            FontId::proportional(11.5),
+            if active { TEXT } else { MUTED },
+        );
         let size = Vec2::new(galley.size().x + 14.0, 20.0);
-        let br = Rect::from_min_size(Pos2::new(rect.right() - 8.0 - size.x, rect.center().y - 10.0), size);
-        p.rect_filled(br, 10.0, if active { ACCENT.gamma_multiply(0.25) } else { SURFACE_HI });
+        let br = Rect::from_min_size(
+            Pos2::new(rect.right() - 8.0 - size.x, rect.center().y - 10.0),
+            size,
+        );
+        p.rect_filled(
+            br,
+            10.0,
+            if active {
+                ACCENT.gamma_multiply(0.25)
+            } else {
+                SURFACE_HI
+            },
+        );
         p.galley(br.center() - galley.size() / 2.0, galley, MUTED);
     }
     resp.clicked()
@@ -6187,24 +7753,51 @@ fn nav_icon(p: &egui::Painter, tab: Tab, r: Rect, c: Color32) {
             p.rect_stroke(b, 2.5, s, inside);
             for f in [0.36, 0.64] {
                 let x = b.left() + b.width() * f;
-                p.line_segment([Pos2::new(x, b.top() + 3.5), Pos2::new(x, b.bottom() - 3.5)], s);
+                p.line_segment(
+                    [Pos2::new(x, b.top() + 3.5), Pos2::new(x, b.bottom() - 3.5)],
+                    s,
+                );
             }
         }
         Tab::Images => {
             let base = Rect::from_min_max(Pos2::new(r.left(), r.bottom() - 7.0), r.max);
             p.rect_stroke(base, 2.0, s, inside);
             let y1 = base.top() - 3.0;
-            p.line_segment([Pos2::new(r.left() + 2.5, y1), Pos2::new(r.right() - 2.5, y1)], s);
+            p.line_segment(
+                [
+                    Pos2::new(r.left() + 2.5, y1),
+                    Pos2::new(r.right() - 2.5, y1),
+                ],
+                s,
+            );
             let y2 = y1 - 3.5;
-            p.line_segment([Pos2::new(r.left() + 5.0, y2), Pos2::new(r.right() - 5.0, y2)], s);
+            p.line_segment(
+                [
+                    Pos2::new(r.left() + 5.0, y2),
+                    Pos2::new(r.right() - 5.0, y2),
+                ],
+                s,
+            );
         }
         Tab::Volumes => {
             let rx = r.width() / 2.0 - 0.5;
             let top = Pos2::new(r.center().x, r.top() + 3.0);
             let bot = Pos2::new(r.center().x, r.bottom() - 3.0);
             p.add(egui::Shape::ellipse_stroke(top, Vec2::new(rx, 2.6), s));
-            p.line_segment([Pos2::new(r.left() + 0.5, top.y), Pos2::new(r.left() + 0.5, bot.y)], s);
-            p.line_segment([Pos2::new(r.right() - 0.5, top.y), Pos2::new(r.right() - 0.5, bot.y)], s);
+            p.line_segment(
+                [
+                    Pos2::new(r.left() + 0.5, top.y),
+                    Pos2::new(r.left() + 0.5, bot.y),
+                ],
+                s,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(r.right() - 0.5, top.y),
+                    Pos2::new(r.right() - 0.5, bot.y),
+                ],
+                s,
+            );
             let arc: Vec<Pos2> = (0..=16)
                 .map(|i| {
                     let a = std::f32::consts::PI * i as f32 / 16.0;
@@ -6221,13 +7814,25 @@ fn nav_icon(p: &egui::Painter, tab: Tab, r: Rect, c: Color32) {
                 let eye = Pos2::new(b.center().x + b.width() * dx, b.center().y - 1.0);
                 p.circle_filled(eye, 1.4, c);
             }
-            p.line_segment([Pos2::new(b.center().x, b.top()), Pos2::new(b.center().x, r.top() + 1.5)], s);
+            p.line_segment(
+                [
+                    Pos2::new(b.center().x, b.top()),
+                    Pos2::new(b.center().x, r.top() + 1.5),
+                ],
+                s,
+            );
             p.circle_filled(Pos2::new(b.center().x, r.top() + 1.5), 1.2, c);
         }
         Tab::Logs => {
             for (i, f) in [1.0, 0.65, 0.85, 0.5].iter().enumerate() {
                 let y = r.top() + 2.0 + i as f32 * 4.0;
-                p.line_segment([Pos2::new(r.left(), y), Pos2::new(r.left() + r.width() * f, y)], s);
+                p.line_segment(
+                    [
+                        Pos2::new(r.left(), y),
+                        Pos2::new(r.left() + r.width() * f, y),
+                    ],
+                    s,
+                );
             }
         }
         Tab::Hardware => {
@@ -6238,7 +7843,10 @@ fn nav_icon(p: &egui::Painter, tab: Tab, r: Rect, c: Color32) {
             for i in 1..=3 {
                 let t = b.left() + b.width() * i as f32 / 4.0;
                 p.line_segment([Pos2::new(t, b.top()), Pos2::new(t, b.top() - pin)], s);
-                p.line_segment([Pos2::new(t, b.bottom()), Pos2::new(t, b.bottom() + pin)], s);
+                p.line_segment(
+                    [Pos2::new(t, b.bottom()), Pos2::new(t, b.bottom() + pin)],
+                    s,
+                );
                 let u = b.top() + b.height() * i as f32 / 4.0;
                 p.line_segment([Pos2::new(b.left(), u), Pos2::new(b.left() - pin, u)], s);
                 p.line_segment([Pos2::new(b.right(), u), Pos2::new(b.right() + pin, u)], s);
@@ -6255,20 +7863,42 @@ fn nav_icon(p: &egui::Painter, tab: Tab, r: Rect, c: Color32) {
                 let x = b.left() + b.width() * f;
                 p.line_segment([Pos2::new(x, b.top()), Pos2::new(x, r.top() + 1.0)], s);
             }
-            p.line_segment([Pos2::new(b.center().x, b.bottom()), Pos2::new(b.center().x, r.bottom() + 1.5)], s);
+            p.line_segment(
+                [
+                    Pos2::new(b.center().x, b.bottom()),
+                    Pos2::new(b.center().x, r.bottom() + 1.5),
+                ],
+                s,
+            );
         }
         Tab::Processes => {
             // stacked window rows with a cursor: a process list mark
             for (i, f) in [0.9, 0.6, 0.75].iter().enumerate() {
                 let y = r.top() + 2.5 + i as f32 * 4.5;
-                p.line_segment([Pos2::new(r.left(), y), Pos2::new(r.left() + r.width() * f, y)], s);
+                p.line_segment(
+                    [
+                        Pos2::new(r.left(), y),
+                        Pos2::new(r.left() + r.width() * f, y),
+                    ],
+                    s,
+                );
             }
-            p.line_segment([Pos2::new(r.left(), r.bottom() - 1.5), Pos2::new(r.left() + r.width() * 0.45, r.bottom() - 1.5)], s);
+            p.line_segment(
+                [
+                    Pos2::new(r.left(), r.bottom() - 1.5),
+                    Pos2::new(r.left() + r.width() * 0.45, r.bottom() - 1.5),
+                ],
+                s,
+            );
         }
         Tab::Settings => {
             // a gear: ring, hub, six teeth
             let ring = r.shrink2(Vec2::new(3.5, 3.5));
-            p.circle_stroke(ring.center(), ring.width().min(ring.height()) / 2.0 - 1.0, s);
+            p.circle_stroke(
+                ring.center(),
+                ring.width().min(ring.height()) / 2.0 - 1.0,
+                s,
+            );
             p.circle_filled(ring.center(), 1.7, c);
             for k in 0..6 {
                 let a = std::f32::consts::TAU * k as f32 / 6.0;
@@ -6286,19 +7916,51 @@ fn nav_icon(p: &egui::Painter, tab: Tab, r: Rect, c: Color32) {
             let core = b.shrink2(Vec2::new(b.width() * 0.28, b.height() * 0.28));
             p.rect_filled(core, 2.0, c);
             let pin = 2.0_f32;
-            p.line_segment([Pos2::new(b.center().x, b.top()), Pos2::new(b.center().x, b.top() - pin)], s);
-            p.line_segment([Pos2::new(b.center().x, b.bottom()), Pos2::new(b.center().x, b.bottom() + pin)], s);
-            p.line_segment([Pos2::new(b.left(), b.center().y), Pos2::new(b.left() - pin, b.center().y)], s);
-            p.line_segment([Pos2::new(b.right(), b.center().y), Pos2::new(b.right() + pin, b.center().y)], s);
+            p.line_segment(
+                [
+                    Pos2::new(b.center().x, b.top()),
+                    Pos2::new(b.center().x, b.top() - pin),
+                ],
+                s,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(b.center().x, b.bottom()),
+                    Pos2::new(b.center().x, b.bottom() + pin),
+                ],
+                s,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(b.left(), b.center().y),
+                    Pos2::new(b.left() - pin, b.center().y),
+                ],
+                s,
+            );
+            p.line_segment(
+                [
+                    Pos2::new(b.right(), b.center().y),
+                    Pos2::new(b.right() + pin, b.center().y),
+                ],
+                s,
+            );
         }
     }
 }
 
 /// Rounded icon tile at the left edge of a list row.
 fn icon_tile(p: &egui::Painter, row: Rect, tab: Tab, color: Color32) {
-    let tile = Rect::from_center_size(Pos2::new(row.left() + 26.0, row.center().y), Vec2::splat(34.0));
+    let tile = Rect::from_center_size(
+        Pos2::new(row.left() + 26.0, row.center().y),
+        Vec2::splat(34.0),
+    );
     p.rect_filled(tile, 9.0, color.gamma_multiply(0.12));
-    nav_icon(p, tab, Rect::from_center_size(tile.center(), Vec2::splat(16.0)), color);
+    nav_icon(
+        p,
+        tab,
+        Rect::from_center_size(tile.center(), Vec2::splat(16.0)),
+        color,
+    );
 }
 
 fn row_bg(p: &egui::Painter, rect: Rect, selected: bool, hovered: bool) {
@@ -6337,7 +7999,13 @@ fn spinner_at(p: &egui::Painter, time: f64, c: Pos2, r: f32, color: Color32) {
 }
 
 /// Single-line text clipped to `max_w` with an ellipsis.
-fn elide(p: &egui::Painter, text: String, font: FontId, color: Color32, max_w: f32) -> Arc<egui::Galley> {
+fn elide(
+    p: &egui::Painter,
+    text: String,
+    font: FontId,
+    color: Color32,
+    max_w: f32,
+) -> Arc<egui::Galley> {
     let mut job = egui::text::LayoutJob::simple_singleline(text, font, color);
     job.wrap = egui::text::TextWrapping {
         max_width: max_w.max(1.0),
@@ -6352,7 +8020,10 @@ fn elide(p: &egui::Painter, text: String, font: FontId, color: Color32, max_w: f
 fn pill_at(p: &egui::Painter, right_center: Pos2, text: &str, fg: Color32, bg: Color32) {
     let galley = p.layout_no_wrap(text.to_string(), FontId::proportional(11.5), fg);
     let size = galley.size() + Vec2::new(16.0, 6.0);
-    let r = Rect::from_min_size(Pos2::new(right_center.x - size.x, right_center.y - size.y / 2.0), size);
+    let r = Rect::from_min_size(
+        Pos2::new(right_center.x - size.x, right_center.y - size.y / 2.0),
+        size,
+    );
     p.rect_filled(r, size.y / 2.0, bg);
     p.galley(r.center() - galley.size() / 2.0, galley, fg);
 }
@@ -6382,13 +8053,19 @@ fn state_badge(ui: &mut Ui, state: &str) {
 fn live_pill(ui: &mut Ui, ok: bool) {
     let color = if ok { GREEN } else { RED };
     let text = if ok { "Live" } else { "Offline" };
-    let galley = ui.painter().layout_no_wrap(text.to_string(), FontId::proportional(11.5), color);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_string(), FontId::proportional(11.5), color);
     let size = Vec2::new(galley.size().x + 30.0, 22.0);
     let (r, _) = ui.allocate_exact_size(size, Sense::hover());
     let p = ui.painter();
     p.rect_filled(r, 11.0, color.gamma_multiply(0.12));
     p.circle_filled(Pos2::new(r.left() + 12.0, r.center().y), 3.0, color);
-    p.galley(Pos2::new(r.left() + 21.0, r.center().y - galley.size().y / 2.0), galley, color);
+    p.galley(
+        Pos2::new(r.left() + 21.0, r.center().y - galley.size().y / 2.0),
+        galley,
+        color,
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -6437,16 +8114,33 @@ fn switch(ui: &mut Ui, on: bool) -> egui::Response {
     let track = if on { ACCENT } else { SURFACE_HI };
     let stroke = if on { ACCENT } else { BORDER };
     p.rect_filled(rect, 11.0, track);
-    p.rect_stroke(rect, 11.0, Stroke::new(1.0_f32, stroke), egui::epaint::StrokeKind::Inside);
+    p.rect_stroke(
+        rect,
+        11.0,
+        Stroke::new(1.0_f32, stroke),
+        egui::epaint::StrokeKind::Inside,
+    );
     let knob = 16.0_f32;
-    let cx = if on { rect.right() - knob / 2.0 - 3.0 } else { rect.left() + knob / 2.0 + 3.0 };
-    p.circle_filled(Pos2::new(cx, rect.center().y), knob / 2.0, if on { Color32::WHITE } else { MUTED });
+    let cx = if on {
+        rect.right() - knob / 2.0 - 3.0
+    } else {
+        rect.left() + knob / 2.0 + 3.0
+    };
+    p.circle_filled(
+        Pos2::new(cx, rect.center().y),
+        knob / 2.0,
+        if on { Color32::WHITE } else { MUTED },
+    );
     resp
 }
 
 fn toggle_chip(ui: &mut Ui, label: &str, on: bool) -> egui::Response {
     let (fill, fg, stroke) = if on {
-        (ACCENT.gamma_multiply(0.16), ACCENT, ACCENT.gamma_multiply(0.5))
+        (
+            ACCENT.gamma_multiply(0.16),
+            ACCENT,
+            ACCENT.gamma_multiply(0.5),
+        )
     } else {
         (SURFACE_HI, MUTED, BORDER)
     };
@@ -6474,13 +8168,20 @@ fn search_box(ui: &mut Ui, text: &mut String, hint: &str) {
     let c = Pos2::new(resp.rect.left() + 16.0, resp.rect.center().y - 1.0);
     let s = Stroke::new(1.5_f32, FAINT);
     ui.painter().circle_stroke(c, 4.5, s);
-    ui.painter().line_segment([c + Vec2::new(3.3, 3.3), c + Vec2::new(6.8, 6.8)], s);
+    ui.painter()
+        .line_segment([c + Vec2::new(3.3, 3.3), c + Vec2::new(6.8, 6.8)], s);
     if !text.is_empty() {
-        let r = Rect::from_center_size(Pos2::new(resp.rect.right() - 16.0, resp.rect.center().y), Vec2::splat(18.0));
+        let r = Rect::from_center_size(
+            Pos2::new(resp.rect.right() - 16.0, resp.rect.center().y),
+            Vec2::splat(18.0),
+        );
         let clear = ui.interact(r, resp.id.with("clear"), Sense::click());
         let col = if clear.hovered() { TEXT } else { FAINT };
         let d = 3.5;
-        ui.painter().line_segment([r.center() - Vec2::splat(d), r.center() + Vec2::splat(d)], Stroke::new(1.5_f32, col));
+        ui.painter().line_segment(
+            [r.center() - Vec2::splat(d), r.center() + Vec2::splat(d)],
+            Stroke::new(1.5_f32, col),
+        );
         ui.painter().line_segment(
             [r.center() + Vec2::new(-d, d), r.center() + Vec2::new(d, -d)],
             Stroke::new(1.5_f32, col),
@@ -6495,12 +8196,20 @@ fn search_box(ui: &mut Ui, text: &mut String, hint: &str) {
 fn segmented<T: PartialEq + Copy>(ui: &mut Ui, opts: &[(T, String)], cur: T) -> Option<T> {
     let h = 32.0;
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), h), Sense::hover());
-    ui.painter()
-        .rect(rect, 9.0, SURFACE, Stroke::new(1.0_f32, BORDER), egui::epaint::StrokeKind::Inside);
+    ui.painter().rect(
+        rect,
+        9.0,
+        SURFACE,
+        Stroke::new(1.0_f32, BORDER),
+        egui::epaint::StrokeKind::Inside,
+    );
     let w = (rect.width() - 6.0) / opts.len() as f32;
     let mut out = None;
     for (i, (v, label)) in opts.iter().enumerate() {
-        let r = Rect::from_min_size(rect.min + Vec2::new(3.0 + i as f32 * w, 3.0), Vec2::new(w, h - 6.0));
+        let r = Rect::from_min_size(
+            rect.min + Vec2::new(3.0 + i as f32 * w, 3.0),
+            Vec2::new(w, h - 6.0),
+        );
         let resp = ui.interact(r, ui.id().with(("seg", i)), Sense::click());
         let active = *v == cur;
         if active {
@@ -6527,7 +8236,11 @@ fn kv(ui: &mut Ui, k: &str, v: &str, mono: bool) {
     ui.spacing_mut().item_spacing.y = 2.0;
     ui.label(RichText::new(k).size(11.5).color(FAINT));
     let t = RichText::new(v).color(TEXT);
-    let t = if mono { t.font(FontId::monospace(12.5)) } else { t.size(13.5) };
+    let t = if mono {
+        t.font(FontId::monospace(12.5))
+    } else {
+        t.size(13.5)
+    };
     ui.add(egui::Label::new(t).truncate());
     ui.add_space(8.0);
 }
@@ -6538,12 +8251,22 @@ fn progress(p: &egui::Painter, bar: Rect, frac: f32, color: Color32) {
     let frac = frac.clamp(0.0, 1.0);
     if frac > 0.0 {
         let w = (bar.width() * frac).max(bar.height());
-        p.rect_filled(Rect::from_min_size(bar.min, Vec2::new(w, bar.height())), r, color);
+        p.rect_filled(
+            Rect::from_min_size(bar.min, Vec2::new(w, bar.height())),
+            r,
+            color,
+        );
     }
 }
 
 /// Tiny inline trend line.
-fn sparkline(p: &egui::Painter, rect: Rect, series: impl Iterator<Item = f64>, color: Color32, floor: f64) {
+fn sparkline(
+    p: &egui::Painter,
+    rect: Rect,
+    series: impl Iterator<Item = f64>,
+    color: Color32,
+    floor: f64,
+) {
     let s: Vec<f64> = series.collect();
     if s.len() < 2 {
         return;
@@ -6601,7 +8324,10 @@ fn area_chart(ui: &mut Ui, series: &[f64], color: Color32, size: Vec2, fmt: fn(f
             Stroke::new(1.0_f32, Color32::from_rgb(28, 33, 43)),
         );
     }
-    p.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0_f32, BORDER));
+    p.line_segment(
+        [rect.left_bottom(), rect.right_bottom()],
+        Stroke::new(1.0_f32, BORDER),
+    );
     if series.len() < 2 {
         return;
     }
@@ -6621,14 +8347,24 @@ fn area_chart(ui: &mut Ui, series: &[f64], color: Color32, size: Vec2, fmt: fn(f
             .round()
             .clamp(0.0, (pts.len() - 1) as f32) as usize;
         let q = pts[i];
-        p.line_segment([Pos2::new(q.x, rect.top()), Pos2::new(q.x, rect.bottom())], Stroke::new(1.0_f32, BORDER));
+        p.line_segment(
+            [Pos2::new(q.x, rect.top()), Pos2::new(q.x, rect.bottom())],
+            Stroke::new(1.0_f32, BORDER),
+        );
         p.circle_filled(q, 4.0, color);
         p.circle_stroke(q, 4.0, Stroke::new(1.5_f32, SURFACE));
         let label = fmt(series[i]);
         let ago_s = pts.len() - 1 - i;
-        let text = if ago_s == 0 { label } else { format!("{label} · {ago_s}s ago") };
+        let text = if ago_s == 0 {
+            label
+        } else {
+            format!("{label} · {ago_s}s ago")
+        };
         let galley = p.layout_no_wrap(text, FontId::proportional(11.5), TEXT);
-        let mut tip = Rect::from_min_size(q + Vec2::new(8.0, -26.0), galley.size() + Vec2::new(12.0, 6.0));
+        let mut tip = Rect::from_min_size(
+            q + Vec2::new(8.0, -26.0),
+            galley.size() + Vec2::new(12.0, 6.0),
+        );
         if tip.right() > rect.right() {
             tip = tip.translate(Vec2::new(-tip.width() - 16.0, 0.0));
         }
@@ -6641,7 +8377,12 @@ fn area_chart(ui: &mut Ui, series: &[f64], color: Color32, size: Vec2, fmt: fn(f
 }
 
 /// One log row: dimmed time, colored source tag (consolidated view), body.
-fn log_line_job(l: &LogLine, source: Option<&str>, font: &FontId, alpha: f32) -> egui::text::LayoutJob {
+fn log_line_job(
+    l: &LogLine,
+    source: Option<&str>,
+    font: &FontId,
+    alpha: f32,
+) -> egui::text::LayoutJob {
     let fmt = |color: Color32| egui::TextFormat::simple(font.clone(), color.linear_multiply(alpha));
     let mut job = egui::text::LayoutJob::default();
     let mut body = l.text.as_str();
@@ -6667,8 +8408,17 @@ fn log_line_job(l: &LogLine, source: Option<&str>, font: &FontId, alpha: f32) ->
 
 /// Stable per-container tag color in the consolidated log view.
 fn source_color(name: &str) -> Color32 {
-    const PALETTE: [Color32; 6] = [ACCENT, GREEN, VIOLET, AMBER, CYAN, Color32::from_rgb(244, 140, 190)];
-    let h = name.bytes().fold(5381u32, |h, b| h.wrapping_mul(33) ^ b as u32);
+    const PALETTE: [Color32; 6] = [
+        ACCENT,
+        GREEN,
+        VIOLET,
+        AMBER,
+        CYAN,
+        Color32::from_rgb(244, 140, 190),
+    ];
+    let h = name
+        .bytes()
+        .fold(5381u32, |h, b| h.wrapping_mul(33) ^ b as u32);
     PALETTE[h as usize % PALETTE.len()]
 }
 
@@ -6705,7 +8455,10 @@ fn logo_mark(p: &egui::Painter, r: Rect) {
         egui::epaint::StrokeKind::Inside,
     );
     // cyan → blue → violet along the same diagonal as the SVG gradient
-    let (a, d) = (r.min + Vec2::new(60.0, 52.0) * k, Vec2::new(136.0, 152.0) * k);
+    let (a, d) = (
+        r.min + Vec2::new(60.0, 52.0) * k,
+        Vec2::new(136.0, 152.0) * k,
+    );
     let ink = move |_: Rect, q: Pos2| {
         let t = ((q - a).dot(d) / d.length_sq()).clamp(0.0, 1.0);
         if t < 0.55 {
@@ -6720,7 +8473,10 @@ fn logo_mark(p: &egui::Painter, r: Rect) {
     for end in [pts[0], pts[pts.len() - 1]] {
         p.circle_filled(end, w / 2.0, ink(r, end));
     }
-    p.add(egui::Shape::line(pts, egui::epaint::PathStroke::new_uv(w, ink)));
+    p.add(egui::Shape::line(
+        pts,
+        egui::epaint::PathStroke::new_uv(w, ink),
+    ));
     p.circle_filled(r.min + Vec2::new(206.0, 56.0) * k, 15.0 * k, GREEN);
 }
 
@@ -6735,11 +8491,20 @@ fn s_pulse(r: Rect) -> Vec<Pos2> {
     };
     let mut pts = vec![(172.0, 64.0), (100.0, 64.0)];
     pts.extend(bowl(100.0, 96.0, 270.0, 90.0));
-    pts.extend([(100.0, 128.0), (110.0, 128.0), (120.0, 98.0), (134.0, 158.0), (144.0, 128.0), (156.0, 128.0)]);
+    pts.extend([
+        (100.0, 128.0),
+        (110.0, 128.0),
+        (120.0, 98.0),
+        (134.0, 158.0),
+        (144.0, 128.0),
+        (156.0, 128.0),
+    ]);
     pts.extend(bowl(156.0, 160.0, -90.0, 90.0));
     pts.extend([(156.0, 192.0), (84.0, 192.0)]);
     let k = r.width() / 256.0;
-    pts.into_iter().map(|(x, y)| r.min + Vec2::new(x, y) * k).collect()
+    pts.into_iter()
+        .map(|(x, y)| r.min + Vec2::new(x, y) * k)
+        .collect()
 }
 
 /// Last path component of a filesystem path, for project labels.
@@ -6764,7 +8529,12 @@ struct AgentState {
 
 /// Claude Code reports its own status; other agents only have CPU to go on.
 fn agent_state(a: &AgentSession) -> AgentState {
-    let st = |label, color, live, rank| AgentState { label, color, live, rank };
+    let st = |label, color, live, rank| AgentState {
+        label,
+        color,
+        live,
+        rank,
+    };
     match a.activity.as_ref().map(|x| x.status.as_str()) {
         Some("waiting") => st("Needs you", AMBER, false, 0),
         Some("busy") => st("Working", GREEN, true, 1),
@@ -6781,13 +8551,21 @@ fn agent_title(a: &AgentSession) -> String {
     a.activity
         .as_ref()
         .and_then(|x| x.title.clone())
-        .or_else(|| a.cwd.as_deref().map(|c| format!("{} · {}", a.agent, basename(c))))
+        .or_else(|| {
+            a.cwd
+                .as_deref()
+                .map(|c| format!("{} · {}", a.agent, basename(c)))
+        })
         .unwrap_or_else(|| a.agent.to_string())
 }
 
 /// "Claude Code · project · up 2h 10m" for the list's second line.
 fn agent_where(a: &AgentSession) -> String {
-    let up = epoch() - a.started.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let up = epoch()
+        - a.started
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
     let mut parts = vec![a.agent.to_string()];
     if let Some(c) = &a.cwd {
         parts.push(basename(c));
@@ -6807,18 +8585,38 @@ fn step_line(s: &Step) -> String {
 
 /// Where the session runs: project, command line, process ids.
 fn agent_process_card(ui: &mut Ui, a: &AgentSession, now: i64) {
-    let up = now - a.started.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let up = now
+        - a.started
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
     card(ui, |ui| {
         card_title(ui, "Process", &format!("up {}", uptime_str(up)));
-        kv(ui, "Project", a.cwd.as_deref().unwrap_or("not readable (different user?)"), true);
+        kv(
+            ui,
+            "Project",
+            a.cwd.as_deref().unwrap_or("not readable (different user?)"),
+            true,
+        );
         kv(
             ui,
             "PIDs",
-            &a.pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(", "),
+            &a.pids
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
             true,
         );
         ui.add_space(4.0);
-        ui.add(egui::Label::new(RichText::new(&a.cmdline).font(FontId::monospace(11.5)).color(FAINT)).wrap());
+        ui.add(
+            egui::Label::new(
+                RichText::new(&a.cmdline)
+                    .font(FontId::monospace(11.5))
+                    .color(FAINT),
+            )
+            .wrap(),
+        );
     });
 }
 
@@ -6845,13 +8643,25 @@ fn agent_color(agent: &str) -> Color32 {
 fn port_color(p: &PortEntry) -> Color32 {
     match p.proc_name.as_deref() {
         Some(n) => {
-            let h = n.bytes().fold(5381u32, |h, b| h.wrapping_mul(33) ^ b as u32);
-            const PALETTE: [Color32; 5] = [ACCENT, GREEN, VIOLET, AMBER, Color32::from_rgb(120, 160, 120)];
+            let h = n
+                .bytes()
+                .fold(5381u32, |h, b| h.wrapping_mul(33) ^ b as u32);
+            const PALETTE: [Color32; 5] = [
+                ACCENT,
+                GREEN,
+                VIOLET,
+                AMBER,
+                Color32::from_rgb(120, 160, 120),
+            ];
             PALETTE[h as usize % PALETTE.len()]
         }
         None => {
             let public = p.addr == "0.0.0.0" || p.addr == "[::]";
-            if public { AMBER } else { FAINT }
+            if public {
+                AMBER
+            } else {
+                FAINT
+            }
         }
     }
 }
@@ -6877,7 +8687,11 @@ fn human_rate(bps: f64) -> String {
 /// Labelled horizontal bar: "Used ███░░ 12.3 GB of 64 GB".
 fn bar_row(ui: &mut Ui, label: &str, used: u64, total: u64, color: Color32) {
     if total == 0 {
-        ui.label(RichText::new(format!("{label}: none")).size(12.5).color(FAINT));
+        ui.label(
+            RichText::new(format!("{label}: none"))
+                .size(12.5)
+                .color(FAINT),
+        );
         return;
     }
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 22.0), Sense::hover());
@@ -6897,7 +8711,11 @@ fn bar_row(ui: &mut Ui, label: &str, used: u64, total: u64, color: Color32) {
     p.text(
         Pos2::new(rect.right(), rect.center().y),
         egui::Align2::RIGHT_CENTER,
-        format!("{} of {}", human_size(used as i64), human_size(total as i64)),
+        format!(
+            "{} of {}",
+            human_size(used as i64),
+            human_size(total as i64)
+        ),
         FontId::monospace(11.5),
         FAINT,
     );
@@ -6976,11 +8794,7 @@ fn spawn_refresh(
     });
 }
 
-fn spawn_info(
-    rt: &tokio::runtime::Handle,
-    docker: &Arc<Docker>,
-    tx: &mpsc::UnboundedSender<Msg>,
-) {
+fn spawn_info(rt: &tokio::runtime::Handle, docker: &Arc<Docker>, tx: &mpsc::UnboundedSender<Msg>) {
     let docker = Arc::clone(docker);
     let tx = tx.clone();
     rt.spawn(async move {
@@ -6988,11 +8802,7 @@ fn spawn_info(
     });
 }
 
-fn spawn_df(
-    rt: &tokio::runtime::Handle,
-    docker: &Arc<Docker>,
-    tx: &mpsc::UnboundedSender<Msg>,
-) {
+fn spawn_df(rt: &tokio::runtime::Handle, docker: &Arc<Docker>, tx: &mpsc::UnboundedSender<Msg>) {
     let docker = Arc::clone(docker);
     let tx = tx.clone();
     rt.spawn(async move {
@@ -7099,19 +8909,20 @@ fn spawn_stats(
         let mut lines = NdJson::new(stream);
         loop {
             match lines.next_line().await {
-                Ok(Some(line)) => {
-                    match serde_json::from_str::<StatsSample>(&line) {
-                        Ok(s) => {
-                            if tx.send(Msg::Stats(id.clone(), Box::new(s))).is_err() {
-                                return;
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("stats decode error: {e} in {:?}", &line[..line.len().min(160)]);
-                            continue;
+                Ok(Some(line)) => match serde_json::from_str::<StatsSample>(&line) {
+                    Ok(s) => {
+                        if tx.send(Msg::Stats(id.clone(), Box::new(s))).is_err() {
+                            return;
                         }
                     }
-                }
+                    Err(e) => {
+                        eprintln!(
+                            "stats decode error: {e} in {:?}",
+                            &line[..line.len().min(160)]
+                        );
+                        continue;
+                    }
+                },
                 Ok(None) => return,
                 Err(e) => {
                     eprintln!("stats stream read error: {e}");
@@ -7167,7 +8978,8 @@ fn spawn_all_logs(
             let mut dec = docker::LogStreamDecoder::new();
             let collected = dec.push(&payload);
             let label = id[..12.min(id.len())].to_string();
-            if !collected.is_empty() && tx.send(Msg::AllLogs(tag(collected, &Some(label)))).is_err() {
+            if !collected.is_empty() && tx.send(Msg::AllLogs(tag(collected, &Some(label)))).is_err()
+            {
                 return;
             }
         }
@@ -7201,7 +9013,9 @@ impl NdJson {
         use tokio::io::AsyncReadExt;
         loop {
             if let Some(pos) = find(&self.buf, b"\n") {
-                let line = String::from_utf8_lossy(&self.buf[..pos]).trim_end().to_string();
+                let line = String::from_utf8_lossy(&self.buf[..pos])
+                    .trim_end()
+                    .to_string();
                 self.buf.drain(..pos + 1);
                 if !line.is_empty() {
                     return Ok(Some(line));
@@ -7233,9 +9047,7 @@ impl NdJson {
                             return Err(format!("daemon returned {code}"));
                         }
                     }
-                    self.chunked = head
-                        .windows(7)
-                        .any(|w| w.eq_ignore_ascii_case(b"chunked"));
+                    self.chunked = head.windows(7).any(|w| w.eq_ignore_ascii_case(b"chunked"));
                     self.buf.drain(..pos + 4);
                     self.head_done = true;
                 }
@@ -7473,17 +9285,19 @@ fn spawn_logs(
 
         let mut head: Vec<u8> = Vec::with_capacity(1024);
         let mut body_prefix: Vec<u8> = Vec::new();
-        let mut eof = false;
         'head: loop {
             let mut b = [0u8; 512];
             let n = match stream.read(&mut b).await {
                 Ok(0) => {
-                    eof = true;
                     break 'head;
                 }
                 Ok(n) => n,
                 Err(e) => {
-                    let _ = tx.send(Msg::LogDone(gen, id.clone(), Err(err_str(DockerError::Io(e.to_string())))));
+                    let _ = tx.send(Msg::LogDone(
+                        gen,
+                        id.clone(),
+                        Err(err_str(DockerError::Io(e.to_string()))),
+                    ));
                     return;
                 }
             };
@@ -7498,12 +9312,20 @@ fn spawn_logs(
             }
         }
         if head.is_empty() || !head.starts_with(b"HTTP/") {
-            let _ = tx.send(Msg::LogDone(gen, id.clone(), Err("unexpected response from daemon".into())));
+            let _ = tx.send(Msg::LogDone(
+                gen,
+                id.clone(),
+                Err("unexpected response from daemon".into()),
+            ));
             return;
         }
         if let Some(code) = head.get(9..12).and_then(|c| std::str::from_utf8(c).ok()) {
             if !code.starts_with('2') {
-                let _ = tx.send(Msg::LogDone(gen, id.clone(), Err(format!("daemon returned {code}"))));
+                let _ = tx.send(Msg::LogDone(
+                    gen,
+                    id.clone(),
+                    Err(format!("daemon returned {code}")),
+                ));
                 return;
             }
         }
@@ -7512,19 +9334,30 @@ fn spawn_logs(
         let mut fr = Chunked::default();
         let mut chunk = [0u8; 16 * 1024];
         if !body_prefix.is_empty() {
-            let payload = if chunked { fr.feed(&body_prefix) } else { body_prefix.clone() };
+            let payload = if chunked {
+                fr.feed(&body_prefix)
+            } else {
+                body_prefix.clone()
+            };
             let lines = dec.push(&payload);
             if !lines.is_empty() && tx.send(Msg::LogLines(gen, tag(lines, &label))).is_err() {
                 return;
             }
         }
-        while !eof {
+        // head already hit EOF (empty body); otherwise read until the stream
+        // closes or the chunked framing completes
+        loop {
             match stream.read(&mut chunk).await {
                 Ok(0) => break,
                 Ok(n) => {
-                    let payload = if chunked { fr.feed(&chunk[..n]) } else { chunk[..n].to_vec() };
+                    let payload = if chunked {
+                        fr.feed(&chunk[..n])
+                    } else {
+                        chunk[..n].to_vec()
+                    };
                     let lines = dec.push(&payload);
-                    if !lines.is_empty() && tx.send(Msg::LogLines(gen, tag(lines, &label))).is_err() {
+                    if !lines.is_empty() && tx.send(Msg::LogLines(gen, tag(lines, &label))).is_err()
+                    {
                         return;
                     }
                     if chunked && fr.done {
@@ -7532,7 +9365,11 @@ fn spawn_logs(
                     }
                 }
                 Err(e) => {
-                    let _ = tx.send(Msg::LogDone(gen, id.clone(), Err(err_str(DockerError::Io(e.to_string())))));
+                    let _ = tx.send(Msg::LogDone(
+                        gen,
+                        id.clone(),
+                        Err(err_str(DockerError::Io(e.to_string()))),
+                    ));
                     return;
                 }
             }
@@ -7565,7 +9402,11 @@ mod strata_tab_tests {
         let ctx = egui::Context::default();
         apply_theme(&ctx);
         let (tx, rx) = mpsc::unbounded_channel();
-        let rt = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap(),
+        );
         let mut app = SysKamlingApp::new_offscreen(&ctx, tx, rx, rt);
         app.gui.tab = Tab::Strata;
         let mut m = strata::Metrics::default();
@@ -7584,7 +9425,10 @@ mod strata_tab_tests {
             service: "strata".into(),
         });
         let mut raw = egui::RawInput::default();
-        raw.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1200.0, 800.0)));
+        raw.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(1200.0, 800.0),
+        ));
         let mut texts = Vec::new();
         for _ in 0..3 {
             ctx.begin_pass(raw.clone());
@@ -7601,9 +9445,15 @@ mod strata_tab_tests {
             }
         }
         let all = texts.join("\n");
-        assert!(all.contains("probe-model"), "model name never painted — page is blank");
+        assert!(
+            all.contains("probe-model"),
+            "model name never painted — page is blank"
+        );
         assert!(all.contains("123"), "throughput stat never painted");
-        assert!(!all.contains("Collecting"), "stats present but page still says Collecting");
+        assert!(
+            !all.contains("Collecting"),
+            "stats present but page still says Collecting"
+        );
     }
 
     /// Without metrics yet the page must still paint *something* (status
@@ -7613,12 +9463,19 @@ mod strata_tab_tests {
         let ctx = egui::Context::default();
         apply_theme(&ctx);
         let (tx, rx) = mpsc::unbounded_channel();
-        let rt = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap(),
+        );
         let mut app = SysKamlingApp::new_offscreen(&ctx, tx, rx, rt);
         app.gui.tab = Tab::Strata;
         app.gui.strata_cfg.api_key = "k".into();
         let mut raw = egui::RawInput::default();
-        raw.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1200.0, 800.0)));
+        raw.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(1200.0, 800.0),
+        ));
         let mut painted = 0usize;
         for _ in 0..3 {
             ctx.begin_pass(raw.clone());
@@ -7634,7 +9491,10 @@ mod strata_tab_tests {
                 .filter(|s| matches!(s.shape, egui::Shape::Text(_)))
                 .count();
         }
-        assert!(painted > 8, "strata waiting state painted only {painted} text shapes — page is blank");
+        assert!(
+            painted > 8,
+            "strata waiting state painted only {painted} text shapes — page is blank"
+        );
     }
 
     /// The Settings tab must paint its General + Strata cards.
@@ -7643,11 +9503,18 @@ mod strata_tab_tests {
         let ctx = egui::Context::default();
         apply_theme(&ctx);
         let (tx, rx) = mpsc::unbounded_channel();
-        let rt = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap(),
+        );
         let mut app = SysKamlingApp::new_offscreen(&ctx, tx, rx, rt);
         app.gui.tab = Tab::Settings;
         let mut raw = egui::RawInput::default();
-        raw.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1200.0, 800.0)));
+        raw.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(1200.0, 800.0),
+        ));
         let mut painted = 0usize;
         for _ in 0..3 {
             ctx.begin_pass(raw.clone());
@@ -7663,7 +9530,10 @@ mod strata_tab_tests {
                 .filter(|s| matches!(s.shape, egui::Shape::Text(_)))
                 .count();
         }
-        assert!(painted > 15, "settings tab painted only {painted} text shapes — cards missing");
+        assert!(
+            painted > 15,
+            "settings tab painted only {painted} text shapes — cards missing"
+        );
     }
 }
 
@@ -7784,8 +9654,10 @@ static NAV_ROW_RECTS: std::sync::LazyLock<std::sync::Mutex<Vec<(Tab, Rect)>>> =
 #[cfg(test)]
 fn nav_row_rect(ctx: &egui::Context, app: &mut SysKamlingApp, tab: Tab) -> Rect {
     let mut raw = egui::RawInput::default();
-    raw.screen_rect =
-        Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1280.0, 860.0)));
+    raw.screen_rect = Some(egui::Rect::from_min_size(
+        egui::Pos2::ZERO,
+        egui::Vec2::new(1280.0, 860.0),
+    ));
     ctx.begin_pass(raw);
     app.nav_rail(ctx);
     let _ = ctx.end_pass();
@@ -7828,7 +9700,11 @@ mod processes_tab_tests {
     fn procs_probe() -> (egui::Context, SysKamlingApp) {
         let ctx = egui::Context::default();
         let (tx, rx) = mpsc::unbounded_channel();
-        let rt = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap(),
+        );
         let mut app = SysKamlingApp::new_offscreen(&ctx, tx, rx, rt);
         app.gui.tab = Tab::Processes;
         app.gui.procs = vec![
@@ -7842,8 +9718,10 @@ mod processes_tab_tests {
     /// Click point for a header cell: its exact centre, from the probe sink.
     fn header_point(ctx: &egui::Context, app: &mut SysKamlingApp, col: SortCol) -> egui::Pos2 {
         let mut raw = egui::RawInput::default();
-        raw.screen_rect =
-            Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1200.0, 800.0)));
+        raw.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(1200.0, 800.0),
+        ));
         ctx.begin_pass(raw);
         egui::CentralPanel::default().show(ctx, |ui| {
             if app.gui.tab == Tab::Processes {
@@ -7861,8 +9739,10 @@ mod processes_tab_tests {
 
     fn click(ctx: &egui::Context, app: &mut SysKamlingApp, at: egui::Pos2) {
         let mut raw = egui::RawInput::default();
-        raw.screen_rect =
-            Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1200.0, 800.0)));
+        raw.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(1200.0, 800.0),
+        ));
         raw.events = vec![
             egui::Event::PointerButton {
                 pos: at,
@@ -7888,8 +9768,10 @@ mod processes_tab_tests {
 
     fn painted(ctx: &egui::Context, app: &mut SysKamlingApp) -> Vec<String> {
         let mut raw = egui::RawInput::default();
-        raw.screen_rect =
-            Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1200.0, 800.0)));
+        raw.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(1200.0, 800.0),
+        ));
         ctx.begin_pass(raw);
         egui::CentralPanel::default().show(ctx, |ui| {
             if app.gui.tab == Tab::Processes {
@@ -7912,8 +9794,10 @@ mod processes_tab_tests {
     /// sees on the page — not just the table in isolation.
     fn tab_pass(ctx: &egui::Context, app: &mut SysKamlingApp) -> Vec<(String, f32)> {
         let mut raw = egui::RawInput::default();
-        raw.screen_rect =
-            Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1280.0, 860.0)));
+        raw.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(1280.0, 860.0),
+        ));
         ctx.begin_pass(raw);
         egui::CentralPanel::default().show(ctx, |ui| {
             app.proc_search(ui);
@@ -7944,7 +9828,10 @@ mod processes_tab_tests {
         // live /proc rows, like the real app on the user's machine
         app.gui.procs = ProcScanner::new().scan();
         let mut raw = egui::RawInput::default();
-        raw.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(w, h)));
+        raw.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(w, h),
+        ));
         ctx.begin_pass(raw);
         app.nav_rail(ctx);
         if matches!(
@@ -7969,7 +9856,7 @@ mod processes_tab_tests {
     /// flips to ascending — the Task-Manager contract.
     #[test]
     fn clicking_the_cpu_header_sorts_then_flips() {
-    let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (ctx, mut app) = procs_probe();
         let cpu = header_point(&ctx, &mut app, SortCol::Cpu);
         click(&ctx, &mut app, cpu);
@@ -7988,7 +9875,7 @@ mod processes_tab_tests {
     /// Search filters by name, full command line, or exact pid.
     #[test]
     fn search_matches_name_cmdline_and_pid() {
-    let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (ctx, mut app) = procs_probe();
         // rows paint the process name, never the full cmdline (that lives
         // in the detail panel), so "busy-loop" must match via the name
@@ -8009,7 +9896,7 @@ mod processes_tab_tests {
 
     #[test]
     fn clicking_a_row_selects_it_and_detail_shows_cmdline() {
-    let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (ctx, mut app) = procs_probe();
         // rows are 30 px tall; the first one sits right below the header band
         let name = header_point(&ctx, &mut app, SortCol::Name);
@@ -8018,8 +9905,10 @@ mod processes_tab_tests {
         assert_eq!(app.gui.selected_proc, Some(900));
         // detail panel renders the full command line of the selection
         let mut raw = egui::RawInput::default();
-        raw.screen_rect =
-            Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(420.0, 800.0)));
+        raw.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(420.0, 800.0),
+        ));
         ctx.begin_pass(raw);
         egui::CentralPanel::default().show(&ctx, |ui| {
             app.proc_detail(ui);
@@ -8044,7 +9933,7 @@ mod processes_tab_tests {
     /// not a second dashboard). The search box actually filters the rows.
     #[test]
     fn search_bar_sits_at_the_top_and_filters_the_table() {
-    let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (ctx, mut app) = procs_probe();
         let texts = tab_pass(&ctx, &mut app);
         let y = |needle: &str| {
@@ -8056,7 +9945,10 @@ mod processes_tab_tests {
         };
         // search above the table header (compare against the left-aligned
         // "Name" header; "Memory" sits at the table's right edge)
-        assert!(y("Search name") < y("Name"), "search bar sits above the table");
+        assert!(
+            y("Search name") < y("Name"),
+            "search bar sits above the table"
+        );
         // no KPI/metric strip: the machine vitals labels never appear here
         for banned in ["Top CPU", "Top Memory", "load ", "of 91.9 GB"] {
             assert!(
@@ -8069,7 +9961,9 @@ mod processes_tab_tests {
         let texts = tab_pass(&ctx, &mut app);
         assert!(texts.iter().any(|(t, _)| t.trim() == "busy"));
         assert!(!texts.iter().any(|(t, _)| t.trim() == "systemd"));
-        assert!(texts.iter().any(|(t, _)| t.contains("of 3 processes match")));
+        assert!(texts
+            .iter()
+            .any(|(t, _)| t.contains("of 3 processes match")));
     }
 
     /// Every row carries a per-family icon tile: a browser, a terminal and
@@ -8077,9 +9971,15 @@ mod processes_tab_tests {
     /// resolved username (root highlighted).
     #[test]
     fn rows_carry_family_icons_and_user_names() {
-    let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (ctx, mut app) = procs_probe();
-        app.gui.procs.push(row(4242, "firefox", "/usr/lib/firefox/firefox", 3.0, 900 << 20));
+        app.gui.procs.push(row(
+            4242,
+            "firefox",
+            "/usr/lib/firefox/firefox",
+            3.0,
+            900 << 20,
+        ));
         app.gui.procs.push(row(77, "bash", "bash", 0.0, 8 << 20));
         let mut p = row(2, "kthreadd", "", 0.0, 0);
         p.uid = 0;
@@ -8087,13 +9987,22 @@ mod processes_tab_tests {
         app.gui.procs.push(p);
         let texts = tab_pass(&ctx, &mut app);
         for name in ["firefox", "bash", "kthreadd"] {
-            assert!(texts.iter().any(|(t, _)| t.trim() == name), "{name} row painted");
+            assert!(
+                texts.iter().any(|(t, _)| t.trim() == name),
+                "{name} row painted"
+            );
         }
-        assert!(texts.iter().any(|(t, _)| t.trim() == "rifan"), "user column");
+        assert!(
+            texts.iter().any(|(t, _)| t.trim() == "rifan"),
+            "user column"
+        );
         assert!(texts.iter().any(|(t, _)| t.trim() == "root"), "root user");
         // icon tiles: 24px rounded rects at the left of each row, one per row
         let raw = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1280.0, 860.0))),
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::Vec2::new(1280.0, 860.0),
+            )),
             ..Default::default()
         };
         ctx.begin_pass(raw);
@@ -8128,7 +10037,10 @@ mod processes_tab_tests {
         let tex = ctx.load_texture("appicon:test", img, egui::TextureOptions::LINEAR);
         app.gui.icons.insert("firefox", tex);
         let raw = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1280.0, 860.0))),
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::Vec2::new(1280.0, 860.0),
+            )),
             ..Default::default()
         };
         ctx.begin_pass(raw);
@@ -8143,7 +10055,10 @@ mod processes_tab_tests {
             .iter()
             .filter(|s| matches!(s.shape, egui::Shape::Mesh(_)))
             .count();
-        assert!(meshes >= 1, "the firefox row must paint a real icon texture, got {meshes} mesh shapes");
+        assert!(
+            meshes >= 1,
+            "the firefox row must paint a real icon texture, got {meshes} mesh shapes"
+        );
     }
 
     /// The Processes table is Task-Manager style: one row per application
@@ -8156,7 +10071,13 @@ mod processes_tab_tests {
         let (ctx, mut app) = procs_probe();
         let mut a = row(100, "chrome", "/opt/google/chrome/chrome", 20.0, 300 << 20);
         a.app_icon = "google-chrome".into();
-        let mut b = row(101, "chrome", "/opt/google/chrome/chrome --type=zygote", 5.0, 50 << 20);
+        let mut b = row(
+            101,
+            "chrome",
+            "/opt/google/chrome/chrome --type=zygote",
+            5.0,
+            50 << 20,
+        );
         b.app_icon = "google-chrome".into();
         app.gui.procs.push(a);
         app.gui.procs.push(b);
@@ -8164,7 +10085,8 @@ mod processes_tab_tests {
         let texts = tab_pass(&ctx, &mut app);
         let all: Vec<String> = texts.iter().map(|(t, _)| t.trim().to_string()).collect();
         assert!(
-            all.iter().any(|t| t.starts_with("chrome") && t.contains("2 processes")),
+            all.iter()
+                .any(|t| t.starts_with("chrome") && t.contains("2 processes")),
             "collapsed app row missing; painted: {all:?}"
         );
         assert!(
@@ -8222,7 +10144,13 @@ mod processes_tab_tests {
         let (ctx, mut app) = procs_probe();
         let mut a = row(100, "chrome", "/opt/google/chrome/chrome", 20.0, 5 << 30);
         a.app_icon = "google-chrome".into();
-        let mut b = row(101, "chrome_crashpad", "/opt/google/chrome/chrome", 1.0, 1 << 30);
+        let mut b = row(
+            101,
+            "chrome_crashpad",
+            "/opt/google/chrome/chrome",
+            1.0,
+            1 << 30,
+        );
         b.app_icon = "google-chrome".into();
         app.gui.procs = vec![
             a,
@@ -8269,7 +10197,7 @@ mod processes_tab_tests {
     /// detail placeholder.
     #[test]
     fn processes_page_shows_rows_at_the_minimum_window_size() {
-    let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (ctx, mut app) = procs_probe();
         // the window manager pins this app at 960x400; that's the worst case
         let texts = page_pass(&ctx, &mut app, 960.0, 400.0);
@@ -8284,7 +10212,10 @@ mod processes_tab_tests {
                 .iter()
                 .find(|(t, _)| t.trim().starts_with(needle))
                 .unwrap_or_else(|| {
-                    panic!("header {needle:?} missing; painted: {:?}", texts.iter().map(|(t, _)| t).take(40).collect::<Vec<_>>())
+                    panic!(
+                        "header {needle:?} missing; painted: {:?}",
+                        texts.iter().map(|(t, _)| t).take(40).collect::<Vec<_>>()
+                    )
                 })
                 .1
         };
@@ -8301,7 +10232,10 @@ mod processes_tab_tests {
                         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
             })
             .count();
-        assert!(painted_names >= 5, "several process rows visible, got {painted_names}");
+        assert!(
+            painted_names >= 5,
+            "several process rows visible, got {painted_names}"
+        );
         // the search bar is on the page, above the table
         let y = |needle: &str| {
             texts
@@ -8349,17 +10283,24 @@ mod processes_tab_tests {
             })
             .await
         });
-        assert!(matches!(got, Ok(true)), "a scan must be scheduled while on the Dashboard tab");
+        assert!(
+            matches!(got, Ok(true)),
+            "a scan must be scheduled while on the Dashboard tab"
+        );
     }
 
     /// The dashboard carries a Processes card that names the hogs, and
     /// clicking it opens the Processes tab.
     #[test]
     fn dashboard_processes_card_shows_hogs_and_opens_the_tab() {
-    let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let ctx = egui::Context::default();
         let (tx, rx) = mpsc::unbounded_channel();
-        let rt = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap(),
+        );
         let mut app = SysKamlingApp::new_offscreen(&ctx, tx, rx, rt);
         app.gui.tab = Tab::Dashboard;
         app.gui.procs = vec![
@@ -8386,14 +10327,14 @@ mod processes_tab_tests {
             .into_iter()
             .find(|(_, _, title)| title == "Processes")
             .expect("dashboard has no Processes card");
-        offscreen_click(
-            &ctx,
-            &mut app,
-            (1280.0, 860.0),
-            card.1.center(),
-            |a, ui| a.dashboard_view(ui),
+        offscreen_click(&ctx, &mut app, (1280.0, 860.0), card.1.center(), |a, ui| {
+            a.dashboard_view(ui)
+        });
+        assert_eq!(
+            app.gui.tab,
+            Tab::Processes,
+            "card click must open Processes"
         );
-        assert_eq!(app.gui.tab, Tab::Processes, "card click must open Processes");
     }
 
     /// The dashboard also carries a Hardware card with the live host
@@ -8401,10 +10342,14 @@ mod processes_tab_tests {
     /// it opens the Hardware tab.
     #[test]
     fn dashboard_hardware_card_shows_vitals_and_opens_the_tab() {
-    let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let ctx = egui::Context::default();
         let (tx, rx) = mpsc::unbounded_channel();
-        let rt = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap(),
+        );
         let mut app = SysKamlingApp::new_offscreen(&ctx, tx, rx, rt);
         app.gui.tab = Tab::Dashboard;
         // no sample yet: the card must state the placeholder, not crash
@@ -8419,15 +10364,17 @@ mod processes_tab_tests {
         // a real sample now: the card paints live cpu/load values
         app.sample_hardware();
         app.sample_hardware(); // two samples so rates have a delta
-        // tall viewport: the overview cards sit at the bottom of the
-        // dashboard scroll area and must be visible to be painted
+                               // tall viewport: the overview cards sit at the bottom of the
+                               // dashboard scroll area and must be visible to be painted
         let texts = offscreen_pass(&ctx, &mut app, (1280.0, 1600.0), |a, ui| {
             a.dashboard_view(ui);
         });
         let painted: Vec<&str> = texts.iter().map(|(t, _)| t.as_str()).collect();
         // the overview card paints live load/uptime and ↓/↑ rate rows
         assert!(
-            painted.iter().any(|t| t.contains("load ") && t.contains("up ")),
+            painted
+                .iter()
+                .any(|t| t.contains("load ") && t.contains("up ")),
             "hardware card must show load and uptime, got {painted:?}"
         );
         assert!(
@@ -8457,10 +10404,14 @@ mod processes_tab_tests {
     /// bookkeeping must not let a later card steal an earlier card's click.
     #[test]
     fn dashboard_processes_card_click_opens_processes() {
-    let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let ctx = egui::Context::default();
         let (tx, rx) = mpsc::unbounded_channel();
-        let rt = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap(),
+        );
         let mut app = SysKamlingApp::new_offscreen(&ctx, tx, rx, rt);
         app.gui.tab = Tab::Dashboard;
         app.gui.procs = vec![row(1, "systemd", "/sbin/init", 0.1, 12 << 20)];
@@ -8478,16 +10429,24 @@ mod processes_tab_tests {
             card.1.center(),
             |a, ui| a.dashboard_view(ui),
         );
-        assert_eq!(app.gui.tab, Tab::Processes, "Processes card click must open Processes, not the card painted after it");
+        assert_eq!(
+            app.gui.tab,
+            Tab::Processes,
+            "Processes card click must open Processes, not the card painted after it"
+        );
     }
     /// The nav rail lists Processes between Hardware and Ports, and clicking
     /// its entry opens the tab.
     #[test]
     fn nav_lists_processes_between_hardware_and_ports() {
-    let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let ctx = egui::Context::default();
         let (tx, rx) = mpsc::unbounded_channel();
-        let rt = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap(),
+        );
         let mut app = SysKamlingApp::new_offscreen(&ctx, tx, rx, rt);
         // rail order is asserted through the probe sink: nav_row_rect finds
         // each entry by its position in the rail, so a wrong order would
@@ -8495,7 +10454,10 @@ mod processes_tab_tests {
         let hw = nav_row_rect(&ctx, &mut app, Tab::Hardware);
         let procs = nav_row_rect(&ctx, &mut app, Tab::Processes);
         let ports = nav_row_rect(&ctx, &mut app, Tab::Ports);
-        assert!(hw.top() < procs.top() && procs.top() < ports.top(), "Processes must sit between Hardware and Ports in the rail");
+        assert!(
+            hw.top() < procs.top() && procs.top() < ports.top(),
+            "Processes must sit between Hardware and Ports in the rail"
+        );
         // click the rail: paint it once so its widget rects exist, then
         // press inside the rail (x = 110) at the probe's row height
         let click_at = egui::pos2(110.0, procs.center().y);
@@ -8525,7 +10487,11 @@ mod processes_tab_tests {
         ctx.begin_pass(raw);
         app.nav_rail(&ctx);
         let _ = ctx.end_pass();
-        assert_eq!(app.gui.tab, Tab::Processes, "rail click must open Processes");
+        assert_eq!(
+            app.gui.tab,
+            Tab::Processes,
+            "rail click must open Processes"
+        );
     }
 
     /// Regression for the reported "still not showing any icons": opening
@@ -8577,8 +10543,7 @@ mod processes_tab_tests {
             }
         });
         assert!(!rows.is_empty(), "the seeded scan produced no rows");
-        let named: Vec<&ProcInfo> =
-            rows.iter().filter(|r| !r.app_icon.is_empty()).collect();
+        let named: Vec<&ProcInfo> = rows.iter().filter(|r| !r.app_icon.is_empty()).collect();
         assert!(
             named.len() >= 3,
             "live scan named no desktop icons: {} rows",
@@ -8614,7 +10579,11 @@ mod processes_tab_tests {
             decoded_msgs,
             rows.len(),
             named.len(),
-            named.iter().take(8).map(|r| (&r.name, &r.app_icon)).collect::<Vec<_>>()
+            named
+                .iter()
+                .take(8)
+                .map(|r| (&r.name, &r.app_icon))
+                .collect::<Vec<_>>()
         );
         // keep only rows whose icon decoded, so every visible row must
         // paint a texture; then render the page and count the meshes
@@ -8625,7 +10594,11 @@ mod processes_tab_tests {
             .filter(|r| app.gui.icons.get(&r.app_icon).is_some())
             .cloned()
             .collect();
-        assert!(cached.len() >= 3, "expected 3+ cached icon holders, got {}", cached.len());
+        assert!(
+            cached.len() >= 3,
+            "expected 3+ cached icon holders, got {}",
+            cached.len()
+        );
         app.gui.procs = cached;
         let mut raw = egui::RawInput::default();
         raw.screen_rect = Some(egui::Rect::from_min_size(
@@ -8667,7 +10640,10 @@ mod processes_tab_tests {
                 .filter(|s| matches!(s.shape, egui::Shape::Mesh(_)))
                 .count()
         };
-        assert_eq!(meshes_before, 0, "no decoded icons yet: rail must stay drawn");
+        assert_eq!(
+            meshes_before, 0,
+            "no decoded icons yet: rail must stay drawn"
+        );
         // stand in for a finished decode
         let mut r = row(4343, "firefox", "/usr/lib/firefox/firefox", 3.0, 900 << 20);
         r.app_icon = "firefox".into();
@@ -8689,7 +10665,10 @@ mod processes_tab_tests {
                 .filter(|s| matches!(s.shape, egui::Shape::Mesh(_)))
                 .count()
         };
-        assert_eq!(meshes_after, 1, "the Processes rail row must paint the decoded icon");
+        assert_eq!(
+            meshes_after, 1,
+            "the Processes rail row must paint the decoded icon"
+        );
     }
 }
 
@@ -8700,7 +10679,11 @@ mod settings_tab_tests {
     fn settings_probe() -> (egui::Context, SysKamlingApp) {
         let ctx = egui::Context::default();
         let (tx, rx) = mpsc::unbounded_channel();
-        let rt = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap(),
+        );
         let mut app = SysKamlingApp::new_offscreen(&ctx, tx, rx, rt);
         app.gui.tab = Tab::Settings;
         (ctx, app)
@@ -8723,10 +10706,8 @@ mod settings_tab_tests {
         }
     }
     fn isolate_home() -> HomeGuard {
-        let dir = std::env::temp_dir().join(format!(
-            "syskamling-gui-settings-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("syskamling-gui-settings-{}", std::process::id()));
         std::fs::create_dir_all(dir.join(".config/syskamling")).unwrap();
         let lock = crate::strata::tests::HOME_TEST_LOCK
             .lock()
@@ -8740,10 +10721,16 @@ mod settings_tab_tests {
         }
     }
 
-    fn paint(ctx: &egui::Context, app: &mut SysKamlingApp, events: Vec<egui::Event>) -> Vec<String> {
+    fn paint(
+        ctx: &egui::Context,
+        app: &mut SysKamlingApp,
+        events: Vec<egui::Event>,
+    ) -> Vec<String> {
         let mut raw = egui::RawInput::default();
-        raw.screen_rect =
-            Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1200.0, 800.0)));
+        raw.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(1200.0, 800.0),
+        ));
         raw.events = events;
         let mut texts = Vec::new();
         for _ in 0..2 {
@@ -8767,14 +10754,16 @@ mod settings_tab_tests {
     /// live config — the whole point of moving the fields here.
     #[test]
     fn typing_endpoint_then_test_and_save_commits_it() {
-    let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let _home = isolate_home();
         let (ctx, mut app) = settings_probe();
         // Pass 1 paints the tab; the view records the endpoint field's rect
         // into the probe field (cfg(test) seam), so Pass 2 can click it.
         let mut raw = egui::RawInput::default();
-        raw.screen_rect =
-            Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1200.0, 800.0)));
+        raw.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(1200.0, 800.0),
+        ));
         ctx.begin_pass(raw.clone());
         egui::CentralPanel::default().show(&ctx, |ui| app.settings_view(ui));
         let _ = ctx.end_pass();
@@ -8830,7 +10819,10 @@ mod settings_tab_tests {
         let texts = paint(&ctx, &mut app, events);
         assert_eq!(app.gui.strata_cfg.endpoint, "http://10.0.0.9:9999");
         let all = texts.join("\n");
-        assert!(all.contains("Strata server"), "settings card title never painted");
+        assert!(
+            all.contains("Strata server"),
+            "settings card title never painted"
+        );
     }
 
     /// Layout sanity for the redesigned tab: the Test & save button must sit
@@ -8838,12 +10830,14 @@ mod settings_tab_tests {
     /// must fit a short window without sideways overflow.
     #[test]
     fn save_button_sits_close_under_the_fields() {
-    let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let _home = isolate_home();
         let (ctx, mut app) = settings_probe();
         let mut raw = egui::RawInput::default();
-        raw.screen_rect =
-            Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1100.0, 420.0)));
+        raw.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(1100.0, 420.0),
+        ));
         ctx.begin_pass(raw.clone());
         egui::CentralPanel::default().show(&ctx, |ui| app.settings_view(ui));
         let _ = ctx.end_pass();
@@ -8851,14 +10845,20 @@ mod settings_tab_tests {
         let save = app.gui.probe_save_rect.expect("save button");
         // second field sits ~10px below the first; the button ~12px below that
         let gap = save.top() - (key.bottom() + 48.0); // 48 ≈ key field height+spacing
-        assert!(gap.abs() < 20.0, "dead gap between fields and save: {gap:.1}px");
-        assert!(save.left() >= key.left() - 1.0, "save button not aligned to card");
+        assert!(
+            gap.abs() < 20.0,
+            "dead gap between fields and save: {gap:.1}px"
+        );
+        assert!(
+            save.left() >= key.left() - 1.0,
+            "save button not aligned to card"
+        );
     }
 
     /// Changing the refresh interval must retune the poller at once.
     #[test]
     fn refresh_interval_drag_takes_effect() {
-    let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let _home = isolate_home();
         let (ctx, mut app) = settings_probe();
         app.gui.refresh_edit = 7.5;
@@ -8878,7 +10878,11 @@ mod settings_tab_tests {
             },
         ];
         paint(&ctx, &mut app, events);
-        assert!((app.refresh - 7.5).abs() < 1e-6, "refresh not applied: {}", app.refresh);
+        assert!(
+            (app.refresh - 7.5).abs() < 1e-6,
+            "refresh not applied: {}",
+            app.refresh
+        );
     }
 }
 
@@ -8888,12 +10892,19 @@ mod hw_scroll_tests {
 
     #[test]
     fn hardware_page_body_scrolls_instead_of_clipping() {
-    let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let (viewport_h, content_h) = SysKamlingApp::probe_hardware_scroll(egui::Vec2::new(1100.0, 420.0));
+        let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (viewport_h, content_h) =
+            SysKamlingApp::probe_hardware_scroll(egui::Vec2::new(1100.0, 420.0));
         assert!(viewport_h > 0.0, "probe never ran");
-        assert!(content_h > viewport_h, "content {content_h} must exceed viewport {viewport_h} so the body scrolls");
+        assert!(
+            content_h > viewport_h,
+            "content {content_h} must exceed viewport {viewport_h} so the body scrolls"
+        );
         // the body must not be collapsed to nothing either
-        assert!(content_h > 1000.0, "content {content_h} looks collapsed/blank");
+        assert!(
+            content_h > 1000.0,
+            "content {content_h} looks collapsed/blank"
+        );
     }
 }
 
@@ -8929,7 +10940,11 @@ mod hw_titles_tests {
     fn hardware_page_names_devices_and_hides_internal_disks() {
         let ctx = egui::Context::default();
         let (tx, rx) = mpsc::unbounded_channel();
-        let rt = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap(),
+        );
         let mut app = SysKamlingApp::new_offscreen(&ctx, tx, rx, rt);
         app.gui.tab = Tab::Hardware;
         app.sample_hardware();
@@ -8937,25 +10952,40 @@ mod hw_titles_tests {
         let mut rich = app.gui.hw.clone().unwrap();
         rich.disks.push(crate::hw::DiskStat {
             name: "sda".into(),
-            reads: 1, writes: 1, total_read: 1, total_write: 1,
-            ms_weighted: 0, uptime: 3600.0, temp_c: None,
-            read_bps: 0.0, write_bps: 0.0,
+            reads: 1,
+            writes: 1,
+            total_read: 1,
+            total_write: 1,
+            ms_weighted: 0,
+            uptime: 3600.0,
+            temp_c: None,
+            read_bps: 0.0,
+            write_bps: 0.0,
         });
         app.gui.hw = Some(rich);
         let mut raw = egui::RawInput::default();
-        raw.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1200.0, 900.0)));
+        raw.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(1200.0, 900.0),
+        ));
         let mut all = String::new();
         for _ in 0..3 {
             ctx.begin_pass(raw.clone());
-            egui::CentralPanel::default().show(&ctx, |ui| match app.gui.tab {
-                Tab::Hardware => app.hardware_view(ui),
-                _ => {}
+            egui::CentralPanel::default().show(&ctx, |ui| {
+                if app.gui.tab == Tab::Hardware {
+                    app.hardware_view(ui)
+                }
             });
             let out = ctx.end_pass();
-            all = out.shapes.iter().filter_map(|cs| match &cs.shape {
-                egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
-                _ => None,
-            }).collect::<Vec<String>>().join("\n");
+            all = out
+                .shapes
+                .iter()
+                .filter_map(|cs| match &cs.shape {
+                    egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect::<Vec<String>>()
+                .join("\n");
         }
         // the CPU card must name the actual processor and show its temperature
         let cpu = crate::hw_inventory::INVENTORY.cpu.clone();
@@ -8968,48 +10998,77 @@ mod hw_titles_tests {
             .and_then(|h| h.cpu_temp_c.or(h.temp_c))
             .map(|t| format!("{} °C", temp_str(t)));
         if let Some(tl) = temp_line {
-            assert!(all.contains(&tl), "cpu card never shows the cpu temperature");
+            assert!(
+                all.contains(&tl),
+                "cpu card never shows the cpu temperature"
+            );
         }
         // retired sections must be gone
         assert!(!all.contains("Machine"), "machine section still present");
-        assert!(!all.contains("Per-core load"), "per-core section still present");
+        assert!(
+            !all.contains("Per-core load"),
+            "per-core section still present"
+        );
         // internal sda gets no storage card of its own
-        assert!(!all.split('\n').any(|t| t.trim() == "sda"), "internal sda still shown");
+        assert!(
+            !all.split('\n').any(|t| t.trim() == "sda"),
+            "internal sda still shown"
+        );
     }
 
     #[test]
     fn storage_cards_show_capacity_bars_and_swap_card_stands_alone() {
         let ctx = egui::Context::default();
         let (tx, rx) = mpsc::unbounded_channel();
-        let rt = Arc::new(tokio::runtime::Builder::new_current_thread().build().unwrap());
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap(),
+        );
         let mut app = SysKamlingApp::new_offscreen(&ctx, tx, rx, rt);
         app.gui.tab = Tab::Hardware;
         app.sample_hardware();
         app.sample_hardware();
         let mut raw = egui::RawInput::default();
-        raw.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(1200.0, 900.0)));
+        raw.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(1200.0, 900.0),
+        ));
         let mut all = String::new();
         for _ in 0..3 {
             ctx.begin_pass(raw.clone());
-            egui::CentralPanel::default().show(&ctx, |ui| match app.gui.tab {
-                Tab::Hardware => app.hardware_view(ui),
-                _ => {}
+            egui::CentralPanel::default().show(&ctx, |ui| {
+                if app.gui.tab == Tab::Hardware {
+                    app.hardware_view(ui)
+                }
             });
             let out = ctx.end_pass();
-            all = out.shapes.iter().filter_map(|cs| match &cs.shape {
-                egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
-                _ => None,
-            }).collect::<Vec<String>>().join("\n");
+            all = out
+                .shapes
+                .iter()
+                .filter_map(|cs| match &cs.shape {
+                    egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect::<Vec<String>>()
+                .join("\n");
         }
         // every inventoried disk card carries its mounted filesystems' usage
         let usage = crate::hw_inventory::disk_usage();
         assert!(!usage.is_empty(), "no inventoried filesystems on this box");
         for u in &usage {
-            assert!(all.contains(&u.mount), "storage card never shows {} usage", u.mount);
+            assert!(
+                all.contains(&u.mount),
+                "storage card never shows {} usage",
+                u.mount
+            );
         }
         // the retired bits stay retired
         assert!(!all.contains("Active"), "utilization bar still rendered");
-        assert!(!all.contains("Memory & swap"), "memory+swap combo card still present");
+        assert!(
+            !all.contains("Memory & swap"),
+            "memory+swap combo card still present"
+        );
         assert!(all.contains("Swap"), "swap card missing");
     }
 }
