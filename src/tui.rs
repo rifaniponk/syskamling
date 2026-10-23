@@ -2388,4 +2388,24 @@ mod procs_screen_tests {
         let busy = lines.iter().position(|l| l.contains("busy")).unwrap();
         assert!(sysd < busy, "cpu-asc: systemd first");
     }
+
+    /// Regression for the GUI report ("50 GB strata-host never moves to the
+    /// top when sorting desc"): the shared grouping must rank standalone
+    /// processes and app groups together, in the TUI too.
+    #[test]
+    fn memory_sort_puts_a_big_standalone_process_above_app_groups() {
+        let mut app = App::new();
+        app.tab = Tab::Processes;
+        let mut a = row(100, "chrome", "/opt/google/chrome/chrome", 20.0, 5 << 30);
+        a.app_icon = "google-chrome".into();
+        let mut b = row(101, "chrome_crashpad", "/opt/google/chrome/chrome", 1.0, 1 << 30);
+        b.app_icon = "google-chrome".into();
+        app.procs = vec![a, b, row(200, "strata-host", "strata --serve", 3.0, 50 << 30)];
+        app.sort_procs(SortCol::Mem); // already mem; flips desc -> asc
+        app.sort_procs(SortCol::Mem); // back to desc
+        let lines = screen(&mut app);
+        let host = lines.iter().position(|l| l.contains("strata-host")).expect("strata-host row");
+        let chrome = lines.iter().position(|l| l.contains("chrome [2 processes]")).expect("chrome group");
+        assert!(host < chrome, "memory-desc: 50 GiB standalone above the 6 GiB app group:\n{}", lines.join("\n"));
+    }
 }

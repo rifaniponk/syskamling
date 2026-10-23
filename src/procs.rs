@@ -577,8 +577,28 @@ pub struct AppGroup {
     pub members: Vec<ProcInfo>,
 }
 
+/// The display title for a set of rows: the most common member name; ties
+/// break toward the first-listed name (scan order), which is the leader-ish
+/// order /proc hands us. `max_by_key` alone would keep the LAST max, i.e.
+/// the last-listed name — wrong for a group like chrome + chrome_crashpad.
+fn title_of(members: &[ProcInfo]) -> String {
+    members
+        .iter()
+        .enumerate()
+        .max_by_key(|(i, r)| {
+            (
+                members.iter().filter(|m| m.name == r.name).count(),
+                std::cmp::Reverse(*i as u64),
+            )
+        })
+        .map(|(_, r)| r.name.clone())
+        .unwrap_or_default()
+}
+
 /// Group `rows` (already filtered) into app rows + standalone rows, ordered
-/// by `col`/`desc` using each row's aggregate values.
+/// by `col`/`desc` using each row's aggregate values. Apps and standalone
+/// rows interleave in ONE ranking, so a standalone process bigger than every
+/// app group still sorts to the very top.
 pub fn group_rows(rows: &[ProcInfo], col: SortCol, desc: bool) -> Vec<AppGroup> {
     let mut groups: Vec<(String, Vec<ProcInfo>)> = Vec::new();
     let mut rest: Vec<ProcInfo> = Vec::new();
@@ -595,41 +615,55 @@ pub fn group_rows(rows: &[ProcInfo], col: SortCol, desc: bool) -> Vec<AppGroup> 
     let stat = |ms: &[ProcInfo]| -> (f64, u64) {
         ms.iter().fold((0.0_f64, 0_u64), |a, r| (a.0 + r.cpu_pct, a.1 + r.rss_bytes as u64))
     };
-    let gkey = |g: &(String, Vec<ProcInfo>)| -> (f64, u64, String) {
+    // The sort key for one entry, as a total order (no float partial_cmp):
+    // CPU keys are milli-percent ints, memory/pid are plain ints, name is
+    // text. The smallest member pid breaks ties so the order is
+    // deterministic across refreshes.
+    let gkey = |g: &(String, Vec<ProcInfo>)| -> (i128, u64, String) {
         let (c, m) = stat(&g.1);
-        let title = g
-            .1
-            .iter()
-            .map(|r| r.name.to_lowercase())
-            .max_by_key(|nm| {
-                g.1.iter()
-                    .filter(|r| r.name.to_lowercase() == *nm)
-                    .count()
-            })
-            .unwrap_or_default();
+        let title = title_of(&g.1);
         match col {
-            SortCol::Name => (0.0, 0, title),
-            SortCol::Pid => (0.0, g.1.iter().map(|r| r.pid as u64).min().unwrap_or(0), String::new()),
-            SortCol::Cpu => (c, 0, String::new()),
-            SortCol::Mem => (0.0, m, String::new()),
+            SortCol::Name => (0, 0, title),
+            SortCol::Pid => (0, g.1.iter().map(|r| r.pid as u64).min().unwrap_or(0), String::new()),
+            SortCol::Cpu => ((c * 1000.0).round() as i128, g.1.iter().map(|r| r.pid as u64).min().unwrap_or(0), String::new()),
+            SortCol::Mem => (m as i128, g.1.iter().map(|r| r.pid as u64).min().unwrap_or(0), String::new()),
         }
     };
-    groups.sort_by(|a, b| gkey(a).partial_cmp(&gkey(b)).unwrap_or(std::cmp::Ordering::Equal));
+    let skey = |r: &ProcInfo| -> (i128, u64, String) {
+        match col {
+            SortCol::Name => (0, 0, r.name.to_lowercase()),
+            SortCol::Pid => (0, r.pid as u64, String::new()),
+            SortCol::Cpu => ((r.cpu_pct * 1000.0).round() as i128, r.pid as u64, String::new()),
+            SortCol::Mem => (r.rss_bytes as i128, r.pid as u64, String::new()),
+        }
+    };
+
+    // Build the app-group entries, then merge them with the standalone rows
+    // into a single list ranked by the same key — one table, one order, no
+    // "all apps first, then the rest" block.
+    let mut entries: Vec<(i128, u64, String, Vec<ProcInfo>, Option<String>)> = groups
+        .into_iter()
+        .map(|g| {
+            let (k0, k1, k2) = gkey(&g);
+            (k0, k1, k2, g.1, Some(g.0))
+        })
+        .collect();
+    entries.extend(rest.into_iter().map(|r| {
+        let (k0, k1, k2) = skey(&r);
+        (k0, k1, k2, vec![r], None)
+    }));
+    entries.sort_by(|a, b| (&a.0, a.1, a.2.as_str()).cmp(&(&b.0, b.1, b.2.as_str())));
     if desc {
-        groups.reverse();
+        entries.reverse();
     }
-    sort_rows(&mut rest, col, desc);
+
     let mut out: Vec<AppGroup> = Vec::new();
-    for (icon, members) in groups {
+    for (_, _, _, members, icon) in entries {
         let (c, m) = stat(&members);
         let n = members.len();
-        let title = members
-            .iter()
-            .map(|r| r.name.clone())
-            .max_by_key(|nm| members.iter().filter(|r| &r.name == nm).count())
-            .unwrap_or_else(|| icon.clone());
+        let title = title_of(&members);
         out.push(AppGroup {
-            icon,
+            icon: icon.unwrap_or_default(),
             kind: members[0].icon,
             title,
             sub: if n > 1 { format!("{n} processes") } else { String::new() },
@@ -646,19 +680,6 @@ pub fn group_rows(rows: &[ProcInfo], col: SortCol, desc: bool) -> Vec<AppGroup> 
                 format!("{n} pids")
             },
             members,
-        });
-    }
-    for r in rest {
-        out.push(AppGroup {
-            icon: String::new(),
-            kind: r.icon,
-            title: r.name.clone(),
-            sub: String::new(),
-            user: r.user.clone(),
-            cpu: r.cpu_pct,
-            mem: r.rss_bytes as u64,
-            pid_label: r.pid.to_string(),
-            members: vec![r],
         });
     }
     out
@@ -731,6 +752,48 @@ mod tests {
         let mut rows = vec![row(2, "b", 1.0, 100), row(3, "c", 2.0, 300), row(4, "d", 3.0, 300)];
         sort_rows(&mut rows, SortCol::Mem, true);
         assert_eq!(rows.iter().map(|r| r.pid).collect::<Vec<_>>(), vec![3, 4, 2]);
+    }
+
+    /// Regression for "strata-host took 50 GB but didn't move to the top on
+    /// a descending sort": a standalone process (no desktop icon, so no app
+    /// group) must interleave with the app groups in ONE ranking, not get
+    /// dumped in a separate block below every app.
+    #[test]
+    fn group_rows_interleaves_standalone_and_app_rows_in_one_ranking() {
+        let mut a = row_named(100, "chrome", "/opt/google/chrome/chrome", 20.0, 5 << 30);
+        a.app_icon = "google-chrome".into();
+        let mut b = row_named(101, "chrome_crashpad", "/opt/google/chrome/chrome", 1.0, 1 << 30);
+        b.app_icon = "google-chrome".into();
+        let big = row(200, "strata-host", 3.0, 50 << 30); // standalone, biggest
+        let mut small_app = row_named(300, "dolphin", "/usr/bin/dolphin", 1.0, 1 << 20);
+        small_app.app_icon = "org.kde.dolphin".into();
+        let rows = vec![a.clone(), b.clone(), big.clone(), small_app.clone()];
+
+        let g = group_rows(&rows, SortCol::Mem, true);
+        assert_eq!(
+            g.iter().map(|e| e.title.as_str()).collect::<Vec<_>>(),
+            vec!["strata-host", "chrome", "dolphin"],
+            "desc memory: standalone 50 GiB first, then app groups by summed rss"
+        );
+        let g = group_rows(&rows, SortCol::Mem, false);
+        assert_eq!(
+            g.iter().map(|e| e.title.as_str()).collect::<Vec<_>>(),
+            vec!["dolphin", "chrome", "strata-host"],
+            "asc memory: smallest first, strata-host last"
+        );
+        // same interleave on the CPU column
+        let chatty = row(400, "burner", 90.0, 10 << 20);
+        let rows = vec![a, b, big, small_app, chatty];
+        let g = group_rows(&rows, SortCol::Cpu, true);
+        assert_eq!(g[0].title, "burner", "standalone 90% tops the CPU sort");
+        assert_eq!(g[1].title, "chrome", "26% app group second");
+        // ties fall back to pid, so the order is deterministic across refreshes
+        let t1 = row(5, "twin", 7.0, 9 << 20);
+        let t2 = row(6, "twin2", 7.0, 9 << 20);
+        let g = group_rows(&[t1, t2], SortCol::Mem, true);
+        // tied on memory: the whole key (including pid) is reversed, so pid
+        // order flips with the direction — deterministic, never random
+        assert_eq!(g.iter().map(|e| e.pid_label.as_str()).collect::<Vec<_>>(), vec!["6", "5"]);
     }
 
     #[test]

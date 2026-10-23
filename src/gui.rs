@@ -8119,7 +8119,7 @@ mod processes_tab_tests {
                 ui.add_space(8.0);
                 app.proc_list(ui);
             });
-            let out = ctx.end_pass();
+            let _out = ctx.end_pass();
             // find the group row rect by probing painted text position: the
             // "chrome · 2 processes" galley sits in the name cell; click at
             // its left edge + a couple of px, mid-height of that row
@@ -8145,6 +8145,56 @@ mod processes_tab_tests {
             "member pids paint when expanded"
         );
         let _ = pt;
+    }
+
+    /// Regression for the reported "strata-host took 50 GB but never moves
+    /// to the top on a descending sort": a standalone process (no desktop
+    /// icon) must rank in the SAME list as the app groups, so the biggest
+    /// memory holder paints as the very first table row.
+    #[test]
+    fn big_standalone_process_sorts_above_app_groups_desc() {
+        let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (ctx, mut app) = procs_probe();
+        let mut a = row(100, "chrome", "/opt/google/chrome/chrome", 20.0, 5 << 30);
+        a.app_icon = "google-chrome".into();
+        let mut b = row(101, "chrome_crashpad", "/opt/google/chrome/chrome", 1.0, 1 << 30);
+        b.app_icon = "google-chrome".into();
+        app.gui.procs = vec![
+            a,
+            b,
+            row(1, "systemd", "/sbin/init", 0.1, 12 << 20),
+            row(900, "strata-host", "strata --serve", 3.0, 50 << 30),
+        ];
+        // default sort is memory desc
+        let texts = tab_pass(&ctx, &mut app);
+        let y = |needle: &str| {
+            texts
+                .iter()
+                .filter(|(t, _)| t.trim() == needle)
+                .map(|(_, y)| *y)
+                .fold(f32::MAX, f32::min)
+        };
+        assert!(
+            y("strata-host") < y("chrome  ·  2 processes"),
+            "desc memory: 50 GiB standalone must paint above the 6 GiB app group; painted: {:?}",
+            texts.iter().map(|(t, _)| t.trim()).collect::<Vec<_>>()
+        );
+        // flip to ascending: strata-host drops to the bottom of the table
+        let mem = header_point(&ctx, &mut app, SortCol::Mem);
+        click(&ctx, &mut app, mem);
+        assert!(!app.gui.proc_sort_desc, "second header click flips to asc");
+        let texts = tab_pass(&ctx, &mut app);
+        let y = |needle: &str| {
+            texts
+                .iter()
+                .filter(|(t, _)| t.trim() == needle)
+                .map(|(_, y)| *y)
+                .fold(0.0_f32, f32::max)
+        };
+        assert!(
+            y("chrome  ·  2 processes") < y("strata-host"),
+            "asc memory: strata-host sinks below the app groups"
+        );
     }
 
     /// Regression for the reported "I can't really see the process list,
