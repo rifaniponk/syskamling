@@ -59,6 +59,14 @@ enum StateFilter {
     Stopped,
 }
 
+/// Protocol filter for the Ports tab.
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum ProtoFilter {
+    All,
+    Tcp,
+    Udp,
+}
+
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Pending {
     Start,
@@ -226,6 +234,13 @@ struct Gui {
     port_filter: String,
     /// only sockets with a discoverable owning process
     ports_owned_only: bool,
+    ports_proto: ProtoFilter,
+    /// Some(4) / Some(6) to show one address family only
+    ports_family: Option<u8>,
+    /// hide established connections, keep listeners and bound udp
+    ports_listening_only: bool,
+    /// only sockets bound beyond loopback (reachable from the network)
+    ports_exposed_only: bool,
     // --- processes tab ---
     procs: Vec<ProcInfo>,
     proc_filter: String,
@@ -317,6 +332,10 @@ impl Gui {
             selected_port: None,
             port_filter: String::new(),
             ports_owned_only: false,
+            ports_proto: ProtoFilter::All,
+            ports_family: None,
+            ports_listening_only: false,
+            ports_exposed_only: false,
             procs: Vec::new(),
             proc_filter: String::new(),
             proc_sort: SortCol::Mem,
@@ -392,6 +411,20 @@ impl Gui {
             .enumerate()
             .filter(|(_, p)| {
                 if self.ports_owned_only && p.pid.is_none() {
+                    return false;
+                }
+                match self.ports_proto {
+                    ProtoFilter::Tcp if p.proto != "tcp" => return false,
+                    ProtoFilter::Udp if p.proto != "udp" => return false,
+                    _ => {}
+                }
+                if self.ports_family.is_some_and(|fam| fam != p.family) {
+                    return false;
+                }
+                if self.ports_listening_only && p.state == "ESTABLISHED" {
+                    return false;
+                }
+                if self.ports_exposed_only && p.is_loopback() {
                     return false;
                 }
                 f.is_empty()
@@ -1705,13 +1738,45 @@ impl SysKamlingApp {
                 }
                 if tab == Tab::Ports {
                     ui.add_space(4.0);
-                    let mut owned = self.gui.ports_owned_only;
-                    if ui
-                        .checkbox(&mut owned, RichText::new("Owned by a process only").size(12.5).color(MUTED))
-                        .changed()
-                    {
-                        self.gui.ports_owned_only = owned;
+                    let n_tcp = self.gui.ports.iter().filter(|p| p.proto == "tcp").count();
+                    let n_udp = self.gui.ports.len() - n_tcp;
+                    let opts = [
+                        (ProtoFilter::All, format!("All  {}", self.gui.ports.len())),
+                        (ProtoFilter::Tcp, format!("TCP  {n_tcp}")),
+                        (ProtoFilter::Udp, format!("UDP  {n_udp}")),
+                    ];
+                    if let Some(f) = segmented(ui, &opts, self.gui.ports_proto) {
+                        self.gui.ports_proto = f;
                     }
+                    ui.add_space(4.0);
+                    let g = &mut self.gui;
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        for fam in [4u8, 6] {
+                            let on = g.ports_family == Some(fam);
+                            if toggle_chip(ui, &format!("IPv{fam}"), on).clicked() {
+                                g.ports_family = if on { None } else { Some(fam) };
+                            }
+                        }
+                        if toggle_chip(ui, "Listening", g.ports_listening_only)
+                            .on_hover_text("Hide established connections")
+                            .clicked()
+                        {
+                            g.ports_listening_only = !g.ports_listening_only;
+                        }
+                        if toggle_chip(ui, "Exposed", g.ports_exposed_only)
+                            .on_hover_text("Only sockets bound beyond loopback (reachable from the network)")
+                            .clicked()
+                        {
+                            g.ports_exposed_only = !g.ports_exposed_only;
+                        }
+                        if toggle_chip(ui, "Has process", g.ports_owned_only)
+                            .on_hover_text("Only sockets with a discoverable owning process")
+                            .clicked()
+                        {
+                            g.ports_owned_only = !g.ports_owned_only;
+                        }
+                    });
                 }
                 ui.add_space(8.0);
                 match tab {
@@ -2010,7 +2075,7 @@ impl SysKamlingApp {
                     "Nothing is bound on this machine — or /proc/net is unreadable.",
                 );
             } else {
-                empty_state(ui, "No sockets match", "Try another search.");
+                empty_state(ui, "No sockets match", "Try another search or turn off some filters.");
             }
             return;
         }

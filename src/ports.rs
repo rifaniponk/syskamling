@@ -24,6 +24,13 @@ pub struct PortEntry {
     pub inode: u64,
 }
 
+impl PortEntry {
+    /// Bound to loopback only, so unreachable from other hosts.
+    pub fn is_loopback(&self) -> bool {
+        self.addr.starts_with("127.") || self.addr == "[::1]" || self.addr.starts_with("[::ffff:127.")
+    }
+}
+
 /// Parse one /proc/net/{tcp,tcp6,udp,udp6} table into (proto, family,
 /// addr, port, state, inode) rows. Hex fields, little-endian address words.
 fn parse_net_table(txt: &str, proto: &'static str, family: u8) -> Vec<PortEntry> {
@@ -192,6 +199,23 @@ mod tests {
         assert_eq!(rows[1].addr, "0.0.0.0");
         assert_eq!(rows[2].state, "ESTABLISHED");
         assert_eq!(rows[0].inode, 12345678);
+    }
+
+    #[test]
+    fn loopback_detection() {
+        let mut e = parse_net_table(TCP, "tcp", 4).remove(0);
+        for (addr, lo) in [
+            ("127.0.0.1", true),
+            ("127.0.0.53", true),
+            ("[::1]", true),
+            ("[::ffff:127.0.0.1]", true),
+            ("0.0.0.0", false),
+            ("[::]", false),
+            ("192.168.1.10", false),
+        ] {
+            e.addr = addr.into();
+            assert_eq!(e.is_loopback(), lo, "{addr}");
+        }
     }
 
     #[test]
