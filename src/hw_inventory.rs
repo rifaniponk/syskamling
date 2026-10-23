@@ -89,6 +89,11 @@ pub fn disk_usage() -> Vec<DiskUsage> {
 /// Whole-disk name for a partition: nvme0n1p2 -> nvme0n1, sda1 -> sda,
 /// mmcblk0p1 -> mmcblk0.
 pub fn whole_of(part: &str) -> Option<String> {
+    // cloud images mount root as the label "/dev/root", which names no
+    // disk in /sys/block
+    if part == "root" {
+        return None;
+    }
     if part.starts_with("nvme") || part.starts_with("mmcblk") {
         match part.rfind('p') {
             Some(i)
@@ -595,6 +600,8 @@ mod tests {
         assert_eq!(whole_of("mmcblk0p1").as_deref(), Some("mmcblk0"));
         // a whole disk mounted directly maps to itself
         assert_eq!(whole_of("nvme0n1").as_deref(), Some("nvme0n1"));
+        // the cloud-image root label names no disk in /sys/block
+        assert_eq!(whole_of("root"), None);
     }
 
     #[test]
