@@ -287,10 +287,7 @@ impl StatsSample {
         if self.cpu_stats.cpu_usage.total_usage > 0 {
             return self.cpu_stats.cpu_usage.total_usage;
         }
-        self.cpu
-            .as_ref()
-            .map(|c| c.usage.total)
-            .unwrap_or(0)
+        self.cpu.as_ref().map(|c| c.usage.total).unwrap_or(0)
     }
 
     fn system_cpu_usage(&self) -> Option<i64> {

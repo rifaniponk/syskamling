@@ -300,7 +300,11 @@ impl App {
             .filter(|a| {
                 a.agent.to_lowercase().contains(&f)
                     || a.vendor.to_lowercase().contains(&f)
-                    || a.cwd.as_deref().map(|c| c.to_lowercase()).unwrap_or_default().contains(&f)
+                    || a.cwd
+                        .as_deref()
+                        .map(|c| c.to_lowercase())
+                        .unwrap_or_default()
+                        .contains(&f)
             })
             .collect()
     }
@@ -327,7 +331,11 @@ impl App {
                 p.proto.contains(&f)
                     || p.addr.contains(&f)
                     || p.port.to_string().contains(&f)
-                    || p.proc_name.as_deref().map(|n| n.to_lowercase()).unwrap_or_default().contains(&f)
+                    || p.proc_name
+                        .as_deref()
+                        .map(|n| n.to_lowercase())
+                        .unwrap_or_default()
+                        .contains(&f)
                     || p.state.to_lowercase().contains(&f)
             })
             .collect()
@@ -355,7 +363,10 @@ impl App {
             self.proc_sort_desc = !self.proc_sort_desc;
         } else {
             self.proc_sort = col;
-            self.proc_sort_desc = !matches!(col, crate::procs::SortCol::Name | crate::procs::SortCol::Pid);
+            self.proc_sort_desc = !matches!(
+                col,
+                crate::procs::SortCol::Name | crate::procs::SortCol::Pid
+            );
         }
     }
 
@@ -519,7 +530,9 @@ async fn run_async(
         }
 
         // Listening-socket scan: /proc/net + fd walk, on the blocking pool.
-        if refresh > 0.0 && last_port_scan.elapsed() >= Duration::from_secs_f64(refresh.max(1.0) * 2.0) {
+        if refresh > 0.0
+            && last_port_scan.elapsed() >= Duration::from_secs_f64(refresh.max(1.0) * 2.0)
+        {
             last_port_scan = Instant::now();
             let tx3 = tx.clone();
             rt.spawn_blocking(move || {
@@ -683,7 +696,8 @@ fn apply_msg(app: &mut App, m: Msg) {
             let len = app.filtered_agents().len();
             if let Some(sel) = app.agents_state.selected() {
                 if sel >= len {
-                    app.agents_state.select(if len == 0 { None } else { Some(len - 1) });
+                    app.agents_state
+                        .select(if len == 0 { None } else { Some(len - 1) });
                 }
             } else if len > 0 && app.agents_state.selected().is_none() {
                 app.agents_state.select(Some(0));
@@ -694,7 +708,8 @@ fn apply_msg(app: &mut App, m: Msg) {
             let len = app.filtered_ports().len();
             if let Some(sel) = app.ports_state.selected() {
                 if sel >= len {
-                    app.ports_state.select(if len == 0 { None } else { Some(len - 1) });
+                    app.ports_state
+                        .select(if len == 0 { None } else { Some(len - 1) });
                 }
             } else if len > 0 && app.ports_state.selected().is_none() {
                 app.ports_state.select(Some(0));
@@ -702,15 +717,18 @@ fn apply_msg(app: &mut App, m: Msg) {
         }
         Msg::ProcsScanned(rows) => {
             app.procs = rows;
-            if app.proc_group.as_deref().is_some_and(|g| {
-                !app.procs.iter().any(|r| r.app_icon == g)
-            }) {
+            if app
+                .proc_group
+                .as_deref()
+                .is_some_and(|g| !app.procs.iter().any(|r| r.app_icon == g))
+            {
                 app.proc_group = None;
             }
             let len = app.proc_row_count();
             if let Some(sel) = app.procs_state.selected() {
                 if sel >= len {
-                    app.procs_state.select(if len == 0 { None } else { Some(len - 1) });
+                    app.procs_state
+                        .select(if len == 0 { None } else { Some(len - 1) });
                 }
             } else if len > 0 && app.procs_state.selected().is_none() {
                 app.procs_state.select(Some(0));
@@ -779,19 +797,18 @@ fn spawn_logs(
         // 1. Read the HTTP response head (stop at the first double CRLF).
         let mut head: Vec<u8> = Vec::with_capacity(1024);
         let mut body_prefix: Vec<u8> = Vec::new();
-        let mut eof = false;
         'head: loop {
             let mut b = [0u8; 512];
             let n = match stream.read(&mut b).await {
                 Ok(0) => {
-                    eof = true;
                     break 'head;
                 }
                 Ok(n) => n,
                 Err(e) => {
-                    let _ = tx.send(Msg::LogDone(gen, Err(err_str(DockerError::Io(
-                        e.to_string(),
-                    )))));
+                    let _ = tx.send(Msg::LogDone(
+                        gen,
+                        Err(err_str(DockerError::Io(e.to_string()))),
+                    ));
                     return;
                 }
             };
@@ -807,7 +824,10 @@ fn spawn_logs(
             }
         }
         if head.is_empty() || !head.starts_with(b"HTTP/") {
-            let _ = tx.send(Msg::LogDone(gen, Err("unexpected response from daemon".into())));
+            let _ = tx.send(Msg::LogDone(
+                gen,
+                Err("unexpected response from daemon".into()),
+            ));
             return;
         }
         if let Some(code) = head.get(9..12).and_then(|c| std::str::from_utf8(c).ok()) {
@@ -823,17 +843,27 @@ fn spawn_logs(
         let mut fr = Chunked::default();
         let mut chunk = [0u8; 16 * 1024];
         if !body_prefix.is_empty() {
-            let payload = if chunked { fr.feed(&body_prefix) } else { body_prefix.clone() };
+            let payload = if chunked {
+                fr.feed(&body_prefix)
+            } else {
+                body_prefix.clone()
+            };
             let lines = dec.push(&payload);
             if !lines.is_empty() && tx.send(Msg::LogLines(gen, lines)).is_err() {
                 return;
             }
         }
-        while !eof {
+        // head already hit EOF (empty body); otherwise read until the stream
+        // closes or the chunked framing completes
+        loop {
             match stream.read(&mut chunk).await {
                 Ok(0) => break,
                 Ok(n) => {
-                    let payload = if chunked { fr.feed(&chunk[..n]) } else { chunk[..n].to_vec() };
+                    let payload = if chunked {
+                        fr.feed(&chunk[..n])
+                    } else {
+                        chunk[..n].to_vec()
+                    };
                     let lines = dec.push(&payload);
                     if !lines.is_empty() && tx.send(Msg::LogLines(gen, lines)).is_err() {
                         return;
@@ -843,9 +873,10 @@ fn spawn_logs(
                     }
                 }
                 Err(e) => {
-                    let _ = tx.send(Msg::LogDone(gen, Err(err_str(DockerError::Io(
-                        e.to_string(),
-                    )))));
+                    let _ = tx.send(Msg::LogDone(
+                        gen,
+                        Err(err_str(DockerError::Io(e.to_string()))),
+                    ));
                     return;
                 }
             }
@@ -985,7 +1016,6 @@ fn handle_key(
         return;
     }
 
-    let rt = rt;
     match code {
         KeyCode::Char('q') | KeyCode::Esc => app.quit = true,
         KeyCode::Tab | KeyCode::Right => app.tab = app.tab.next(),
@@ -1000,10 +1030,18 @@ fn handle_key(
         KeyCode::Char('8') => app.tab = Tab::Strata,
         KeyCode::Char('9') => app.tab = Tab::Logs,
         KeyCode::Char('a') if app.tab == Tab::Strata => app.strata_show_all = !app.strata_show_all,
-        KeyCode::Char('c') if app.tab == Tab::Processes => app.sort_procs(crate::procs::SortCol::Cpu),
-        KeyCode::Char('m') if app.tab == Tab::Processes => app.sort_procs(crate::procs::SortCol::Mem),
-        KeyCode::Char('n') if app.tab == Tab::Processes => app.sort_procs(crate::procs::SortCol::Name),
-        KeyCode::Char('p') if app.tab == Tab::Processes => app.sort_procs(crate::procs::SortCol::Pid),
+        KeyCode::Char('c') if app.tab == Tab::Processes => {
+            app.sort_procs(crate::procs::SortCol::Cpu)
+        }
+        KeyCode::Char('m') if app.tab == Tab::Processes => {
+            app.sort_procs(crate::procs::SortCol::Mem)
+        }
+        KeyCode::Char('n') if app.tab == Tab::Processes => {
+            app.sort_procs(crate::procs::SortCol::Name)
+        }
+        KeyCode::Char('p') if app.tab == Tab::Processes => {
+            app.sort_procs(crate::procs::SortCol::Pid)
+        }
         KeyCode::Char('/') => {
             app.filtering = true;
             app.filter.clear();
@@ -1100,7 +1138,11 @@ fn handle_key(
         }
         KeyCode::Char('s') if app.tab == Tab::Containers => {
             if let Some(c) = app.selected_container().cloned() {
-                let act = if c.state == "running" { Pending::Stop } else { Pending::Start };
+                let act = if c.state == "running" {
+                    Pending::Stop
+                } else {
+                    Pending::Start
+                };
                 app.pending_action = Some((c.id.clone(), act));
                 spawn_action(rt, docker, tx, &c, act);
             }
@@ -1158,24 +1200,24 @@ fn ui(f: &mut Frame, app: &mut App) {
         Tab::Logs,
     ]
     .iter()
-        .flat_map(|t| {
-            let active = *t == app.tab;
-            vec![
-                Span::styled(
-                    t.label(),
-                    if active {
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::Gray)
-                    },
-                ),
-                Span::raw(" "),
-            ]
-        })
-        .collect();
+    .flat_map(|t| {
+        let active = *t == app.tab;
+        vec![
+            Span::styled(
+                t.label(),
+                if active {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Gray)
+                },
+            ),
+            Span::raw(" "),
+        ]
+    })
+    .collect();
     let tabs = Paragraph::new(Line::from(tabs)).block(Block::default().borders(Borders::ALL));
     f.render_widget(tabs, chunks[0]);
 
@@ -1291,10 +1333,7 @@ fn render_images(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
         .iter()
         .map(|i| {
             ListItem::new(Line::from(vec![
-                Span::styled(
-                    i.tag(),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
+                Span::styled(i.tag(), Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(format!(
                     "  {}  {}  {}",
                     i.short_id(),
@@ -1386,8 +1425,10 @@ fn render_agents(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
         ],
     )
     .header(
-        Row::new(vec!["AGENT", "PROJECT", "PID", "PROCS", "CPU%", "MEM", "UPTIME"])
-            .style(Style::default().fg(Color::Cyan)),
+        Row::new(vec![
+            "AGENT", "PROJECT", "PID", "PROCS", "CPU%", "MEM", "UPTIME",
+        ])
+        .style(Style::default().fg(Color::Cyan)),
     )
     .block(Block::default().borders(Borders::ALL).title(title))
     .column_spacing(2);
@@ -1447,32 +1488,41 @@ fn render_hardware(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     let inv = &hw_inventory::INVENTORY.cpu;
     let mut lines = vec![
         Line::from(vec![
-            Span::styled(inv, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::raw(format!(
-                "   {} cores   up {}",
-                s.ncpu,
-                ago(s.uptime as i64)
-            )),
+            Span::styled(
+                inv,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!("   {} cores   up {}", s.ncpu, ago(s.uptime as i64))),
         ]),
         Line::from(vec![
             Span::styled(
                 format!("CPU {:>5.1}%", s.cpu_pct),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!("   load {} {} {}", s.load1, s.load5, s.load15)),
             s.cpu_temp_c
                 .or(s.temp_c)
-                .map(|t| Span::raw(format!("   cpu {}°C", t as f64)))
+                .map(|t| Span::raw(format!("   cpu {}°C", { t })))
                 .unwrap_or_default(),
         ]),
         gauge("memory", mem_frac),
         gauge("swap", swap_frac),
         Line::from(vec![
-            Span::styled(format!("disk  {} ", human_rate(s.disk_read_bps)), Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("disk  {} ", human_rate(s.disk_read_bps)),
+                Style::default().fg(Color::Gray),
+            ),
             Span::raw(format!("read   {} write/s", human_rate(s.disk_write_bps))),
         ]),
         Line::from(vec![
-            Span::styled(format!("net   {} ", human_rate(s.net_rx_bps)), Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("net   {} ", human_rate(s.net_rx_bps)),
+                Style::default().fg(Color::Gray),
+            ),
             Span::raw(format!("rx     {} tx/s", human_rate(s.net_tx_bps))),
         ]),
         Line::from(vec![
@@ -1485,10 +1535,20 @@ fn render_hardware(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     ];
     // one line per GPU, one per disk
     for g in &app.gpus {
-        let busy = g.busy_pct.map(|b| format!("{b:.0}% busy")).unwrap_or_else(|| "busy n/a".into());
-        let temp = g.temp_c.map(|t| format!("{t:.0}°C")).unwrap_or_else(|| "n/a".into());
+        let busy = g
+            .busy_pct
+            .map(|b| format!("{b:.0}% busy"))
+            .unwrap_or_else(|| "busy n/a".into());
+        let temp = g
+            .temp_c
+            .map(|t| format!("{t:.0}°C"))
+            .unwrap_or_else(|| "n/a".into());
         let vram = if g.vram_total > 0 {
-            format!(" {} of {} VRAM", human_bytes(g.vram_used as i64), human_bytes(g.vram_total as i64))
+            format!(
+                " {} of {} VRAM",
+                human_bytes(g.vram_used as i64),
+                human_bytes(g.vram_total as i64)
+            )
         } else {
             String::new()
         };
@@ -1503,15 +1563,25 @@ fn render_hardware(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
         let Some(nm) = hw_inventory::INVENTORY.disk_name(&d.name) else {
             continue;
         };
-        let temp = d.temp_c.map(|t| format!("{t:.0}°C")).unwrap_or_else(|| "n/a".into());
+        let temp = d
+            .temp_c
+            .map(|t| format!("{t:.0}°C"))
+            .unwrap_or_else(|| "n/a".into());
         lines.push(Line::from(vec![
             Span::styled("ssd     ", Style::default().fg(Color::Gray)),
             Span::styled(
-                format!("{nm}  {} read  {} write  {temp}", human_rate(d.read_bps), human_rate(d.write_bps)),
+                format!(
+                    "{nm}  {} read  {} write  {temp}",
+                    human_rate(d.read_bps),
+                    human_rate(d.write_bps)
+                ),
                 Style::default().fg(Color::White),
             ),
         ]));
-        for u in hw_inventory::disk_usage().iter().filter(|u| u.kern == d.name) {
+        for u in hw_inventory::disk_usage()
+            .iter()
+            .filter(|u| u.kern == d.name)
+        {
             let frac = u.used as f64 / u.total.max(1) as f64;
             let filled = (frac * 20.0).round() as usize;
             let color = if frac > 0.9 {
@@ -1523,7 +1593,10 @@ fn render_hardware(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
             };
             lines.push(Line::from(vec![
                 Span::styled("         ", Style::default().fg(Color::Gray)),
-                Span::styled(format!("{:<10}", u.mount), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{:<10}", u.mount),
+                    Style::default().fg(Color::DarkGray),
+                ),
                 Span::styled(
                     "█".repeat(filled) + &"░".repeat(20 - filled),
                     Style::default().fg(color),
@@ -1536,8 +1609,8 @@ fn render_hardware(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
             ]));
         }
     }
-    let vitals = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(" Hardware "));
+    let vitals =
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Hardware "));
     f.render_widget(vitals, top[0]);
 
     // sensor readings instead of per-core bars: every hwmon temperature
@@ -1558,18 +1631,18 @@ fn render_hardware(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
         };
         rows.push(Line::from(vec![
             Span::styled(format!("{:<8}", x.group), Style::default().fg(Color::Gray)),
-            Span::styled(format!("{:<12}", x.label), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{:<12}", x.label),
+                Style::default().fg(Color::DarkGray),
+            ),
             Span::styled(format!("{:.0}°C", x.c), Style::default().fg(color)),
         ]));
     }
     if rows.is_empty() {
         rows.push(Line::from("no hwmon temperature sensors found"));
     }
-    let body = Paragraph::new(rows).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Sensors "),
-    );
+    let body =
+        Paragraph::new(rows).block(Block::default().borders(Borders::ALL).title(" Sensors "));
     f.render_widget(body, top[1]);
 }
 
@@ -1636,7 +1709,9 @@ fn render_ports(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
         Block::default()
             .borders(Borders::ALL)
             .title(title)
-            .title_bottom(Line::from(format!(" {header} ")).style(Style::default().fg(Color::Cyan))),
+            .title_bottom(
+                Line::from(format!(" {header} ")).style(Style::default().fg(Color::Cyan)),
+            ),
     )
     .column_spacing(2);
 
@@ -1666,7 +1741,8 @@ fn render_procs(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
         } else {
             Color::White
         };
-        let cpu_cell = Span::styled(format!("{cpu:>5.1}"), Style::default().fg(cpu_color)).to_string();
+        let cpu_cell =
+            Span::styled(format!("{cpu:>5.1}"), Style::default().fg(cpu_color)).to_string();
         let row_style = if i == sel {
             Style::default()
                 .bg(Color::DarkGray)
@@ -1686,7 +1762,11 @@ fn render_procs(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
                 } else {
                     g.members[0].state.to_string()
                 },
-                g.members.iter().map(|m| m.threads as u64).sum::<u64>().to_string(),
+                g.members
+                    .iter()
+                    .map(|m| m.threads as u64)
+                    .sum::<u64>()
+                    .to_string(),
                 if open {
                     g.members
                         .iter()
@@ -1739,14 +1819,7 @@ fn render_procs(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     };
 
     let header = Row::new(vec![
-        "APP",
-        "USER",
-        "PID",
-        "CPU",
-        "MEMORY",
-        "S",
-        "TH",
-        "CMDLINE",
+        "APP", "USER", "PID", "CPU", "MEMORY", "S", "TH", "CMDLINE",
     ])
     .style(Style::default().fg(Color::Cyan));
 
@@ -1764,11 +1837,7 @@ fn render_procs(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
         ],
     )
     .header(header)
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(title),
-    )
+    .block(Block::default().borders(Borders::ALL).title(title))
     .column_spacing(2);
 
     f.render_widget(table, area);
@@ -1812,7 +1881,10 @@ fn render_logs(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
 }
 
 fn render_strata(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
-    if app.strata_cfg.api_key.trim().is_empty() && app.strata_health.is_none() && app.strata_error.is_none() {
+    if app.strata_cfg.api_key.trim().is_empty()
+        && app.strata_health.is_none()
+        && app.strata_error.is_none()
+    {
         let msg = format!(
             "Strata is not configured yet.\n\n\
              Point SysKamling at a Strata inference server:\n\
@@ -1861,7 +1933,9 @@ fn render_strata(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
             format!(
                 "{} read · {} tok/s prefill",
                 fmt_tokens_tui_i(m.prompt_read.unwrap_or(0)),
-                strata::prefill_now(m, last).map(|v| format!("{v:.0}")).unwrap_or_else(|| "—".into())
+                strata::prefill_now(m, last)
+                    .map(|v| format!("{v:.0}"))
+                    .unwrap_or_else(|| "—".into())
             ),
         ),
         "generating" => (
@@ -1870,7 +1944,9 @@ fn render_strata(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
             format!(
                 "{} tokens · {} tok/s",
                 fmt_tokens_tui_i(m.generated.unwrap_or(0)),
-                m.tok_s.map(|v| format!("{v:.1}")).unwrap_or_else(|| "—".into())
+                m.tok_s
+                    .map(|v| format!("{v:.1}"))
+                    .unwrap_or_else(|| "—".into())
             ),
         ),
         _ => (
@@ -1880,7 +1956,9 @@ fn render_strata(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
                 format!(
                     "last: {} tokens{}",
                     fmt_tokens_tui_i(r.output_tokens.unwrap_or(0)),
-                    r.decode_tok_s.map(|d| format!(" at {d:.1} tok/s")).unwrap_or_default()
+                    r.decode_tok_s
+                        .map(|d| format!(" at {d:.1} tok/s"))
+                        .unwrap_or_default()
                 )
             })
             .unwrap_or_else(|| "waiting for a request".into()),
@@ -1888,9 +1966,21 @@ fn render_strata(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     };
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(vec![
-        Span::styled("● ", Style::default().fg(state_color).add_modifier(Modifier::BOLD)),
         Span::styled(
-            format!("{state}{}", if m.queued > 0 { format!(" · {} queued", m.queued) } else { String::new() }),
+            "● ",
+            Style::default()
+                .fg(state_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                "{state}{}",
+                if m.queued > 0 {
+                    format!(" · {} queued", m.queued)
+                } else {
+                    String::new()
+                }
+            ),
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!("  {detail}")),
@@ -1905,30 +1995,40 @@ fn render_strata(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
             Span::raw(sparkline(series, 12)),
         ]
     };
-    lines.push(Line::from({ let mut v = kpi(
+    lines.push(Line::from({
+        let mut v = kpi(
             "GPU speed",
-            strata::decode_now(m, last).map(|v| format!("{v:.1} tok/s")).unwrap_or_else(|| "—".into()),
+            strata::decode_now(m, last)
+                .map(|v| format!("{v:.1} tok/s"))
+                .unwrap_or_else(|| "—".into()),
             "decode".into(),
             &hist("tok_s"),
         );
         let kpi2 = kpi(
             "GPU prefill",
-            strata::prefill_now(m, last).map(|v| format!("{:.0} t/s", v)).unwrap_or_else(|| "—".into()),
+            strata::prefill_now(m, last)
+                .map(|v| format!("{:.0} t/s", v))
+                .unwrap_or_else(|| "—".into()),
             format!("{} slots", m.parallel),
             &hist("prefill_tok_s_mean"),
         );
         v.extend(kpi2);
         v
     }));
-    lines.push(Line::from({ let mut v = kpi(
+    lines.push(Line::from({
+        let mut v = kpi(
             "GPU load",
-            m.gpu_util.map(|v| format!("{v:.0}%")).unwrap_or_else(|| "—".into()),
+            m.gpu_util
+                .map(|v| format!("{v:.0}%"))
+                .unwrap_or_else(|| "—".into()),
             m.gpu_name.clone().unwrap_or_default(),
             &hist("gpu_util"),
         );
         let kpi2 = kpi(
             "VRAM",
-            m.gpu_mem_used.map(|v| format!("{:.1} GB", v / 1e9)).unwrap_or_else(|| "—".into()),
+            m.gpu_mem_used
+                .map(|v| format!("{:.1} GB", v / 1e9))
+                .unwrap_or_else(|| "—".into()),
             m.gpu_mem_total
                 .map(|t| format!("of {:.0} GB", t / 1e9))
                 .unwrap_or_else(|| "of ?".into()),
@@ -1937,9 +2037,12 @@ fn render_strata(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
         v.extend(kpi2);
         v
     }));
-    lines.push(Line::from({ let mut v = kpi(
+    lines.push(Line::from({
+        let mut v = kpi(
             "GPU temp",
-            m.gpu_temp.map(|v| format!("{v:.0} °C")).unwrap_or_else(|| "—".into()),
+            m.gpu_temp
+                .map(|v| format!("{v:.0} °C"))
+                .unwrap_or_else(|| "—".into()),
             m.gpu_power
                 .map(|p| format!("{} W of {:.0} W", p, m.gpu_power_limit.unwrap_or(0.0)))
                 .unwrap_or_else(|| "power ?".into()),
@@ -1947,34 +2050,53 @@ fn render_strata(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
         );
         let kpi2 = kpi(
             "PCIe",
-            m.gpu_pcie_gen_max.or(m.gpu_pcie_gen).map(|g| format!("Gen{g}")).unwrap_or_else(|| "—".into()),
+            m.gpu_pcie_gen_max
+                .or(m.gpu_pcie_gen)
+                .map(|g| format!("Gen{g}"))
+                .unwrap_or_else(|| "—".into()),
             format!(
                 "x{} · {}",
                 m.gpu_pcie_width.unwrap_or(0),
-                m.gpu_pcie_rx_mb.map(|v| format!("{v:.1} MB/s")).unwrap_or_else(|| "—".into())
+                m.gpu_pcie_rx_mb
+                    .map(|v| format!("{v:.1} MB/s"))
+                    .unwrap_or_else(|| "—".into())
             ),
             &hist("gpu_pcie_rx_mb"),
         );
         v.extend(kpi2);
         v
     }));
-    lines.push(Line::from({ let mut v = kpi(
+    lines.push(Line::from({
+        let mut v = kpi(
             "Host",
-            m.cpu.map(|v| format!("CPU {:.0}%", v)).unwrap_or_else(|| "—".into()),
+            m.cpu
+                .map(|v| format!("CPU {:.0}%", v))
+                .unwrap_or_else(|| "—".into()),
             format!(
                 "disk read {}",
-                m.disk_read_mb.map(|v| format!("{v:.1} MB/s")).unwrap_or_else(|| "—".into())
+                m.disk_read_mb
+                    .map(|v| format!("{v:.1} MB/s"))
+                    .unwrap_or_else(|| "—".into())
             ),
             &hist("cpu"),
         );
         let kpi2 = kpi(
             "First token",
-            m.ttft.p50.map(|v| format!("{v:.2} s")).unwrap_or_else(|| "—".into()),
+            m.ttft
+                .p50
+                .map(|v| format!("{v:.2} s"))
+                .unwrap_or_else(|| "—".into()),
             format!(
                 "p90 {} · {} reqs{}",
-                m.ttft.p90.map(|v| format!("{v:.2} s")).unwrap_or_else(|| "—".into()),
+                m.ttft
+                    .p90
+                    .map(|v| format!("{v:.2} s"))
+                    .unwrap_or_else(|| "—".into()),
                 m.ttft.count,
-                m.itl.p50.map(|v| format!(" · {:.0} ms/token", v * 1000.0)).unwrap_or_default()
+                m.itl
+                    .p50
+                    .map(|v| format!(" · {:.0} ms/token", v * 1000.0))
+                    .unwrap_or_default()
             ),
             &hist("ttft"),
         );
@@ -1982,11 +2104,22 @@ fn render_strata(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
         v
     }));
     let used = strata::context_used(m, last);
-    let ctx_pct = if m.max_context > 0 { (100.0 * used as f64 / m.max_context as f64).min(100.0) as usize } else { 0 };
+    let ctx_pct = if m.max_context > 0 {
+        (100.0 * used as f64 / m.max_context as f64).min(100.0) as usize
+    } else {
+        0
+    };
     lines.push(Line::from(vec![
-        Span::styled(format!("{:<13}", "Context"), Style::default().fg(Color::DarkGray)),
         Span::styled(
-            format!("{} / {} · {ctx_pct}%", fmt_tokens_tui_i(used), fmt_tokens_tui_i(m.max_context)),
+            format!("{:<13}", "Context"),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(
+            format!(
+                "{} / {} · {ctx_pct}%",
+                fmt_tokens_tui_i(used),
+                fmt_tokens_tui_i(m.max_context)
+            ),
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Span::styled(
@@ -2001,7 +2134,10 @@ fn render_strata(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
     ]));
     if let Some(c) = &m.conv {
         lines.push(Line::from(vec![
-            Span::styled(format!("{:<13}", "Conv cache"), Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{:<13}", "Conv cache"),
+                Style::default().fg(Color::DarkGray),
+            ),
             Span::styled(
                 format!(
                     "{}/{} requests reused",
@@ -2024,15 +2160,23 @@ fn render_strata(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
         ]));
     }
     f.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(format!(" Strata · {} · {} ", app.strata_cfg.base(), if m.model.is_empty() { "strata" } else { &m.model })),
-        ),
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(format!(
+            " Strata · {} · {} ",
+            app.strata_cfg.base(),
+            if m.model.is_empty() {
+                "strata"
+            } else {
+                &m.model
+            }
+        ))),
         top[0],
     );
 
-    let show_n = if app.strata_show_all { m.requests.len().min(100) } else { m.requests.len().min(10) };
+    let show_n = if app.strata_show_all {
+        m.requests.len().min(100)
+    } else {
+        m.requests.len().min(10)
+    };
     let rows: Vec<Row> = m
         .requests
         .iter()
@@ -2042,13 +2186,25 @@ fn render_strata(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
             Row::new(vec![
                 clock_label_tui(r.time),
                 Span::styled(fl, Style::default().fg(fc)).to_string(),
-                r.prompt_tokens.map(fmt_tokens_tui_i).unwrap_or_else(|| "—".into()),
+                r.prompt_tokens
+                    .map(fmt_tokens_tui_i)
+                    .unwrap_or_else(|| "—".into()),
                 r.reused.map(fmt_tokens_tui_i).unwrap_or_else(|| "0".into()),
-                r.output_tokens.map(fmt_tokens_tui_i).unwrap_or_else(|| "—".into()),
-                strata::prefill_rate(r).map(|v| format!("{:.0}", v)).unwrap_or_else(|| "—".into()),
-                r.decode_tok_s.map(|v| format!("{v:.1}")).unwrap_or_else(|| "—".into()),
-                r.hit_rate.map(|h| format!("{:.1}%", h * 100.0)).unwrap_or_else(|| "—".into()),
-                r.duration_s.map(|v| format!("{v:.1} s")).unwrap_or_else(|| "—".into()),
+                r.output_tokens
+                    .map(fmt_tokens_tui_i)
+                    .unwrap_or_else(|| "—".into()),
+                strata::prefill_rate(r)
+                    .map(|v| format!("{:.0}", v))
+                    .unwrap_or_else(|| "—".into()),
+                r.decode_tok_s
+                    .map(|v| format!("{v:.1}"))
+                    .unwrap_or_else(|| "—".into()),
+                r.hit_rate
+                    .map(|h| format!("{:.1}%", h * 100.0))
+                    .unwrap_or_else(|| "—".into()),
+                r.duration_s
+                    .map(|v| format!("{v:.1} s"))
+                    .unwrap_or_else(|| "—".into()),
             ])
         })
         .collect();
@@ -2067,14 +2223,15 @@ fn render_strata(f: &mut Frame, app: &mut App, area: ratatui::layout::Rect) {
         ],
     )
     .header(
-        Row::new(vec!["TIME", "FINISH", "PROMPT", "REUSED", "OUTPUT", "PRE t/s", "DEC t/s", "HIT", "DUR"])
-            .style(Style::default().fg(Color::Cyan)),
+        Row::new(vec![
+            "TIME", "FINISH", "PROMPT", "REUSED", "OUTPUT", "PRE t/s", "DEC t/s", "HIT", "DUR",
+        ])
+        .style(Style::default().fg(Color::Cyan)),
     )
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" Recent requests · {} kept · a: show all ", m.requests_kept)),
-    )
+    .block(Block::default().borders(Borders::ALL).title(format!(
+        " Recent requests · {} kept · a: show all ",
+        m.requests_kept
+    )))
     .column_spacing(2);
     f.render_widget(table, top[1]);
 }
@@ -2180,7 +2337,7 @@ mod framing_tests {
     fn chunked_across_writes() {
         // one chunk whose size line and payload straddle write boundaries,
         // then the terminator split mid-CRLF.
-        let body: Vec<u8> = b"abcdefghij".iter().copied().collect(); // 10 bytes
+        let body: Vec<u8> = b"abcdefghij".to_vec(); // 10 bytes
         let mut wire: Vec<u8> = Vec::new();
         wire.extend(b"a\r\n");
         wire.extend(&body);
@@ -2326,28 +2483,53 @@ mod procs_screen_tests {
         app.tab = Tab::Processes;
         let mut a = row(100, "chrome", "/opt/google/chrome/chrome", 20.0, 300 << 20);
         a.app_icon = "google-chrome".into();
-        let mut b = row(101, "chrome", "/opt/google/chrome/chrome --type=zygote", 5.0, 50 << 20);
+        let mut b = row(
+            101,
+            "chrome",
+            "/opt/google/chrome/chrome --type=zygote",
+            5.0,
+            50 << 20,
+        );
         b.app_icon = "google-chrome".into();
         app.procs = vec![a, b, row(1, "systemd", "/sbin/init", 0.1, 12 << 20)];
         let lines = screen(&mut app);
         let joined = lines.join("\n");
-        assert!(joined.contains("chrome [2 processes]"), "collapsed app row missing:\n{joined}");
+        assert!(
+            joined.contains("chrome [2 processes]"),
+            "collapsed app row missing:\n{joined}"
+        );
         assert!(joined.contains("2 pids"), "pid column must count the group");
         // collapsed: the zygote cmdline must not show; the title bar counts apps
-        assert!(joined.contains("2 apps, 3 procs"), "title must count apps and procs");
+        assert!(
+            joined.contains("2 apps, 3 procs"),
+            "title must count apps and procs"
+        );
         // cursor on the first row (chrome), Enter expands
         app.procs_state.select(Some(0));
         app.toggle_proc_group();
         let lines = screen(&mut app);
         let joined = lines.join("\n");
-        assert!(joined.contains("zygote"), "expanded group must show member cmdlines");
+        assert!(
+            joined.contains("zygote"),
+            "expanded group must show member cmdlines"
+        );
         // both member pids appear
-        assert!(joined.contains("100") && joined.contains("101"), "member pids paint");
+        assert!(
+            joined.contains("100") && joined.contains("101"),
+            "member pids paint"
+        );
         // cursor navigation counts the expanded rows
-        assert_eq!(app.proc_row_count(), 4, "2 group rows + 2 members for the expanded one");
+        assert_eq!(
+            app.proc_row_count(),
+            4,
+            "2 group rows + 2 members for the expanded one"
+        );
         app.toggle_proc_group();
         let lines = screen(&mut app);
-        assert!(!lines.join("\n").contains("zygote"), "Enter collapses again");
+        assert!(
+            !lines.join("\n").contains("zygote"),
+            "Enter collapses again"
+        );
     }
 
     /// Tab cycling must visit Processes, and the nav bar must show it in
@@ -2369,8 +2551,10 @@ mod procs_screen_tests {
             .find(|l| l.contains("Processes"))
             .expect("nav bar never shows Processes");
         let at = |t: &str| nav.find(t).unwrap();
-        assert!(at("Hardware") < at("Processes") && at("Processes") < at("Ports"),
-            "nav order: {nav}");
+        assert!(
+            at("Hardware") < at("Processes") && at("Processes") < at("Ports"),
+            "nav order: {nav}"
+        );
     }
 
     /// 'c' sorts by CPU descending; pressing it again flips to ascending.
@@ -2398,14 +2582,34 @@ mod procs_screen_tests {
         app.tab = Tab::Processes;
         let mut a = row(100, "chrome", "/opt/google/chrome/chrome", 20.0, 5 << 30);
         a.app_icon = "google-chrome".into();
-        let mut b = row(101, "chrome_crashpad", "/opt/google/chrome/chrome", 1.0, 1 << 30);
+        let mut b = row(
+            101,
+            "chrome_crashpad",
+            "/opt/google/chrome/chrome",
+            1.0,
+            1 << 30,
+        );
         b.app_icon = "google-chrome".into();
-        app.procs = vec![a, b, row(200, "strata-host", "strata --serve", 3.0, 50 << 30)];
+        app.procs = vec![
+            a,
+            b,
+            row(200, "strata-host", "strata --serve", 3.0, 50 << 30),
+        ];
         app.sort_procs(SortCol::Mem); // already mem; flips desc -> asc
         app.sort_procs(SortCol::Mem); // back to desc
         let lines = screen(&mut app);
-        let host = lines.iter().position(|l| l.contains("strata-host")).expect("strata-host row");
-        let chrome = lines.iter().position(|l| l.contains("chrome [2 processes]")).expect("chrome group");
-        assert!(host < chrome, "memory-desc: 50 GiB standalone above the 6 GiB app group:\n{}", lines.join("\n"));
+        let host = lines
+            .iter()
+            .position(|l| l.contains("strata-host"))
+            .expect("strata-host row");
+        let chrome = lines
+            .iter()
+            .position(|l| l.contains("chrome [2 processes]"))
+            .expect("chrome group");
+        assert!(
+            host < chrome,
+            "memory-desc: 50 GiB standalone above the 6 GiB app group:\n{}",
+            lines.join("\n")
+        );
     }
 }

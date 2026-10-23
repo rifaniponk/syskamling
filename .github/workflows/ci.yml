@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-test:
+    name: Build & test (Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # eframe/glow links against these system libs; the app is wayland+x11
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgl1-mesa-dev libegl1-mesa-dev libwayland-dev libxkbcommon-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev libasound2-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        # field_assignment_with_default is off: the test suite deliberately
+        # builds probe rows via Default::default() + field sets; everything
+        # else must be warning-free
+        run: cargo clippy --all-targets -- -D warnings -A clippy::field_reassign_with_default
+
+      - name: Build
+        run: cargo build --all-targets
+
+      # the suite reads live /proc, /sys, /etc/passwd and the .desktop icon
+      # theme on the runner itself — that's exactly the box it ships for
+      - name: Test
+        run: cargo test --bins

@@ -5,8 +5,7 @@ mod types;
 
 pub use client::{DockerError, UnixClient};
 pub use types::{
-    ContainerSummary, DiskSummary, EventMessage, ImageSummary, StatsSample, SystemInfo,
-    VolumeEntry,
+    ContainerSummary, DiskSummary, EventMessage, ImageSummary, StatsSample, SystemInfo, VolumeEntry,
 };
 
 use std::sync::OnceLock;
@@ -53,8 +52,7 @@ impl Docker {
 
     pub async fn list_volumes(&self) -> Result<Vec<VolumeEntry>, DockerError> {
         let v: serde_json::Value = self.client.get_json("/volumes").await?;
-        Ok(serde_json::from_value(v["Volumes"].clone())
-            .map_err(|e| DockerError::Decode(e.to_string()))?)
+        serde_json::from_value(v["Volumes"].clone()).map_err(|e| DockerError::Decode(e.to_string()))
     }
 
     /// Daemon system info: CPU count, memory, container/image counts.
@@ -215,7 +213,9 @@ impl LogStreamDecoder {
             }
             let payload = self.buf[8..8 + len].to_vec();
             self.buf.drain(..8 + len);
-            let text = String::from_utf8_lossy(&payload).trim_end_matches('\n').to_string();
+            let text = String::from_utf8_lossy(&payload)
+                .trim_end_matches('\n')
+                .to_string();
             for l in text.split('\n') {
                 lines.push(LogLine {
                     stream: kind,
@@ -227,4 +227,3 @@ impl LogStreamDecoder {
         lines
     }
 }
-
