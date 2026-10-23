@@ -1493,6 +1493,11 @@ mod tests {
             .filter(|n| pixels(n, 48).is_some())
             .cloned()
             .collect();
+        // headless CI runner: no desktop session, no app icons to decode
+        if names.is_empty() {
+            eprintln!("skip: no live app icons on this box");
+            return;
+        }
         assert!(
             ok.len() >= 5,
             "only {}/{} live icons decoded: {names:?}",
