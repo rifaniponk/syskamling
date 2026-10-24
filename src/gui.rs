@@ -1576,7 +1576,7 @@ impl SysKamlingApp {
         }
     }
 
-    /// Left navigation rail: brand, engine status, sections, host footer.
+    /// Left navigation rail: brand, sections, host footer.
     fn nav_rail(&mut self, ctx: &egui::Context) {
         #[cfg(test)]
         NAV_ROW_RECTS.lock().unwrap().clear();
@@ -1601,11 +1601,6 @@ impl SysKamlingApp {
             (Tab::Logs, "Logs", String::new()),
         ];
         let sys_items = [(Tab::Settings, "Settings", String::new())];
-        let version = g
-            .info
-            .as_ref()
-            .map(|i| i.server_version.clone())
-            .unwrap_or_default();
         let synced = self.last_sync.map(|t| t.elapsed().as_secs());
         egui::SidePanel::left("nav")
             .exact_width(216.0)
@@ -1630,9 +1625,7 @@ impl SysKamlingApp {
                         );
                     });
                 });
-                ui.add_space(16.0);
-                engine_card(ui, g.daemon_ok, &version);
-                ui.add_space(20.0);
+                ui.add_space(24.0);
                 section_label(ui, "WORKSPACE");
                 ui.add_space(2.0);
                 ui.spacing_mut().item_spacing.y = 2.0;
@@ -1811,6 +1804,17 @@ impl SysKamlingApp {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(title).font(bold(20.0)).color(TEXT));
                     ui.label(RichText::new(count.to_string()).size(14.0).color(FAINT));
+                    if tab == Tab::Containers {
+                        let version = self
+                            .gui
+                            .info
+                            .as_ref()
+                            .map(|i| i.server_version.as_str())
+                            .unwrap_or_default();
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            engine_pill(ui, self.gui.daemon_ok, version);
+                        });
+                    }
                 });
                 ui.add_space(8.0);
                 match tab {
@@ -7617,43 +7621,35 @@ fn temp_str(c: f64) -> String {
     format!("{c:.0}")
 }
 
-/// Short OS label for the dashboard header: prefers the kernel name from
-/// /proc (Linux + release) over the Docker-reported string.
-fn engine_card(ui: &mut Ui, ok: bool, version: &str) {
-    Frame::NONE
-        .fill(SURFACE)
-        .stroke(Stroke::new(1.0_f32, BORDER))
-        .corner_radius(10)
-        .inner_margin(Margin::symmetric(12, 9))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                let (r, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
-                let c = if ok { GREEN } else { RED };
-                ui.painter()
-                    .circle_filled(r.center(), 6.0, c.gamma_multiply(0.2));
-                ui.painter().circle_filled(r.center(), 3.5, c);
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = 0.0;
-                    ui.label(
-                        RichText::new(if ok {
-                            "Engine running"
-                        } else {
-                            "Engine unreachable"
-                        })
-                        .size(12.5)
-                        .color(TEXT),
-                    );
-                    if !version.is_empty() {
-                        ui.label(
-                            RichText::new(format!("Docker {version}"))
-                                .size(11.0)
-                                .color(FAINT),
-                        );
-                    }
-                });
-            });
-        });
+/// "● Docker 27.x" engine status for the Containers list header; turns red
+/// when the daemon is unreachable.
+fn engine_pill(ui: &mut Ui, ok: bool, version: &str) {
+    let color = if ok { GREEN } else { RED };
+    let text = match (ok, version.is_empty()) {
+        (true, false) => format!("Docker {version}"),
+        (true, true) => "Engine running".to_string(),
+        (false, _) => "Engine unreachable".to_string(),
+    };
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text, FontId::proportional(11.5), color);
+    let size = Vec2::new(galley.size().x + 30.0, 22.0);
+    let (r, resp) = ui.allocate_exact_size(size, Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(r, 11.0, color.gamma_multiply(0.12));
+    let dot = Pos2::new(r.left() + 12.0, r.center().y);
+    p.circle_filled(dot, 5.5, color.gamma_multiply(0.22));
+    p.circle_filled(dot, 3.0, color);
+    p.galley(
+        Pos2::new(r.left() + 21.0, r.center().y - galley.size().y / 2.0),
+        galley,
+        color,
+    );
+    resp.on_hover_text(if ok {
+        "Docker engine running"
+    } else {
+        "Docker engine unreachable"
+    });
 }
 
 /// Sidebar navigation entry; true when clicked.
