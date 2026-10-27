@@ -29,6 +29,7 @@ pub fn run(
     socket: &str,
     refresh: f64,
     logs_first: bool,
+    has_docker: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -36,7 +37,13 @@ pub fn run(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let res = rt.block_on(run_async(&mut terminal, socket, refresh, logs_first));
+    let res = rt.block_on(run_async(
+        &mut terminal,
+        socket,
+        refresh,
+        logs_first,
+        has_docker,
+    ));
 
     disable_raw_mode()?;
     execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
@@ -58,30 +65,60 @@ enum Tab {
 }
 
 impl Tab {
+    #[cfg(test)]
     fn next(self) -> Self {
-        match self {
-            Tab::Containers => Tab::Images,
-            Tab::Images => Tab::Volumes,
-            Tab::Volumes => Tab::Agents,
-            Tab::Agents => Tab::Hardware,
-            Tab::Hardware => Tab::Processes,
-            Tab::Processes => Tab::Ports,
-            Tab::Ports => Tab::Strata,
-            Tab::Strata => Tab::Logs,
-            Tab::Logs => Tab::Containers,
+        self.next_with(true)
+    }
+    #[cfg(test)]
+    fn prev(self) -> Self {
+        self.prev_with(true)
+    }
+    fn next_with(self, has_docker: bool) -> Self {
+        if has_docker {
+            match self {
+                Tab::Containers => Tab::Images,
+                Tab::Images => Tab::Volumes,
+                Tab::Volumes => Tab::Agents,
+                Tab::Agents => Tab::Hardware,
+                Tab::Hardware => Tab::Processes,
+                Tab::Processes => Tab::Ports,
+                Tab::Ports => Tab::Strata,
+                Tab::Strata => Tab::Logs,
+                Tab::Logs => Tab::Containers,
+            }
+        } else {
+            match self {
+                Tab::Agents => Tab::Hardware,
+                Tab::Hardware => Tab::Processes,
+                Tab::Processes => Tab::Ports,
+                Tab::Ports => Tab::Strata,
+                Tab::Strata => Tab::Agents,
+                _ => Tab::Hardware,
+            }
         }
     }
-    fn prev(self) -> Self {
-        match self {
-            Tab::Containers => Tab::Logs,
-            Tab::Images => Tab::Containers,
-            Tab::Volumes => Tab::Images,
-            Tab::Agents => Tab::Volumes,
-            Tab::Hardware => Tab::Agents,
-            Tab::Processes => Tab::Hardware,
-            Tab::Ports => Tab::Processes,
-            Tab::Strata => Tab::Ports,
-            Tab::Logs => Tab::Strata,
+    fn prev_with(self, has_docker: bool) -> Self {
+        if has_docker {
+            match self {
+                Tab::Containers => Tab::Logs,
+                Tab::Images => Tab::Containers,
+                Tab::Volumes => Tab::Images,
+                Tab::Agents => Tab::Volumes,
+                Tab::Hardware => Tab::Agents,
+                Tab::Processes => Tab::Hardware,
+                Tab::Ports => Tab::Processes,
+                Tab::Strata => Tab::Ports,
+                Tab::Logs => Tab::Strata,
+            }
+        } else {
+            match self {
+                Tab::Agents => Tab::Strata,
+                Tab::Hardware => Tab::Agents,
+                Tab::Processes => Tab::Hardware,
+                Tab::Ports => Tab::Processes,
+                Tab::Strata => Tab::Ports,
+                _ => Tab::Hardware,
+            }
         }
     }
     fn label(self) -> &'static str {
@@ -144,6 +181,7 @@ struct RefreshData {
 }
 
 struct App {
+    has_docker: bool,
     tab: Tab,
     containers: Vec<ContainerSummary>,
     container_state: ListState,
@@ -196,6 +234,7 @@ impl App {
         let mut container_state = ListState::default();
         container_state.select(Some(0));
         Self {
+            has_docker: false,
             tab: Tab::Containers,
             containers: Vec::new(),
             container_state,
@@ -455,6 +494,7 @@ async fn run_async(
     socket: &str,
     refresh: f64,
     logs_first: bool,
+    has_docker: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let rt = tokio::runtime::Handle::current();
 
@@ -462,7 +502,10 @@ async fn run_async(
     let (tx, mut rx) = mpsc::unbounded_channel::<Msg>();
 
     let mut app = App::new();
-    if logs_first {
+    app.has_docker = has_docker;
+    if !has_docker {
+        app.tab = Tab::Hardware;
+    } else if logs_first {
         app.tab = Tab::Logs;
     }
 
@@ -512,7 +555,8 @@ async fn run_async(
         }
 
         // Periodic container/image/volume refresh.
-        if refresh > 0.0 && last_refresh.elapsed() >= Duration::from_secs_f64(refresh) {
+        if has_docker && refresh > 0.0 && last_refresh.elapsed() >= Duration::from_secs_f64(refresh)
+        {
             last_refresh = Instant::now();
             spawn_refresh(&rt, &docker, &tx);
         }
@@ -656,7 +700,11 @@ fn apply_msg(app: &mut App, m: Msg) {
             }
             app.last_refresh = now_string();
         }
-        Msg::Refreshed(Err(e)) => app.error = Some(format!("refresh: {e}")),
+        Msg::Refreshed(Err(e)) => {
+            if app.has_docker {
+                app.error = Some(format!("refresh: {e}"));
+            }
+        }
         Msg::LogStart(gen, Ok(())) => {
             if Some(gen) == app.pending_logs_gen {
                 app.pending_logs_gen = None;
@@ -1018,17 +1066,17 @@ fn handle_key(
 
     match code {
         KeyCode::Char('q') | KeyCode::Esc => app.quit = true,
-        KeyCode::Tab | KeyCode::Right => app.tab = app.tab.next(),
-        KeyCode::BackTab | KeyCode::Left => app.tab = app.tab.prev(),
-        KeyCode::Char('1') => app.tab = Tab::Containers,
-        KeyCode::Char('2') => app.tab = Tab::Images,
-        KeyCode::Char('3') => app.tab = Tab::Volumes,
+        KeyCode::Tab | KeyCode::Right => app.tab = app.tab.next_with(app.has_docker),
+        KeyCode::BackTab | KeyCode::Left => app.tab = app.tab.prev_with(app.has_docker),
+        KeyCode::Char('1') if app.has_docker => app.tab = Tab::Containers,
+        KeyCode::Char('2') if app.has_docker => app.tab = Tab::Images,
+        KeyCode::Char('3') if app.has_docker => app.tab = Tab::Volumes,
         KeyCode::Char('4') => app.tab = Tab::Agents,
         KeyCode::Char('5') => app.tab = Tab::Hardware,
         KeyCode::Char('6') => app.tab = Tab::Ports,
         KeyCode::Char('7') => app.tab = Tab::Processes,
         KeyCode::Char('8') => app.tab = Tab::Strata,
-        KeyCode::Char('9') => app.tab = Tab::Logs,
+        KeyCode::Char('9') if app.has_docker => app.tab = Tab::Logs,
         KeyCode::Char('a') if app.tab == Tab::Strata => app.strata_show_all = !app.strata_show_all,
         KeyCode::Char('c') if app.tab == Tab::Processes => {
             app.sort_procs(crate::procs::SortCol::Cpu)
@@ -1188,36 +1236,48 @@ fn ui(f: &mut Frame, app: &mut App) {
         ])
         .split(f.area());
 
-    let tabs: Vec<Span> = [
-        Tab::Containers,
-        Tab::Images,
-        Tab::Volumes,
-        Tab::Agents,
-        Tab::Hardware,
-        Tab::Processes,
-        Tab::Ports,
-        Tab::Strata,
-        Tab::Logs,
-    ]
-    .iter()
-    .flat_map(|t| {
-        let active = *t == app.tab;
-        vec![
-            Span::styled(
-                t.label(),
-                if active {
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::Gray)
-                },
-            ),
-            Span::raw(" "),
+    let all_tabs: &[Tab] = if app.has_docker {
+        &[
+            Tab::Containers,
+            Tab::Images,
+            Tab::Volumes,
+            Tab::Agents,
+            Tab::Hardware,
+            Tab::Processes,
+            Tab::Ports,
+            Tab::Strata,
+            Tab::Logs,
         ]
-    })
-    .collect();
+    } else {
+        &[
+            Tab::Agents,
+            Tab::Hardware,
+            Tab::Processes,
+            Tab::Ports,
+            Tab::Strata,
+        ]
+    };
+
+    let tabs: Vec<Span> = all_tabs
+        .iter()
+        .flat_map(|t| {
+            let active = *t == app.tab;
+            vec![
+                Span::styled(
+                    t.label(),
+                    if active {
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    },
+                ),
+                Span::raw(" "),
+            ]
+        })
+        .collect();
     let tabs = Paragraph::new(Line::from(tabs)).block(Block::default().borders(Borders::ALL));
     f.render_widget(tabs, chunks[0]);
 

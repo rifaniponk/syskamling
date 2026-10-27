@@ -197,6 +197,7 @@ struct Gui {
     selected_volume: Option<String>,
     last_refresh: String,
     daemon_ok: bool,
+    has_docker: bool,
     // --- dashboard data ---
     info: Option<SystemInfo>,
     df: Option<DiskSummary>,
@@ -303,6 +304,7 @@ impl Gui {
             selected_volume: None,
             last_refresh: String::new(),
             daemon_ok: false,
+            has_docker: false,
             info: None,
             df: None,
             events: Vec::new(),
@@ -532,10 +534,28 @@ impl Gui {
     }
 }
 
+fn host_os_name() -> &'static str {
+    static OS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        std::fs::read_to_string("/etc/os-release")
+            .ok()
+            .and_then(|text| {
+                for line in text.lines() {
+                    if let Some(val) = line.strip_prefix("PRETTY_NAME=") {
+                        return Some(val.trim_matches('"').to_string());
+                    }
+                }
+                None
+            })
+            .unwrap_or_else(|| "Linux".to_string())
+    });
+    &OS
+}
+
 /// egui application wired to a tokio runtime.
 struct SysKamlingApp {
     gui: Gui,
     docker: Arc<Docker>,
+    has_docker: bool,
     tx: mpsc::UnboundedSender<Msg>,
     rx: mpsc::UnboundedReceiver<Msg>,
     rt: tokio::runtime::Handle,
@@ -606,12 +626,17 @@ impl SysKamlingApp {
         rt: Arc<tokio::runtime::Runtime>,
         socket: &str,
         refresh: f64,
+        has_docker: bool,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         apply_theme(&cc.egui_ctx);
         let file_cfg = strata::load_file();
         let strata_cfg = file_cfg.strata.clone();
         let mut gui = Gui::new();
+        gui.has_docker = has_docker;
+        if !has_docker {
+            gui.tab = Tab::Dashboard;
+        }
         gui.strata_cfg = strata_cfg.clone();
         gui.strata_endpoint_edit = strata_cfg.endpoint.clone();
         gui.strata_key_edit = strata_cfg.api_key.clone();
@@ -626,6 +651,7 @@ impl SysKamlingApp {
         let app = Self {
             gui,
             docker: Arc::new(Docker::new(socket)),
+            has_docker,
             tx,
             rx,
             rt: rt.handle().clone(),
@@ -680,6 +706,7 @@ impl SysKamlingApp {
         let app = SysKamlingApp {
             gui: Gui::new(),
             docker: Arc::new(Docker::new("/nonexistent.sock")),
+            has_docker: false,
             tx,
             rx,
             rt: rt.handle().clone(),
@@ -973,14 +1000,16 @@ impl eframe::App for SysKamlingApp {
         if self.tick.elapsed() >= Duration::from_millis(if self.refresh > 0.0 { 250 } else { 100 })
         {
             self.tick = Instant::now();
-            if self.refresh > 0.0
-                && self.last_refresh.elapsed() >= Duration::from_secs_f64(self.refresh)
-            {
-                self.last_refresh = Instant::now();
-                spawn_refresh(&self.rt, &self.docker, &self.tx);
+            if self.has_docker {
+                if self.refresh > 0.0
+                    && self.last_refresh.elapsed() >= Duration::from_secs_f64(self.refresh)
+                {
+                    self.last_refresh = Instant::now();
+                    spawn_refresh(&self.rt, &self.docker, &self.tx);
+                }
+                self.reap_stats_streams();
+                self.spawn_dashboard_pulls();
             }
-            self.reap_stats_streams();
-            self.spawn_dashboard_pulls();
             self.spawn_agent_scan();
             self.sample_hardware();
             self.spawn_port_scan();
@@ -1407,7 +1436,9 @@ impl SysKamlingApp {
             }
             Msg::Refreshed(Err(e)) => {
                 g.daemon_ok = false;
-                g.error = Some(format!("refresh: {e}"));
+                if self.has_docker {
+                    g.error = Some(format!("refresh: {e}"));
+                }
             }
             Msg::LogStart(gen, Ok(())) => {
                 if Some(gen) == g.pending_logs_gen {
@@ -1459,13 +1490,17 @@ impl SysKamlingApp {
                 g.info = Some(info);
             }
             Msg::Info(Err(e)) => {
-                g.error = Some(format!("info: {e}"));
+                if self.has_docker {
+                    g.error = Some(format!("info: {e}"));
+                }
             }
             Msg::Df(Ok(df)) => {
                 g.df = Some(df);
             }
             Msg::Df(Err(e)) => {
-                g.error = Some(format!("disk usage: {e}"));
+                if self.has_docker {
+                    g.error = Some(format!("disk usage: {e}"));
+                }
             }
             Msg::Stats(id, s) => {
                 self.stats_spawned.insert(id.clone(), Instant::now());
@@ -1495,7 +1530,9 @@ impl SysKamlingApp {
             }
             Msg::Events(Err(e)) => {
                 g.events_active = false;
-                g.error = Some(format!("events: {e}"));
+                if self.has_docker {
+                    g.error = Some(format!("events: {e}"));
+                }
             }
             Msg::EventsClosed => {
                 g.events_active = false;
@@ -1584,22 +1621,25 @@ impl SysKamlingApp {
         let mut refresh_now = false;
         let g = &self.gui;
         let n_run = g.containers.iter().filter(|c| c.state == "running").count();
-        let items = [
-            (Tab::Dashboard, "Dashboard", String::new()),
-            (
+        let mut items = Vec::new();
+        items.push((Tab::Dashboard, "Dashboard", String::new()));
+        if self.has_docker {
+            items.push((
                 Tab::Containers,
                 "Containers",
                 format!("{n_run}/{}", g.containers.len()),
-            ),
-            (Tab::Images, "Images", g.images.len().to_string()),
-            (Tab::Volumes, "Volumes", g.volumes.len().to_string()),
-            (Tab::Agents, "Agents", g.agents.len().to_string()),
-            (Tab::Hardware, "Hardware", String::new()),
-            (Tab::Processes, "Processes", g.procs.len().to_string()),
-            (Tab::Ports, "Ports", g.ports.len().to_string()),
-            (Tab::Strata, "Strata", String::new()),
-            (Tab::Logs, "Logs", String::new()),
-        ];
+            ));
+            items.push((Tab::Images, "Images", g.images.len().to_string()));
+            items.push((Tab::Volumes, "Volumes", g.volumes.len().to_string()));
+        }
+        items.push((Tab::Agents, "Agents", g.agents.len().to_string()));
+        items.push((Tab::Hardware, "Hardware", String::new()));
+        items.push((Tab::Processes, "Processes", g.procs.len().to_string()));
+        items.push((Tab::Ports, "Ports", g.ports.len().to_string()));
+        items.push((Tab::Strata, "Strata", String::new()));
+        if self.has_docker {
+            items.push((Tab::Logs, "Logs", String::new()));
+        }
         let sys_items = [(Tab::Settings, "Settings", String::new())];
         let synced = self.last_sync.map(|t| t.elapsed().as_secs());
         egui::SidePanel::left("nav")
@@ -1653,7 +1693,11 @@ impl SysKamlingApp {
                     }
                 }
                 // Footer pinned to the bottom: host card, sync time, refresh.
-                let footer_h = if g.info.is_some() { 156.0 } else { 72.0 };
+                let footer_h = if g.info.is_some() || g.hw.is_some() {
+                    156.0
+                } else {
+                    72.0
+                };
                 ui.add_space((ui.available_height() - footer_h).max(12.0));
                 ui.spacing_mut().item_spacing.y = 8.0;
                 if let Some(i) = &g.info {
@@ -1682,10 +1726,42 @@ impl SysKamlingApp {
                                 .color(MUTED),
                             );
                         });
+                } else if let Some(h) = &g.hw {
+                    Frame::NONE
+                        .fill(SURFACE)
+                        .stroke(Stroke::new(1.0_f32, BORDER))
+                        .corner_radius(10)
+                        .inner_margin(Margin::symmetric(12, 10))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.spacing_mut().item_spacing.y = 2.0;
+                            ui.label(RichText::new("HOST").size(10.5).color(FAINT));
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(host_os_name()).size(12.5).color(TEXT),
+                                )
+                                .truncate(),
+                            );
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} CPUs · {} RAM",
+                                    h.ncpu,
+                                    human_size(h.mem_total as i64)
+                                ))
+                                .size(12.0)
+                                .color(MUTED),
+                            );
+                        });
                 }
-                let sync = match synced {
-                    Some(s) => format!("Synced {}", ago(s as i64)),
-                    None => "Connecting…".to_string(),
+                let sync = if self.has_docker {
+                    match synced {
+                        Some(s) => format!("Synced {}", ago(s as i64)),
+                        None => "Connecting…".to_string(),
+                    }
+                } else if g.hw.is_some() {
+                    "Host active".to_string()
+                } else {
+                    "Connecting…".to_string()
                 };
                 ui.horizontal(|ui| {
                     ui.add_space(4.0);
@@ -1702,8 +1778,10 @@ impl SysKamlingApp {
             }
         }
         if refresh_now {
-            spawn_refresh(&self.rt, &self.docker, &self.tx);
-            self.spawn_dashboard_pulls();
+            if self.has_docker {
+                spawn_refresh(&self.rt, &self.docker, &self.tx);
+                self.spawn_dashboard_pulls();
+            }
             self.gui.status = "Refreshing…".to_string();
         }
     }
@@ -3187,11 +3265,12 @@ impl SysKamlingApp {
                             .font(bold(13.5))
                             .color(TEXT),
                     );
-                    ui.label(
-                        RichText::new("memory, temperatures, containers and Strata look healthy")
-                            .size(12.5)
-                            .color(FAINT),
-                    );
+                    let normal_detail = if self.gui.has_docker {
+                        "memory, temperatures, containers and Strata look healthy"
+                    } else {
+                        "memory, temperatures, and host services look healthy"
+                    };
+                    ui.label(RichText::new(normal_detail).size(12.5).color(FAINT));
                 });
                 return;
             }
@@ -3380,20 +3459,48 @@ impl SysKamlingApp {
                 *nav = Some(t);
             }
         };
-        ui.scope(|ui| {
-            ui.spacing_mut().item_spacing.x = 14.0;
-            ui.columns(2, |cols| {
-                if overview_card(&mut cols[0], Tab::Containers, "Containers", |ui| {
+
+        #[derive(Clone, Copy)]
+        enum CardKind {
+            Containers,
+            Strata,
+            Agents,
+            Ports,
+            Processes,
+            Hardware,
+        }
+
+        let cards = if self.has_docker {
+            vec![
+                CardKind::Containers,
+                CardKind::Strata,
+                CardKind::Agents,
+                CardKind::Ports,
+                CardKind::Processes,
+                CardKind::Hardware,
+            ]
+        } else {
+            vec![
+                CardKind::Agents,
+                CardKind::Ports,
+                CardKind::Processes,
+                CardKind::Hardware,
+                CardKind::Strata,
+            ]
+        };
+
+        let render_card = |col: &mut Ui, kind: CardKind, nav: &mut Option<Tab>| match kind {
+            CardKind::Containers => {
+                if overview_card(col, Tab::Containers, "Containers", |ui| {
                     self.containers_overview(ui)
                 }) {
-                    pick(&mut nav, Tab::Containers);
+                    pick(nav, Tab::Containers);
                 }
-                if overview_card(&mut cols[1], Tab::Strata, "Strata", |ui| {
-                    self.strata_overview(ui)
-                }) {
-                    // nothing to look at until it's configured
+            }
+            CardKind::Strata => {
+                if overview_card(col, Tab::Strata, "Strata", |ui| self.strata_overview(ui)) {
                     pick(
-                        &mut nav,
+                        nav,
                         if self.gui.strata_cfg.api_key.trim().is_empty() {
                             Tab::Settings
                         } else {
@@ -3401,33 +3508,46 @@ impl SysKamlingApp {
                         },
                     );
                 }
-            });
-            ui.add_space(6.0);
-            ui.columns(2, |cols| {
-                if overview_card(&mut cols[0], Tab::Agents, "Agents", |ui| {
-                    self.agents_overview(ui)
-                }) {
-                    pick(&mut nav, Tab::Agents);
+            }
+            CardKind::Agents => {
+                if overview_card(col, Tab::Agents, "Agents", |ui| self.agents_overview(ui)) {
+                    pick(nav, Tab::Agents);
                 }
-                if overview_card(&mut cols[1], Tab::Ports, "Ports", |ui| {
-                    self.ports_overview(ui)
-                }) {
-                    pick(&mut nav, Tab::Ports);
+            }
+            CardKind::Ports => {
+                if overview_card(col, Tab::Ports, "Ports", |ui| self.ports_overview(ui)) {
+                    pick(nav, Tab::Ports);
                 }
-            });
-            ui.add_space(6.0);
-            ui.columns(2, |cols| {
-                if overview_card(&mut cols[0], Tab::Processes, "Processes", |ui| {
+            }
+            CardKind::Processes => {
+                if overview_card(col, Tab::Processes, "Processes", |ui| {
                     self.processes_overview(ui)
                 }) {
-                    pick(&mut nav, Tab::Processes);
+                    pick(nav, Tab::Processes);
                 }
-                if overview_card(&mut cols[1], Tab::Hardware, "Hardware", |ui| {
+            }
+            CardKind::Hardware => {
+                if overview_card(col, Tab::Hardware, "Hardware", |ui| {
                     self.hardware_overview(ui)
                 }) {
-                    pick(&mut nav, Tab::Hardware);
+                    pick(nav, Tab::Hardware);
                 }
-            });
+            }
+        };
+
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.x = 14.0;
+            for (idx, chunk) in cards.chunks(2).enumerate() {
+                if idx > 0 {
+                    ui.add_space(6.0);
+                }
+                ui.columns(2, |cols| {
+                    render_card(&mut cols[0], chunk[0], &mut nav);
+                    if chunk.len() > 1 {
+                        render_card(&mut cols[1], chunk[1], &mut nav);
+                    }
+                });
+            }
         });
         nav
     }
@@ -9183,6 +9303,7 @@ pub fn run_with(
     refresh: f64,
     tab_shot: Option<(String, f64)>,
     expand: Option<String>,
+    has_docker: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let icon = load_icon();
     let mut vb = egui::ViewportBuilder::default()
@@ -9203,7 +9324,7 @@ pub fn run_with(
         "syskamling",
         opts,
         Box::new(move |cc| {
-            let mut app = SysKamlingApp::new(cc, Arc::clone(&rt), &socket, refresh);
+            let mut app = SysKamlingApp::new(cc, Arc::clone(&rt), &socket, refresh, has_docker);
             if let Some((tab, secs)) = tab_shot {
                 app.gui.tab = tab_from_name(&tab);
                 if let Some(name) = expand {
@@ -10485,6 +10606,91 @@ mod processes_tab_tests {
             app.gui.tab,
             Tab::Processes,
             "rail click must open Processes"
+        );
+    }
+
+    /// When Docker is not installed (has_docker: false), the nav rail must hide
+    /// Containers, Images, Volumes, and Logs, and the dashboard must omit the Containers card.
+    #[test]
+    fn nav_rail_hides_docker_tabs_when_not_installed() {
+        let _probe = PROBE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let ctx = egui::Context::default();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let rt = Arc::new(
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap(),
+        );
+        let mut app = SysKamlingApp::new_offscreen(&ctx, tx, rx, rt);
+        app.has_docker = false;
+        app.gui.has_docker = false;
+
+        let mut raw = egui::RawInput::default();
+        raw.screen_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::Vec2::new(1280.0, 860.0),
+        ));
+        ctx.begin_pass(raw);
+        app.nav_rail(&ctx);
+        let _ = ctx.end_pass();
+
+        let visible_tabs: Vec<Tab> = NAV_ROW_RECTS
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(t, _)| *t)
+            .collect();
+
+        assert!(
+            !visible_tabs.contains(&Tab::Containers),
+            "Containers tab must be hidden"
+        );
+        assert!(
+            !visible_tabs.contains(&Tab::Images),
+            "Images tab must be hidden"
+        );
+        assert!(
+            !visible_tabs.contains(&Tab::Volumes),
+            "Volumes tab must be hidden"
+        );
+        assert!(
+            !visible_tabs.contains(&Tab::Logs),
+            "Logs tab must be hidden"
+        );
+        assert!(
+            visible_tabs.contains(&Tab::Dashboard),
+            "Dashboard tab must be present"
+        );
+        assert!(
+            visible_tabs.contains(&Tab::Hardware),
+            "Hardware tab must be present"
+        );
+        assert!(
+            visible_tabs.contains(&Tab::Processes),
+            "Processes tab must be present"
+        );
+        assert!(
+            visible_tabs.contains(&Tab::Ports),
+            "Ports tab must be present"
+        );
+        assert!(
+            visible_tabs.contains(&Tab::Agents),
+            "Agents tab must be present"
+        );
+        assert!(
+            visible_tabs.contains(&Tab::Strata),
+            "Strata tab must be present"
+        );
+        assert!(
+            visible_tabs.contains(&Tab::Settings),
+            "Settings tab must be present"
+        );
+
+        // Verify dashboard cards: Containers card must not be present
+        let cards = dash_card_rects();
+        assert!(
+            !cards.iter().any(|(_, _, title)| title == "Containers"),
+            "Containers dashboard card must be omitted"
         );
     }
 

@@ -63,26 +63,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?;
 
-    // Connectivity check up front so the user sees a real error on stderr.
-    let probe = docker::Docker::new(&cli.socket);
-    match rt.block_on(probe.ping()) {
-        Ok(v) => eprintln!(
-            "connected to Docker daemon ({})",
-            if v.is_empty() { "OK".to_string() } else { v }
-        ),
-        Err(e) => {
-            eprintln!(
-                "warning: cannot reach Docker daemon at {}: {}",
-                cli.socket, e
-            );
+    // Connectivity check: if socket file doesn't exist, Docker is not installed/running.
+    let socket_exists = std::path::Path::new(&cli.socket).exists();
+    let has_docker = if socket_exists {
+        let probe = docker::Docker::new(&cli.socket);
+        match rt.block_on(probe.ping()) {
+            Ok(v) => {
+                eprintln!(
+                    "connected to Docker daemon ({})",
+                    if v.is_empty() { "OK".to_string() } else { v }
+                );
+                true
+            }
+            Err(e) => {
+                eprintln!(
+                    "warning: cannot reach Docker daemon at {}: {}",
+                    cli.socket, e
+                );
+                false
+            }
         }
-    }
+    } else {
+        false
+    };
 
     match cli.command {
         None | Some(Command::Gui) => {
             let shot = cli.shot.map(|t| (t, cli.shot_after));
-            gui::run_with(rt, &cli.socket, cli.refresh, shot, cli.expand)
+            gui::run_with(rt, &cli.socket, cli.refresh, shot, cli.expand, has_docker)
         }
-        Some(Command::Tui { logs }) => tui::run(rt, &cli.socket, cli.refresh, logs),
+        Some(Command::Tui { logs }) => tui::run(rt, &cli.socket, cli.refresh, logs, has_docker),
     }
 }
