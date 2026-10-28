@@ -165,9 +165,7 @@ fn statvfs(path: &str) -> Result<(u64, u64), ()> {
     Ok((buf.f_blocks * buf.f_frsize, buf.f_bavail * buf.f_frsize))
 }
 
-/// PCI vendor/device id -> human name, from `lspci -mm -n -D` output.
-/// Returns an empty map when lspci is unavailable.
-fn lspci_names() -> HashMap<String, String> {
+static LSPCI_NAMES: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
     let out = std::process::Command::new("lspci")
         .args(["-mm", "-n", "-D"])
         .output()
@@ -189,6 +187,12 @@ fn lspci_names() -> HashMap<String, String> {
         }
     }
     map
+});
+
+/// PCI vendor/device id -> human name, from `lspci -mm -n -D` output.
+/// Cached once per process — hardware device IDs do not change while running.
+pub fn lspci_names() -> &'static HashMap<String, String> {
+    &LSPCI_NAMES
 }
 
 /// Read a sysfs text file, trimmed; None when missing or empty.
@@ -613,7 +617,7 @@ pub static INVENTORY: LazyLock<Inventory> = LazyLock::new(|| {
             kern: None,
         });
     }
-    devices.extend(gpus(&names));
+    devices.extend(gpus(names));
     devices.push(HwDevice {
         kind: "memory",
         name: "System memory".into(),
@@ -621,7 +625,7 @@ pub static INVENTORY: LazyLock<Inventory> = LazyLock::new(|| {
         kern: None,
     });
     devices.extend(disks());
-    devices.extend(nics(&names));
+    devices.extend(nics(names));
     Inventory {
         cpu,
         board,

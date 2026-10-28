@@ -214,6 +214,7 @@ struct Gui {
     agent_filter: String,
     // --- hardware tab ---
     hw: Option<HwSample>,
+    disk_usage: Vec<hwinv::DiskUsage>,
     hw_cpu_hist: VecDeque<f64>,
     hw_mem_hist: VecDeque<f64>,
     hw_swap_hist: VecDeque<f64>,
@@ -247,6 +248,12 @@ struct Gui {
     proc_filter: String,
     proc_sort: SortCol,
     proc_sort_desc: bool,
+    proc_entries: Vec<crate::procs::AppGroup>,
+    proc_entries_dirty: bool,
+    proc_cached_filter: String,
+    proc_cached_sort: SortCol,
+    proc_cached_desc: bool,
+    proc_cached_len: usize,
     /// pid of the selected process row (None = none)
     selected_proc: Option<u32>,
     /// icon name of the app group currently expanded in the table (None = none)
@@ -317,6 +324,7 @@ impl Gui {
             selected_agent: None,
             agent_filter: String::new(),
             hw: None,
+            disk_usage: Vec::new(),
             hw_cpu_hist: VecDeque::new(),
             hw_mem_hist: VecDeque::new(),
             hw_swap_hist: VecDeque::new(),
@@ -342,6 +350,12 @@ impl Gui {
             proc_filter: String::new(),
             proc_sort: SortCol::Mem,
             proc_sort_desc: true,
+            proc_entries: Vec::new(),
+            proc_entries_dirty: true,
+            proc_cached_filter: String::new(),
+            proc_cached_sort: SortCol::Mem,
+            proc_cached_desc: true,
+            proc_cached_len: 0,
             selected_proc: None,
             proc_group: None,
             icons: TexCache::new(),
@@ -360,6 +374,37 @@ impl Gui {
             strata_metrics: None,
             strata_error: None,
             strata_show_all: false,
+        }
+    }
+
+    fn ensure_proc_entries(&mut self) {
+        if self.proc_entries_dirty
+            || (self.proc_entries.is_empty() && !self.procs.is_empty())
+            || self.proc_cached_filter != self.proc_filter
+            || self.proc_cached_sort != self.proc_sort
+            || self.proc_cached_desc != self.proc_sort_desc
+            || self.proc_cached_len != self.procs.len()
+        {
+            let f = self.proc_filter.to_lowercase();
+            let rows: Vec<ProcInfo> = self
+                .procs
+                .iter()
+                .filter(|r| {
+                    f.is_empty()
+                        || r.name.to_lowercase().contains(&f)
+                        || r.cmdline.to_lowercase().contains(&f)
+                        || r.user.to_lowercase().contains(&f)
+                        || r.cwd.to_lowercase().contains(&f)
+                        || r.pid.to_string() == f
+                })
+                .cloned()
+                .collect();
+            self.proc_entries = procsmod::group_rows(&rows, self.proc_sort, self.proc_sort_desc);
+            self.proc_cached_filter = self.proc_filter.clone();
+            self.proc_cached_sort = self.proc_sort;
+            self.proc_cached_desc = self.proc_sort_desc;
+            self.proc_cached_len = self.procs.len();
+            self.proc_entries_dirty = false;
         }
     }
 
@@ -587,6 +632,7 @@ struct SysKamlingApp {
     /// container ids with a live log-follow task feeding the consolidated page
     all_logs_follow: Vec<String>,
     // --- chrome ---
+    last_interaction: Instant,
     /// last successful container/image/volume refresh
     last_sync: Option<Instant>,
     /// status text currently shown as a toast, and when it appeared
@@ -600,6 +646,7 @@ struct SysKamlingApp {
     // --- hardware tab ---
     sampler: Sampler,
     last_hw_sample: Instant,
+    last_disk_usage: Instant,
     // --- ports tab ---
     last_port_scan: Instant,
     port_scan_busy: Arc<Mutex<bool>>,
@@ -670,6 +717,7 @@ impl SysKamlingApp {
             streaming_stats: Vec::new(),
             stats_spawned: HashMap::new(),
             all_logs_follow: Vec::new(),
+            last_interaction: Instant::now(),
             last_sync: None,
             toast: (String::new(), Instant::now()),
             last_agent_scan: Instant::now() - Duration::from_secs(999),
@@ -677,6 +725,7 @@ impl SysKamlingApp {
             agent_scanner: Arc::new(Mutex::new(AgentScanner::default())),
             sampler: Sampler::default(),
             last_hw_sample: Instant::now() - Duration::from_secs(999),
+            last_disk_usage: Instant::now() - Duration::from_secs(999),
             last_port_scan: Instant::now() - Duration::from_secs(999),
             port_scan_busy: Arc::new(Mutex::new(false)),
             proc_holder: Arc::new(Mutex::new(ProcScanner::new())),
@@ -725,6 +774,7 @@ impl SysKamlingApp {
             streaming_stats: Vec::new(),
             stats_spawned: HashMap::new(),
             all_logs_follow: Vec::new(),
+            last_interaction: Instant::now(),
             last_sync: None,
             toast: (String::new(), Instant::now()),
             last_agent_scan: Instant::now() - Duration::from_secs(999),
@@ -732,6 +782,7 @@ impl SysKamlingApp {
             agent_scanner: Arc::new(Mutex::new(AgentScanner::default())),
             sampler: Sampler::default(),
             last_hw_sample: Instant::now() - Duration::from_secs(999),
+            last_disk_usage: Instant::now() - Duration::from_secs(999),
             last_port_scan: Instant::now() - Duration::from_secs(999),
             port_scan_busy: Arc::new(Mutex::new(false)),
             proc_holder: Arc::new(Mutex::new(ProcScanner::new())),
@@ -1034,15 +1085,22 @@ impl eframe::App for SysKamlingApp {
             }
             ctx.request_repaint();
         }
-        // A frame that lands between ticks must still schedule the next
-        // one, or the loop goes idle until the mouse moves.
-        ctx.request_repaint_after(Duration::from_millis(250));
+        if ctx.input(|i| {
+            !i.raw.events.is_empty()
+                || i.pointer.is_moving()
+                || i.pointer.button_down(egui::PointerButton::Primary)
+        }) {
+            self.last_interaction = Instant::now();
+        }
 
-        // Animation bookkeeping: ease status dots toward their target,
-        // expire the spin, and schedule fast repaints while anything moves.
+        // Animation & interaction bookkeeping: keep frames at ~60 fps while
+        // interacting or animating; drop to low power (~4 fps) only when idle.
         let animating = self.advance_animations();
-        if animating {
-            ctx.request_repaint_after(Duration::from_millis(33));
+        let interacting = self.last_interaction.elapsed() < Duration::from_millis(600);
+        if animating || interacting {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        } else {
+            ctx.request_repaint_after(Duration::from_millis(250));
         }
 
         // A changed status line becomes a fresh toast.
@@ -1560,6 +1618,7 @@ impl SysKamlingApp {
             }
             Msg::ProcsScanned(rows) => {
                 g.procs = rows;
+                g.proc_entries_dirty = true;
                 // keep the selection pointing at the same process
                 if let Some(pid) = g.selected_proc {
                     if !g.procs.iter().any(|r| r.pid == pid) {
@@ -1775,6 +1834,7 @@ impl SysKamlingApp {
         if let Some(t) = new_tab {
             if t != self.gui.tab {
                 self.on_tab_change(t);
+                ctx.request_repaint();
             }
         }
         if refresh_now {
@@ -1790,6 +1850,7 @@ impl SysKamlingApp {
     /// stream; opening the dashboard (re)starts stats streams.
     fn on_tab_change(&mut self, t: Tab) {
         self.gui.tab = t;
+        self.last_interaction = Instant::now();
         // the poller gates on the visible tab; a forced pull means the
         // Strata page (and the dashboard's Strata card) is never blank on arrival
         if matches!(t, Tab::Strata | Tab::Dashboard) {
@@ -2377,21 +2438,19 @@ impl SysKamlingApp {
     fn proc_search(&mut self, ui: &mut Ui) {
         let n_all = self.gui.procs.len();
         let hint = "Search name, command, user, pid or cwd — click a column header to sort";
+        let prev = self.gui.proc_filter.clone();
         search_box(ui, &mut self.gui.proc_filter, hint);
+        if self.gui.proc_filter != prev {
+            self.gui.proc_entries_dirty = true;
+            ui.ctx().request_repaint();
+        }
+        self.gui.ensure_proc_entries();
         let n = self
             .gui
-            .procs
+            .proc_entries
             .iter()
-            .filter(|r| {
-                let f = self.gui.proc_filter.to_lowercase();
-                f.is_empty()
-                    || r.name.to_lowercase().contains(&f)
-                    || r.cmdline.to_lowercase().contains(&f)
-                    || r.user.to_lowercase().contains(&f)
-                    || r.cwd.to_lowercase().contains(&f)
-                    || r.pid.to_string() == f
-            })
-            .count();
+            .map(|e| e.members.len())
+            .sum::<usize>();
         if !self.gui.proc_filter.is_empty() {
             ui.label(
                 RichText::new(format!("{n} of {n_all} processes match"))
@@ -2420,34 +2479,11 @@ impl SysKamlingApp {
         let mem_w = 92.0;
         let name_w = (w - icon_w - user_w - pid_w - cpu_w - mem_w - 30.0).max(80.0);
 
-        // ---- filter first, then group ----
-        let f = self.gui.proc_filter.to_lowercase();
-        let rows: Vec<ProcInfo> = self
-            .gui
-            .procs
-            .iter()
-            .filter(|r| {
-                f.is_empty()
-                    || r.name.to_lowercase().contains(&f)
-                    || r.cmdline.to_lowercase().contains(&f)
-                    || r.user.to_lowercase().contains(&f)
-                    || r.cwd.to_lowercase().contains(&f)
-                    || r.pid.to_string() == f
-            })
-            .cloned()
-            .collect();
-        if rows.is_empty() {
+        self.gui.ensure_proc_entries();
+        if self.gui.proc_entries.is_empty() {
             empty_state(ui, "No process matches", "Try another search.");
             return;
         }
-
-        // ---- app groups ----
-        // a process belongs to an app when its desktop icon name resolves;
-        // everything else (kernel threads, daemons, bare binaries) stays a
-        // row of its own. The table shows one row per app, and clicking the
-        // row expands it to the processes behind it. The grouping itself is
-        // shared with the TUI (procs::group_rows).
-        let entries = procsmod::group_rows(&rows, self.gui.proc_sort, self.gui.proc_sort_desc);
 
         // ---- header ----
         let (hr, _) = ui.allocate_exact_size(Vec2::new(w, 24.0), Sense::hover());
@@ -2550,9 +2586,13 @@ impl SysKamlingApp {
                 // text columns read best ascending, numbers descending
                 self.gui.proc_sort_desc = !matches!(col, SortCol::Name | SortCol::Pid);
             }
+            self.gui.proc_entries_dirty = true;
+            self.gui.ensure_proc_entries();
+            ui.ctx().request_repaint();
         }
 
         // ---- rows ----
+        let entries = &self.gui.proc_entries;
         let sel = self.gui.selected_proc;
         let mut new_sel: Option<Option<u32>> = None;
         let mut new_expand: Option<Option<String>> = None;
@@ -2560,7 +2600,7 @@ impl SysKamlingApp {
         ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                for e in &entries {
+                for e in entries {
                     // a resolved desktop icon means "this is an app": even a
                     // one-process app is a group row, so clicking it still
                     // reveals its process(es)
@@ -3010,8 +3050,13 @@ impl SysKamlingApp {
                     Tab::Volumes => self.volume_detail(ui),
                     Tab::Agents => self.agent_detail(ui),
                     Tab::Hardware => {
-                        let usage = hwinv::disk_usage();
-                        self.hardware_view(ui, &hwinv::INVENTORY, &usage)
+                        if self.gui.disk_usage.is_empty()
+                            || self.last_disk_usage.elapsed() >= Duration::from_secs(5)
+                        {
+                            self.last_disk_usage = Instant::now();
+                            self.gui.disk_usage = hwinv::disk_usage();
+                        }
+                        self.hardware_view(ui, &hwinv::INVENTORY, &self.gui.disk_usage)
                     }
                     Tab::Ports => self.port_detail(ui),
                     Tab::Processes => {
@@ -4505,7 +4550,7 @@ impl SysKamlingApp {
     // Hardware tab: host vitals, Task-Manager style
     // ------------------------------------------------------------------
 
-    fn hardware_view(&mut self, ui: &mut Ui, inv: &hwinv::Inventory, usage: &[hwinv::DiskUsage]) {
+    fn hardware_view(&self, ui: &mut Ui, inv: &hwinv::Inventory, usage: &[hwinv::DiskUsage]) {
         let Some(s) = self.gui.hw.clone() else {
             empty_state(
                 ui,
@@ -7786,6 +7831,7 @@ fn nav_item(
     #[cfg(test)]
     NAV_ROW_RECTS.lock().unwrap().push((tab, rect));
     let hovered = resp.hovered();
+    let down = resp.is_pointer_button_down_on();
     if hovered {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
@@ -7800,6 +7846,8 @@ fn nav_item(
             2.0,
             ACCENT,
         );
+    } else if down {
+        p.rect_filled(rect, 9.0, ACCENT.gamma_multiply(0.20));
     } else if hovered {
         p.rect_filled(rect, 9.0, SURFACE_HI);
     }
@@ -7846,7 +7894,11 @@ fn nav_item(
         );
         p.galley(br.center() - galley.size() / 2.0, galley, MUTED);
     }
-    resp.clicked()
+    let clicked = resp.clicked();
+    if clicked {
+        ui.ctx().request_repaint();
+    }
+    clicked
 }
 
 /// Line icons drawn with the painter, so they're crisp at any scale and
